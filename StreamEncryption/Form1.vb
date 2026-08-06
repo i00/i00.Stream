@@ -5,12 +5,12 @@ Imports i00CodeLib
 
 
 Public Class Form1
-    Dim Key As Byte() = Encryption.General.DeriveMasterKey(
+    Dim Key As Byte() = Streams.General.DeriveMasterKey(
             "MySecretPassword",
             Encoding.UTF8.GetBytes("Test"),
             10000)
 
-    Dim Options As New Encryption.EncryptedStreamOptions() With {.CompressionMethod = Encryption.CompressionMethod.Lz4}
+    Dim Options As New Streams.ChunkedStream.ChunkedStreamOptions() With {.CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4}
 
 
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
@@ -119,7 +119,7 @@ Public Class Form1
                     Dim StartTime = DateTime.UtcNow
                     Dim FileLength = InputFs.Length
 
-                    Using Enc = Encryption.EncryptedStream.Open(EncStorage,
+                    Using Enc = Streams.ChunkedStream.Open(EncStorage,
                                                                 Key,
                                                                 Options)
 
@@ -258,7 +258,7 @@ Public Class Form1
 
                 Dim DecryptStartTime = DateTime.UtcNow
 
-                Using Enc = Encryption.EncryptedStream.Open(EncStorage,
+                Using Enc = Streams.ChunkedStream.Open(EncStorage,
                                                             Key,
                                                             Options)
 
@@ -329,11 +329,27 @@ Public Class Form1
                     Panel1.BackgroundImageLayout = ImageLayout.Stretch
                     Panel1.BackgroundImage = Enc.GenerateFragmentationBitmap(Panel1.Width, 1)
 
-                    Dim ReclaimedBytes = Enc.Defragment(, Sub(BytesProcessed, TotalBytes, CancellationToken)
-                                                              Dim Progress = If(TotalBytes = 0, 1.0R, BytesProcessed / CDbl(TotalBytes))
-                                                              ProgressReport.SetText($"Defragmenting ({Progress:P0})...")
-                                                              ProgressReport.SetProgress(CLng(Progress * 100), 100)
-                                                          End Sub)
+                    Dim pnlDefrag As Panel = Nothing
+                    ProgressReport.frmProgress.Invoke(
+                        Sub()
+                            pnlDefrag = New Panel
+                            pnlDefrag.Bounds = New Rectangle(ProgressReport.frmProgress.nbProgress.Left,
+                                                       ProgressReport.frmProgress.nbProgress.Bottom,
+                                                       ProgressReport.frmProgress.nbProgress.Width,
+                                                       ProgressReport.frmProgress.nbProgress.Height)
+                            ProgressReport.frmProgress.Controls.Add(pnlDefrag)
+                        End Sub)
+
+                    Dim ReclaimedBytes = Enc.Defragment(,
+                                                        Sub(ProcessedUnits, TotalUnits, UnitType, CancellationToken)
+                                                            Dim Progress = If(TotalUnits = 0, 1.0R, ProcessedUnits / CDbl(TotalUnits))
+                                                            ProgressReport.SetText($"Defragmenting ({Progress:P0})...")
+                                                            ProgressReport.SetProgress(CLng(Progress * 100), 100)
+
+                                                            pnlDefrag.BackgroundImage = Enc.GenerateFragmentationBitmap(pnlDefrag.ClientSize.Width, 1)
+                                                            'System.Threading.Thread.Sleep(10)
+                                                            'ProgressReport.frmProgress.
+                                                        End Sub)
 
                     Panel1.BackgroundImageLayout = ImageLayout.Stretch
                     Panel2.BackgroundImage = Enc.GenerateFragmentationBitmap(Panel2.Width, 1)
@@ -435,7 +451,7 @@ Public Class Form1
         Using Ms As New MemoryStream()
 
             ' Encrypt
-            Using EncFs = Encryption.EncryptedStream.Open(Ms, Key, Options)
+            Using EncFs = Streams.ChunkedStream.Open(Ms, Key, Options)
 
                 EncFs.Write(0, Data)
 
@@ -464,7 +480,7 @@ Public Class Form1
                                              FileAccess.ReadWrite,
                                              FileShare.None)
 
-                Using EncFs = Encryption.EncryptedStream.Open(OutputFs, Key, Options)
+                Using EncFs = Streams.ChunkedStream.Open(OutputFs, Key, Options)
 
                     Dim Buffer(65535) As Byte
 
@@ -512,7 +528,7 @@ Public Class Form1
                                         FileAccess.Read,
                                         FileShare.Read)
 
-            Using EncFs = Encryption.EncryptedStream.Open(InputFs, Key, Options)
+            Using EncFs = Streams.ChunkedStream.Open(InputFs, Key, Options)
 
                 Using OutputFs As New FileStream(DecryptedFile,
                                                  FileMode.Create,

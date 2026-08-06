@@ -1,83 +1,171 @@
-﻿Imports System.IO
+﻿Imports System
+Imports System.Collections.Generic
+Imports System.Drawing
+Imports System.IO
 Imports System.IO.Compression
+Imports System.Linq
 Imports System.Security.Cryptography
 Imports System.Text
 
-Namespace Encryption
+Namespace Streams
 
     ' ================================================================================
-    ' EncryptedStream
+    ' ChunkedStream
     ' ================================================================================
     '
-    ' Compatibility:
-    '   - Designed for .NET Framework 4.8.
-    '   - No Span(Of T), ArrayPool(Of T), RandomNumberGenerator.Fill, or newer runtime APIs.
-    '   - Uses Byte() buffers and System.Buffer.BlockCopy.
-    '   - Uses Rfc2898DeriveBytes with SHA256.
-    '   - The underlying stream passed to Open() remains owned by the caller and is not disposed.
+    ' Compatibility
+    '   - Designed for .NET Framework 4.8+.
+    '   - Uses only APIs available in .NET Framework 4.8.
+    '   - The underlying stream remains owned by the caller.
+    '     i.e Disposing ChunkedStream does not dispose the underlying stream.
     '
-    ' Header model:
-    '   - Two 512-byte header copies are stored at the beginning of the stream.
-    '   - Header 0 is at offset 0.
-    '   - Header 1 is at offset 512.
-    '   - Data records begin at offset 1024.
-    '   - On open, both headers are validated and the valid header with the highest sequence wins.
-    '   - This protects against process death during a header write.
+    ' Overview
+    '   - Random-access encrypted storage.
+    '   - Append-only chunk updates.
+    '   - Per-chunk authentication.
+    '   - Optional per-chunk compression.
+    '   - Sparse chunk support.
+    '   - Defragmentation and crash recovery support.
     '
-    ' Header:
-    '   Bytes 0..7:
-    '       Magic value: "ESTRM001"
+    ' File Layout
     '
-    '   Bytes 8..15:
-    '       Header sequence number as Int64
+    '   +---------------------------+
+    '   | Header A           512 B  |
+    '   +---------------------------+
+    '   | Header B           512 B  |
+    '   +---------------------------+
+    '   | Chunk Records             |
+    '   | Chunk Records             |
+    '   | Chunk Records             |
+    '   +---------------------------+
+    '   | Chunk Index Table         |
+    '   +---------------------------+
     '
-    '   Bytes 16..23:
-    '       Flags as Int64
+    '   DataStartOffset = 1024
     '
-    '   Bytes 24..31:
-    '       Plaintext file length as Int64
+    ' Header Strategy
+    '   - Header A and Header B are written alternately.
+    '   - Each header has its own sequence number and HMAC.
+    '   - Open() validates both headers and selects the valid header with the highest
+    '     sequence number.
+    '   - This protects against process termination during a header write.
     '
-    '   Bytes 32..47:
-    '       Per-file random salt used to derive the encryption and MAC keys
+    ' Header Layout (512 bytes)
     '
-    '   Bytes 48..51:
-    '       Chunk size as Int32
+    '   Offset  Size    Description
+    '   0       8       Magic ("ESTRM001")
+    '   8       8       Header Sequence Number
+    '   16      8       Flags
+    '   24      8       Logical Plaintext File Length
+    '   32      16      File Salt
+    '   48      4       Chunk Size
+    '   52      8       Index Offset
+    '   60      8       Index Entry Count
+    '   68      32      Index HMAC-SHA256
     '
-    '   Bytes 52..59:
-    '       Chunk index table offset as Int64
+    '   100     64      Defrag Recovery Journal
     '
-    '   Bytes 60..67:
-    '       Chunk index table entry count as Int64
+    '   164     316     Reserved For Future Use
     '
-    '   Bytes 68..99:
-    '       HMAC-SHA256 of the current index table entries
+    '   480     32      Header HMAC-SHA256
     '
-    '   Bytes 128..191:
-    '       Defrag journal
+    ' Header HMAC covers bytes:
+    '   0..479
     '
-    '   Bytes 480..511:
-    '       Header HMAC-SHA256 over bytes 0..479
+    ' Chunk Index Entry Layout (16 bytes)
     '
-    ' Features:
-    '   - Random access read/write.
-    '   - Variable-sized encrypted chunk records.
-    '   - Authenticated header, index and chunk records.
-    '   - Optional per-chunk LZ4, Deflate or GZip compression.
-    '   - Sparse chunks can be omitted from storage.
-    '   - Append-on-write chunk updates.
-    '   - Defrag with Move, Sequence and Rebuild modes.
-    '   - Defrag journal recovery during Open().
-    '   - Thread-safe per instance using SyncLock.
+    '   Offset      Size      Description
+    '   0           8         Chunk Record Offset
+    '   8           4         Chunk Record Length
+    '   12          4         Reserved
     '
-    ' Crash recovery:
+    '   The index entry position determines the logical chunk number.
+    '
+    '   Empty index entry:
+    '     Offset = 0
+    '     Length = 0
+    '
+    '   means:
+    '     Sparse / unallocated / removed chunk.
+    '
+    ' Chunk Record Layout
+    '
+    '   Offset      Size      Description
+    '   0           8         Chunk Index
+    '   8           4         Compression Method
+    '   12          4         Plain Length
+    '   16          4         Payload Length
+    '   20          12        Reserved
+    '
+    '   32          16        IV / Counter Start
+    '   48          N         Encrypted Payload
+    '   48 + N      32        Chunk HMAC-SHA256
+    '
+    '   Chunk HMAC covers:
+    '     Record header + IV + encrypted payload
+    '
+    ' Compression Methods
+    '   0 = None
+    '   1 = LZ4
+    '   2 = Deflate
+    '   3 = GZip
+    '
+    ' Encryption
+    '   - AES-CTR style stream encryption implemented using AES-ECB counter blocks.
+    '   - Separate encryption and MAC keys are derived from the master key and file salt.
+    '
+    ' Authentication
+    '   - Header is authenticated with HMAC-SHA256.
+    '   - Index table is authenticated with HMAC-SHA256.
+    '   - Every chunk record is authenticated with HMAC-SHA256.
+    '
+    ' Sparse Chunks
+    '   - If StoreSparseChunks is False, all-zero chunks are represented by empty index
+    '     entries and no physical chunk record is stored.
+    '   - Reads from sparse chunks return zero-filled data.
+    '
+    ' Defragmentation
+    '   - Move:
+    '       Fills holes using chunk records from later in the file where possible.
+    '
+    '   - Sequence:
+    '       Reorders live chunk records into logical chunk order.
+    '
+    '   - Rebuild:
+    '       Rewrites all live chunks using current compression and sparse settings.
+    '
+    ' Defrag Recovery
     '   - Defrag moves are journaled one chunk at a time.
-    '   - If the process is killed during a move, Open() recovers or rolls back that one move.
-    '   - Old chunk records are not erased during moves; they simply become unreferenced.
+    '   - If the application terminates during a move, Open() automatically completes or
+    '     rolls back the interrupted move.
+    '   - Old chunk records are not erased during moves; they simply become unreferenced
+    '     until compaction removes them.
+    '
+    ' Fragmentation Visualisation
+    '   - GenerateFragmentationBitmap() maps the encrypted stream left-to-right, then
+    '     top-to-bottom.
+    '   - Green = live chunk records.
+    '   - Red = unreferenced / fragmented space.
+    '   - Blue = current index table.
+    '   - Black = unused area.
+    '
+    ' Thread Safety
+    '   - Public operations are protected by SyncLock.
+    '   - One ChunkedStream instance is thread-safe.
+    '   - Multiple ChunkedStream instances against the same backing stream/file are not
+    '     coordinated and should be avoided unless externally synchronised.
     '
     ' ================================================================================
 
     Friend Class General
 
+        ''' <summary>
+        ''' Derives a 256-bit master key from a passphrase using PBKDF2-SHA256.
+        ''' </summary>
+        ''' <param name="Passphrase">The passphrase to derive from.</param>
+        ''' <param name="Salt">The salt. If shorter than eight bytes, it is padded for PBKDF2 compatibility.</param>
+        ''' <param name="Iterations">The PBKDF2 iteration count.</param>
+        ''' <returns>A 32-byte master key.</returns>
         Public Shared Function DeriveMasterKey(Passphrase As String,
                                                Salt As Byte(),
                                                Iterations As Integer) As Byte()
@@ -106,35 +194,112 @@ Namespace Encryption
 
     End Class
 
-    Friend Enum CompressionMethod As Integer
-        None = 0
-        Lz4 = 1
-        Deflate = 2
-        GZip = 3
-    End Enum
-
-    Friend Enum DefragType
-        Move = 0
-        Sequence = 1
-        Rebuild = 2
-    End Enum
-
-    Friend NotInheritable Class CancellationToken
-        Public Property Cancel As Boolean
-    End Class
-
-    Friend Delegate Sub StreamProgressCallback(BytesProcessed As Long,
-                                               TotalBytes As Long,
-                                               CancellationToken As CancellationToken)
-
-    Friend Class EncryptedStreamOptions
-        Public Property CompressionMethod As CompressionMethod = CompressionMethod.None
-        Public Property CompressionMinimumSavingsPercent As Integer = 5
-        Public Property StoreSparseChunks As Boolean = False
-    End Class
-
-    Friend NotInheritable Class EncryptedStream
+    Friend NotInheritable Class ChunkedStream
         Implements IDisposable
+
+        ''' <summary>
+        ''' Physical storage optimisation strategy used by Defragment.
+        ''' </summary>
+        Friend Enum DefragTypes
+
+            ''' <summary>
+            ''' Fast compaction mode. Moves later chunk records into earlier holes where they fit.
+            ''' </summary>
+            Move = 0
+
+            ''' <summary>
+            ''' Reorders live chunk records into logical chunk order.
+            ''' </summary>
+            Sequence = 1
+
+            ''' <summary>
+            ''' Fully rewrites all live chunk records using the current compression and sparse settings.
+            ''' </summary>
+            Rebuild = 2
+
+        End Enum
+
+        ''' <summary>
+        ''' Cancellation token used by progress callbacks.
+        ''' </summary>
+        Friend NotInheritable Class CancellationToken
+
+            ''' <summary>
+            ''' Set to True from the callback to request cancellation.
+            ''' </summary>
+            Public Property Cancel As Boolean
+
+        End Class
+
+        Public Enum ProcessUnitTypes
+            Bytes
+            Chunks
+            Arbitrary
+        End Enum
+
+        ''' <summary>
+        ''' Some changes may only affect newly written chunks.
+        ''' In this case existing chunk records retain their original
+        ''' compression/sparse representation etc until rewritten.
+        ''' </summary>
+        Friend Class ChunkedStreamOptions
+
+            ''' <summary>
+            ''' Compression algorithm applied to individual chunk records.
+            ''' </summary>
+            Friend Enum CompressionMethods As Integer
+
+                ''' <summary>
+                ''' Store the chunk payload uncompressed.
+                ''' </summary>
+                None = 0
+
+                ''' <summary>
+                ''' Store the chunk payload using LZ4 block compression.
+                ''' </summary>
+                Lz4 = 1
+
+                ''' <summary>
+                ''' Store the chunk payload using Deflate compression.
+                ''' </summary>
+                Deflate = 2
+
+                ''' <summary>
+                ''' Store the chunk payload using GZip compression.
+                ''' </summary>
+                GZip = 3
+
+            End Enum
+
+            ''' <summary>
+            ''' Compression method used for newly written chunks.
+            ''' </summary>
+            Public Property CompressionMethod As CompressionMethods = CompressionMethods.None
+
+            ''' <summary>
+            ''' Minimum percentage saving required before a compressed chunk is stored compressed.
+            ''' </summary>
+            Public Property CompressionMinimumSavingsPercent As Integer = 5
+
+            ''' <summary>
+            ''' If True, all-zero chunks are stored as physical authenticated chunk records.
+            ''' If False, all-zero chunks are represented by sparse index entries.
+            ''' </summary>
+            Public Property StoreSparseChunks As Boolean = False
+
+        End Class
+
+        ''' <summary>
+        ''' Reports progress for long-running ChunkedStream operations.
+        ''' </summary>
+        ''' <param name="ProcessedUnits">The current progress value.</param>
+        ''' <param name="TotalUnits">The maximum progress value.</param>
+        ''' <param name="UnitType">What the units used for progress represent.</param>
+        ''' <param name="CancellationToken">Token that may be set to request cancellation.</param>
+        Friend Delegate Sub StreamProgressCallback(ProcessedUnits As Long,
+                                                   TotalUnits As Long,
+                                                   UnitType As ProcessUnitTypes,
+                                                   CancellationToken As CancellationToken)
 
         Public Const ChunkSize As Integer = 64 * 1024
         Public Const IvSize As Integer = 16
@@ -156,14 +321,14 @@ Namespace Encryption
         Private Const IndexCountOffset As Integer = 60
         Private Const IndexMacOffset As Integer = 68
 
-        Private Const JournalStateOffset As Integer = 128
-        Private Const JournalChunkIndexOffset As Integer = 136
-        Private Const JournalOldOffsetOffset As Integer = 144
-        Private Const JournalOldLengthOffset As Integer = 152
-        Private Const JournalNewOffsetOffset As Integer = 160
-        Private Const JournalNewLengthOffset As Integer = 168
+        Private Const JournalStateOffset As Integer = 100
+        Private Const JournalChunkIndexOffset As Integer = 108
+        Private Const JournalOldOffsetOffset As Integer = 116
+        Private Const JournalOldLengthOffset As Integer = 124
+        Private Const JournalNewOffsetOffset As Integer = 132
+        Private Const JournalNewLengthOffset As Integer = 140
 
-        Private Const JournalAreaOffset As Integer = 128
+        Private Const JournalAreaOffset As Integer = 100
         Private Const JournalAreaLength As Integer = 64
 
         Private Const HeaderMacOffset As Integer = 480
@@ -210,11 +375,19 @@ Namespace Encryption
             Public Length As Long
         End Structure
 
+        Private Structure HeaderCandidate
+            Public Header As Byte()
+            Public HeaderSequence As Long
+            Public EncryptionKey As Byte()
+            Public MacKey As Byte()
+            Public HeaderCopyIndex As Integer
+        End Structure
+
         Private ReadOnly _Fs As Stream
         Private ReadOnly _EncryptionKey As Byte()
         Private ReadOnly _MacKey As Byte()
         Private ReadOnly _SyncRoot As New Object()
-        Private ReadOnly _Options As EncryptedStreamOptions
+        Public ReadOnly Options As ChunkedStreamOptions
 
         Private ReadOnly _Header As Byte()
         Private ReadOnly _Index As List(Of ChunkIndexEntry)
@@ -230,10 +403,14 @@ Namespace Encryption
 
         Private _HeaderFlags As HeaderFlags
         Private _HeaderSequence As Long
+        Private _ActiveHeaderCopy As Integer
         Private _IndexOffset As Long
         Private _Length As Long
         Private _Disposed As Boolean
 
+        ''' <summary>
+        ''' Gets the logical plaintext length of the encrypted stream.
+        ''' </summary>
         Public ReadOnly Property Length As Long
             Get
                 SyncLock _SyncRoot
@@ -246,27 +423,29 @@ Namespace Encryption
         Private Sub New(Fs As Stream,
                         Header As Byte(),
                         HeaderSequence As Long,
+                        ActiveHeaderCopy As Integer,
                         EncryptionKey As Byte(),
                         MacKey As Byte(),
                         Length As Long,
                         IndexOffset As Long,
                         Index As List(Of ChunkIndexEntry),
                         HeaderFlags As HeaderFlags,
-                        Options As EncryptedStreamOptions)
+                        Options As ChunkedStreamOptions)
 
             _Fs = Fs
             _Header = Header
             _HeaderSequence = HeaderSequence
+            _ActiveHeaderCopy = ActiveHeaderCopy
             _EncryptionKey = EncryptionKey
             _MacKey = MacKey
             _Length = Length
             _IndexOffset = IndexOffset
             _Index = Index
             _HeaderFlags = HeaderFlags
-            _Options = If(Options, New EncryptedStreamOptions())
+            Me.Options = If(Options, New ChunkedStreamOptions())
 
-            If _Options.CompressionMinimumSavingsPercent < 0 Then _Options.CompressionMinimumSavingsPercent = 0
-            If _Options.CompressionMinimumSavingsPercent > 100 Then _Options.CompressionMinimumSavingsPercent = 100
+            If Me.Options.CompressionMinimumSavingsPercent < 0 Then Me.Options.CompressionMinimumSavingsPercent = 0
+            If Me.Options.CompressionMinimumSavingsPercent > 100 Then Me.Options.CompressionMinimumSavingsPercent = 100
 
             _ChunkPlain = New Byte(ChunkSize - 1) {}
             _Counter = New Byte(IvSize - 1) {}
@@ -283,13 +462,26 @@ Namespace Encryption
 
         End Sub
 
-        Public Shared Function Open(Fs As Stream, MasterKey As Byte()) As EncryptedStream
+        ''' <summary>
+        ''' Opens an existing encrypted stream or creates a new encrypted stream if the backing stream is empty.
+        ''' </summary>
+        ''' <param name="Fs">Backing storage stream. The caller owns the stream lifetime.</param>
+        ''' <param name="MasterKey">Master encryption key.</param>
+        ''' <returns>An opened ChunkedStream.</returns>
+        Public Shared Function Open(Fs As Stream, MasterKey As Byte()) As ChunkedStream
             Return Open(Fs, MasterKey, Nothing)
         End Function
 
+        ''' <summary>
+        ''' Opens an existing encrypted stream or creates a new encrypted stream if the backing stream is empty.
+        ''' </summary>
+        ''' <param name="Fs">Backing storage stream. The caller owns the stream lifetime.</param>
+        ''' <param name="MasterKey">Master encryption key.</param>
+        ''' <param name="Options">Options controlling newly written chunks.</param>
+        ''' <returns>An opened ChunkedStream.</returns>
         Public Shared Function Open(Fs As Stream,
                                     MasterKey As Byte(),
-                                    Options As EncryptedStreamOptions) As EncryptedStream
+                                    Optional Options As ChunkedStreamOptions = Nothing) As ChunkedStream
 
             If Fs Is Nothing Then Throw New ArgumentNullException(NameOf(Fs))
             If MasterKey Is Nothing Then Throw New ArgumentNullException(NameOf(MasterKey))
@@ -306,6 +498,7 @@ Namespace Encryption
 
             Dim Header = Candidate.Header
             Dim HeaderSequence = Candidate.HeaderSequence
+            Dim ActiveHeaderCopy = Candidate.HeaderCopyIndex
             Dim EncryptionKey = Candidate.EncryptionKey
             Dim MacKey = Candidate.MacKey
 
@@ -340,7 +533,7 @@ Namespace Encryption
                 Throw New CryptographicException("Encrypted stream index MAC invalid.")
             End If
 
-            Dim Result = New EncryptedStream(Fs, Header, HeaderSequence, EncryptionKey, MacKey, FileLength, IndexOffset, Index, Flags, Options)
+            Dim Result = New ChunkedStream(Fs, Header, HeaderSequence, ActiveHeaderCopy, EncryptionKey, MacKey, FileLength, IndexOffset, Index, Flags, Options)
             Result.RecoverDefragJournal()
             Return Result
 
@@ -348,10 +541,10 @@ Namespace Encryption
 
         Private Shared Function CreateNew(Fs As Stream,
                                           MasterKey As Byte(),
-                                          Options As EncryptedStreamOptions) As EncryptedStream
+                                          Options As ChunkedStreamOptions) As ChunkedStream
 
             Dim Header(HeaderSize - 1) As Byte
-            Dim EffectiveOptions = If(Options, New EncryptedStreamOptions())
+            Dim EffectiveOptions = If(Options, New ChunkedStreamOptions())
             Dim Flags = HeaderFlags.VariableChunkIndex
 
             If Not EffectiveOptions.StoreSparseChunks Then
@@ -359,11 +552,11 @@ Namespace Encryption
             End If
 
             Select Case EffectiveOptions.CompressionMethod
-                Case CompressionMethod.Lz4
+                Case ChunkedStreamOptions.CompressionMethods.Lz4
                     Flags = Flags Or HeaderFlags.CompressionLz4
-                Case CompressionMethod.Deflate
+                Case ChunkedStreamOptions.CompressionMethods.Deflate
                     Flags = Flags Or HeaderFlags.CompressionDeflate
-                Case CompressionMethod.GZip
+                Case ChunkedStreamOptions.CompressionMethods.GZip
                     Flags = Flags Or HeaderFlags.CompressionGZip
             End Select
 
@@ -380,8 +573,8 @@ Namespace Encryption
             Dim FileSalt(FileSaltSize - 1) As Byte
             System.Buffer.BlockCopy(Header, FileSaltOffset, FileSalt, 0, FileSalt.Length)
 
-            Dim EncryptionKey = DeriveKey(MasterKey, FileSalt, "ENC")
-            Dim MacKey = DeriveKey(MasterKey, FileSalt, "MAC")
+            Dim EncryptionKey = DeriveKey(MasterKey, FileSalt, KeyPurpose.Enc)
+            Dim MacKey = DeriveKey(MasterKey, FileSalt, KeyPurpose.Mac)
             Dim Index As New List(Of ChunkIndexEntry)()
 
             Dim IndexMac = ComputeIndexMac(Index, MacKey)
@@ -396,16 +589,9 @@ Namespace Encryption
             Fs.SetLength(DataStartOffset)
             FlushDurable(Fs)
 
-            Return New EncryptedStream(Fs, Header, 1L, EncryptionKey, MacKey, 0L, DataStartOffset, Index, Flags, EffectiveOptions)
+            Return New ChunkedStream(Fs, Header, 1L, 0, EncryptionKey, MacKey, 0L, DataStartOffset, Index, Flags, EffectiveOptions)
 
         End Function
-
-        Private Structure HeaderCandidate
-            Public Header As Byte()
-            Public HeaderSequence As Long
-            Public EncryptionKey As Byte()
-            Public MacKey As Byte()
-        End Structure
 
         Private Shared Function ReadBestHeader(Fs As Stream, MasterKey As Byte()) As HeaderCandidate
 
@@ -425,8 +611,8 @@ Namespace Encryption
                 Dim FileSalt(FileSaltSize - 1) As Byte
                 System.Buffer.BlockCopy(Header, FileSaltOffset, FileSalt, 0, FileSalt.Length)
 
-                Dim EncryptionKey = DeriveKey(MasterKey, FileSalt, "ENC")
-                Dim MacKey = DeriveKey(MasterKey, FileSalt, "MAC")
+                Dim EncryptionKey = DeriveKey(MasterKey, FileSalt, KeyPurpose.Enc)
+                Dim MacKey = DeriveKey(MasterKey, FileSalt, KeyPurpose.Mac)
 
                 If Not VerifyHeaderMac(Header, MacKey) Then
                     Continue For
@@ -439,6 +625,7 @@ Namespace Encryption
                     Best.HeaderSequence = HeaderSequence
                     Best.EncryptionKey = EncryptionKey
                     Best.MacKey = MacKey
+                    Best.HeaderCopyIndex = HeaderCopyIndex
                 End If
             Next
 
@@ -446,6 +633,12 @@ Namespace Encryption
 
         End Function
 
+        ''' <summary>
+        ''' Reads decrypted plaintext from the logical stream at the specified offset.
+        ''' </summary>
+        ''' <param name="Offset">Logical plaintext offset.</param>
+        ''' <param name="Output">Output buffer.</param>
+        ''' <returns>The number of bytes read.</returns>
         Public Function Read(Offset As Long, Output As Byte()) As Integer
 
             SyncLock _SyncRoot
@@ -477,6 +670,12 @@ Namespace Encryption
 
         End Function
 
+        ''' <summary>
+        ''' Writes plaintext data at the specified logical offset.
+        ''' </summary>
+        ''' <param name="Offset">Logical plaintext offset.</param>
+        ''' <param name="Input">Plaintext bytes to write.</param>
+        ''' <returns>The number of bytes written.</returns>
         Public Function Write(Offset As Long, Input As Byte()) As Integer
 
             SyncLock _SyncRoot
@@ -522,6 +721,10 @@ Namespace Encryption
 
         End Function
 
+        ''' <summary>
+        ''' Changes the logical plaintext length of the encrypted stream.
+        ''' </summary>
+        ''' <param name="Length">New logical plaintext length.</param>
         Public Sub SetLength(Length As Long)
 
             SyncLock _SyncRoot
@@ -558,6 +761,9 @@ Namespace Encryption
 
         End Sub
 
+        ''' <summary>
+        ''' Flushes pending changes to the backing stream.
+        ''' </summary>
         Public Sub Flush()
 
             SyncLock _SyncRoot
@@ -567,6 +773,9 @@ Namespace Encryption
 
         End Sub
 
+        ''' <summary>
+        ''' Releases resources owned by the ChunkedStream. The underlying stream is not disposed.
+        ''' </summary>
         Public Sub Dispose() Implements IDisposable.Dispose
 
             SyncLock _SyncRoot
@@ -586,6 +795,10 @@ Namespace Encryption
 
         End Sub
 
+        ''' <summary>
+        ''' Returns fragmentation as a value between 0 and 1.
+        ''' </summary>
+        ''' <returns>0 means no fragmentation. 1 means fully fragmented.</returns>
         Public Function GetFragmentation() As Double
 
             SyncLock _SyncRoot
@@ -611,27 +824,29 @@ Namespace Encryption
         End Function
 
         ''' <summary>
-        ''' Throws an exception if validation fails.
+        ''' Validates all live chunk records.
         ''' </summary>
-        ''' <exception cref="InvalidDataException">
-        ''' Thrown when stream contents are invalid.
-        ''' </exception>
+        ''' <param name="ProgressCallback">Optional progress callback.</param>
+        ''' <exception cref="InvalidDataException">Thrown when stream contents are invalid.</exception>
+        ''' <exception cref="CryptographicException">Thrown when authentication fails.</exception>
         Public Sub Validate(Optional ProgressCallback As StreamProgressCallback = Nothing)
 
             SyncLock _SyncRoot
-
                 ThrowIfDisposed()
 
                 Dim CancellationToken As New CancellationToken()
 
-                ValidateAllLiveChunkRecords(
-                    ProgressCallback,
-                    CancellationToken)
-
+                ValidateAllLiveChunkRecords(ProgressCallback, CancellationToken)
             End SyncLock
 
         End Sub
 
+        ''' <summary>
+        ''' Generates a bitmap visualisation of the physical storage layout.
+        ''' </summary>
+        ''' <param name="Width">Bitmap width.</param>
+        ''' <param name="Height">Bitmap height.</param>
+        ''' <returns>A bitmap showing live data, fragmented space and the index table.</returns>
         Public Function GenerateFragmentationBitmap(Width As Integer,
                                                     Height As Integer) As Bitmap
 
@@ -639,37 +854,25 @@ Namespace Encryption
 
                 ThrowIfDisposed()
 
-                If Width <= 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(Width))
-                End If
+                If Width <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Width))
+                If Height <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Height))
 
-                If Height <= 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(Height))
-                End If
-
-                Dim Result As New Bitmap(
-                    Width,
-                    Height,
-                    Imaging.PixelFormat.Format24bppRgb)
-
-                Using Graphics = System.Drawing.Graphics.FromImage(Result)
-
-                    Graphics.Clear(Color.Black)
-
-                End Using
+                Dim Result As New Bitmap(Width,
+                                         Height,
+                                         Imaging.PixelFormat.Format24bppRgb)
 
                 Dim DataEnd = GetDataEndFromIndex()
 
                 If DataEnd <= DataStartOffset Then
+
+                    Using Graphics = System.Drawing.Graphics.FromImage(Result)
+                        Graphics.Clear(Color.Black)
+                    End Using
+
                     Return Result
+
                 End If
 
-                Dim TotalPixels = Width * Height
-                Dim TotalBytes = DataEnd
-
-                '
-                ' Build segment list.
-                '
                 Dim Segments As New List(Of Tuple(Of Long,
                                                   Long,
                                                   Color))
@@ -710,22 +913,19 @@ Namespace Encryption
 
                 End If
 
-                '
-                ' Sort by position.
-                '
                 Segments.Sort(
                     Function(left, right)
                         Return left.Item1.CompareTo(right.Item1)
                     End Function)
 
                 '
-                ' Fill gaps (dead space).
+                ' Insert dead-space segments.
                 '
                 Dim RenderSegments As New List(Of Tuple(Of Long,
                                                         Long,
                                                         Color))
 
-                Dim Cursor As Long = DataStartOffset
+                Dim Cursor = CLng(DataStartOffset)
 
                 For Each Segment In Segments
 
@@ -759,58 +959,97 @@ Namespace Encryption
                 End If
 
                 '
-                ' Draw.
+                ' Black background.
                 '
-                For Each Segment In RenderSegments
+                Dim BitmapData =
+                    Result.LockBits(
+                        New Rectangle(0, 0, Width, Height),
+                        Imaging.ImageLockMode.WriteOnly,
+                        Imaging.PixelFormat.Format24bppRgb)
 
-                    Dim StartPixel =
-                        CInt(
-                            Math.Floor(
-                                (Segment.Item1 / CDbl(TotalBytes)) *
-                                TotalPixels))
+                Try
 
-                    Dim EndPixel =
-                        CInt(
-                            Math.Ceiling(
-                                (Segment.Item2 / CDbl(TotalBytes)) *
-                                TotalPixels))
+                    Dim Stride = BitmapData.Stride
+                    Dim Buffer(Math.Abs(Stride) * Height - 1) As Byte
 
-                    If EndPixel <= StartPixel Then
-                        EndPixel = StartPixel + 1
-                    End If
+                    '
+                    ' Buffer is already zero-initialised, giving us a black background.
+                    '
 
-                    If EndPixel > TotalPixels Then
-                        EndPixel = TotalPixels
-                    End If
+                    Dim TotalPixels = Width * Height
+                    Dim TotalBytes = CDbl(DataEnd)
 
-                    For PixelIndex = StartPixel To EndPixel - 1
+                    For Each Segment In RenderSegments
 
-                        Dim X = PixelIndex Mod Width
-                        Dim Y = PixelIndex \ Width
+                        Dim StartPixel =
+                            CInt(
+                                Math.Floor(
+                                    (Segment.Item1 / TotalBytes) *
+                                    TotalPixels))
 
-                        If X >= 0 AndAlso
-                           X < Width AndAlso
-                           Y >= 0 AndAlso
-                           Y < Height Then
+                        Dim EndPixel =
+                            CInt(
+                                Math.Ceiling(
+                                    (Segment.Item2 / TotalBytes) *
+                                    TotalPixels))
 
-                            Result.SetPixel(
-                                X,
-                                Y,
-                                Segment.Item3)
-
+                        If EndPixel <= StartPixel Then
+                            EndPixel = StartPixel + 1
                         End If
+
+                        If EndPixel > TotalPixels Then
+                            EndPixel = TotalPixels
+                        End If
+
+                        Dim Colour = Segment.Item3
+
+                        Dim Blue = Colour.B
+                        Dim Green = Colour.G
+                        Dim Red = Colour.R
+
+                        For PixelIndex = StartPixel To EndPixel - 1
+
+                            Dim X = PixelIndex Mod Width
+                            Dim Y = PixelIndex \ Width
+
+                            If Y >= Height Then Exit For
+
+                            Dim BufferOffset =
+                                (Y * Stride) +
+                                (X * 3)
+
+                            Buffer(BufferOffset) = Blue
+                            Buffer(BufferOffset + 1) = Green
+                            Buffer(BufferOffset + 2) = Red
+
+                        Next
 
                     Next
 
-                Next
+                    Runtime.InteropServices.Marshal.Copy(
+                        Buffer,
+                        0,
+                        BitmapData.Scan0,
+                        Buffer.Length)
+
+                Finally
+
+                    Result.UnlockBits(BitmapData)
+
+                End Try
 
                 Return Result
 
             End SyncLock
 
         End Function
-
-        Public Function Defragment(Optional Type As DefragType = DefragType.Move,
+        ''' <summary>
+        ''' Defragments the physical storage layout.
+        ''' </summary>
+        ''' <param name="Type">Defragmentation strategy.</param>
+        ''' <param name="ProgressCallback">Optional progress callback. Set CancellationToken.Cancel to request cancellation.</param>
+        ''' <returns>Number of bytes reclaimed, or -1 if cancelled.</returns>
+        Public Function Defragment(Optional Type As DefragTypes = DefragTypes.Move,
                                    Optional ProgressCallback As StreamProgressCallback = Nothing) As Long
 
             SyncLock _SyncRoot
@@ -820,11 +1059,11 @@ Namespace Encryption
                 Dim CancellationToken As New CancellationToken()
 
                 Select Case Type
-                    Case DefragType.Move
+                    Case DefragTypes.Move
                         DefragmentMove(ProgressCallback, CancellationToken)
-                    Case DefragType.Sequence
+                    Case DefragTypes.Sequence
                         DefragmentSequence(False, ProgressCallback, CancellationToken)
-                    Case DefragType.Rebuild
+                    Case DefragTypes.Rebuild
                         DefragmentRebuild(ProgressCallback, CancellationToken)
                     Case Else
                         Throw New ArgumentOutOfRangeException(NameOf(Type))
@@ -923,7 +1162,6 @@ Namespace Encryption
             }
 
             PersistIndexAndHeader(GetDataEndFromIndex(), True)
-
             ClearDefragJournal()
 
         End Sub
@@ -1003,7 +1241,7 @@ Namespace Encryption
             If ChunkIndex < 0 OrElse ChunkIndex > Integer.MaxValue Then Throw New ArgumentOutOfRangeException(NameOf(ChunkIndex))
             If PlainLength < 0 OrElse PlainLength > ChunkSize Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
 
-            If PlainLength = 0 OrElse (Not _Options.StoreSparseChunks AndAlso IsAllZero(Plain, PlainLength)) Then
+            If PlainLength = 0 OrElse (Not Options.StoreSparseChunks AndAlso IsAllZero(Plain, PlainLength)) Then
                 EnsureIndexSize(CInt(ChunkIndex + 1))
                 _Index(CInt(ChunkIndex)) = New ChunkIndexEntry()
                 _HeaderFlags = _HeaderFlags Or HeaderFlags.SparseChunks
@@ -1012,15 +1250,15 @@ Namespace Encryption
 
             Dim Payload As Byte() = Plain
             Dim PayloadLength = PlainLength
-            Dim Method = CompressionMethod.None
+            Dim Method = ChunkedStreamOptions.CompressionMethods.None
 
-            If _Options.CompressionMethod <> CompressionMethod.None Then
-                Dim Compressed = CompressPayload(_Options.CompressionMethod, Plain, PlainLength)
+            If Options.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None Then
+                Dim Compressed = CompressPayload(Options.CompressionMethod, Plain, PlainLength)
 
                 If ShouldUseCompressed(PlainLength, Compressed.Length) Then
                     Payload = Compressed
                     PayloadLength = Compressed.Length
-                    Method = _Options.CompressionMethod
+                    Method = Options.CompressionMethod
                     MarkCompressionFlag(Method)
                 End If
             End If
@@ -1058,9 +1296,9 @@ Namespace Encryption
             If Record.Length < MinChunkRecordSize Then Throw New InvalidDataException("Encrypted chunk record is too small.")
 
             Dim ChunkIndex = BitConverter.ToInt64(Record, 0)
-            If ChunkIndex <> ExpectedChunkIndex Then Throw New CryptographicException($"Chunk index mismatch. Expected {ExpectedChunkIndex}, found {ChunkIndex}.")
+            If ChunkIndex <> ExpectedChunkIndex Then Throw New InvalidDataException($"Chunk index mismatch. Expected {ExpectedChunkIndex}, found {ChunkIndex}.")
 
-            Dim Method = CType(BitConverter.ToInt32(Record, 8), CompressionMethod)
+            Dim Method = CType(BitConverter.ToInt32(Record, 8), ChunkedStreamOptions.CompressionMethods)
             Dim PlainLength = BitConverter.ToInt32(Record, 12)
             Dim DataLength = BitConverter.ToInt32(Record, 16)
 
@@ -1109,139 +1347,75 @@ Namespace Encryption
 
         End Sub
 
-        Private Sub ValidateAllLiveChunkRecords(
-                    ProgressCallback As StreamProgressCallback,
-                    CancellationToken As CancellationToken)
+        Private Sub ValidateAllLiveChunkRecords(ProgressCallback As StreamProgressCallback,
+                                                CancellationToken As CancellationToken)
 
-            Dim TotalChunks =
-                        _Index.Count
-
+            Dim TotalChunks = _Index.Count
             Dim ProcessedChunks As Long = 0
 
             For ChunkIndex = 0 To _Index.Count - 1
-
-                If CancellationToken.Cancel Then
-                    Return
-                End If
+                If CancellationToken.Cancel Then Return
 
                 Dim Entry = _Index(ChunkIndex)
 
-                If Entry.Offset = 0 AndAlso
-                           Entry.RecordLength = 0 Then
+                If Entry.Offset = 0 AndAlso Entry.RecordLength = 0 Then Continue For
 
-                    Continue For
-
-                End If
-
-                ValidateChunkRecord(
-                            ChunkIndex)
+                ValidateChunkRecord(ChunkIndex)
 
                 ProcessedChunks += 1
 
-                ReportDefragProgress(
-                            ProgressCallback,
-                            ProcessedChunks,
-                            Math.Max(1, TotalChunks),
-                            CancellationToken)
-
+                ReportDefragProgress(ProgressCallback,
+                                      ProcessedChunks,
+                                      Math.Max(1, TotalChunks),
+                                      ProcessUnitTypes.Chunks,
+                                      CancellationToken)
             Next
 
         End Sub
 
         Private Sub ValidateChunkRecord(ExpectedChunkIndex As Integer)
 
-            If ExpectedChunkIndex < 0 OrElse
-               ExpectedChunkIndex >= _Index.Count Then
-
-                Throw New ArgumentOutOfRangeException(
-                    NameOf(ExpectedChunkIndex))
-
+            If ExpectedChunkIndex < 0 OrElse ExpectedChunkIndex >= _Index.Count Then
+                Throw New ArgumentOutOfRangeException(NameOf(ExpectedChunkIndex))
             End If
 
             Dim Entry = _Index(ExpectedChunkIndex)
 
-            If Entry.Offset = 0 AndAlso
-               Entry.RecordLength = 0 Then
+            If Entry.Offset = 0 AndAlso Entry.RecordLength = 0 Then Return
 
-                Return
-
-            End If
-
-            If Entry.Offset < DataStartOffset Then
-                Throw New InvalidDataException(
-                    $"Invalid chunk offset for chunk {ExpectedChunkIndex}.")
-            End If
-
-            If Entry.RecordLength < MinChunkRecordSize Then
-                Throw New InvalidDataException(
-                    $"Invalid chunk length for chunk {ExpectedChunkIndex}.")
-            End If
-
-            If Entry.Offset + Entry.RecordLength > _IndexOffset Then
-                Throw New InvalidDataException(
-                    $"Chunk {ExpectedChunkIndex} extends beyond data area.")
-            End If
+            If Entry.Offset < DataStartOffset Then Throw New InvalidDataException($"Invalid chunk offset for chunk {ExpectedChunkIndex}.")
+            If Entry.RecordLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid chunk length for chunk {ExpectedChunkIndex}.")
+            If Entry.Offset + Entry.RecordLength > _IndexOffset Then Throw New InvalidDataException($"Chunk {ExpectedChunkIndex} extends beyond data area.")
 
             Dim Record(Entry.RecordLength - 1) As Byte
 
             _Fs.Position = Entry.Offset
+            ReadExactly(_Fs, Record, 0, Record.Length)
 
-            ReadExactly(
-                _Fs,
-                Record,
-                0,
-                Record.Length)
-
-            Dim ChunkIndex =
-                BitConverter.ToInt64(
-                    Record,
-                    0)
+            Dim ChunkIndex = BitConverter.ToInt64(Record, 0)
 
             If ChunkIndex <> ExpectedChunkIndex Then
-
-                Throw New InvalidDataException(
-                    $"Chunk index mismatch. Expected {ExpectedChunkIndex}, found {ChunkIndex}.")
-
+                Throw New InvalidDataException($"Chunk index mismatch. Expected {ExpectedChunkIndex}, found {ChunkIndex}.")
             End If
 
-            Dim DataLength =
-                BitConverter.ToInt32(
-                    Record,
-                    16)
+            Dim DataLength = BitConverter.ToInt32(Record, 16)
 
-            If DataLength < 0 Then
+            If DataLength < 0 Then Throw New InvalidDataException("Invalid chunk data length.")
 
-                Throw New InvalidDataException(
-                    "Invalid chunk data length.")
-
-            End If
-
-            If ChunkRecordDataOffset +
-               DataLength +
-               MacSize <> Record.Length Then
-
-                Throw New InvalidDataException(
-                    "Invalid chunk record length.")
+            If ChunkRecordDataOffset + DataLength + MacSize <> Record.Length Then
+                Throw New InvalidDataException("Invalid chunk record length.")
             End If
 
             _ChunkHmac.Initialize()
 
-            Dim ExpectedMac =
-                _ChunkHmac.ComputeHash(
-                    Record,
-                    0,
-                    ChunkRecordDataOffset + DataLength)
+            Dim ExpectedMac = _ChunkHmac.ComputeHash(Record, 0, ChunkRecordDataOffset + DataLength)
 
-            If Not FixedTimeEquals(
-                ExpectedMac,
-                0,
-                Record,
-                ChunkRecordDataOffset + DataLength,
-                MacSize) Then
-
-                Throw New CryptographicException(
-                    $"Chunk MAC invalid for chunk {ExpectedChunkIndex}.")
-
+            If Not FixedTimeEquals(ExpectedMac,
+                                   0,
+                                   Record,
+                                   ChunkRecordDataOffset + DataLength,
+                                   MacSize) Then
+                Throw New CryptographicException($"Chunk MAC invalid for chunk {ExpectedChunkIndex}.")
             End If
 
         End Sub
@@ -1249,114 +1423,73 @@ Namespace Encryption
         Private Sub DefragmentMove(ProgressCallback As StreamProgressCallback,
                                    CancellationToken As CancellationToken)
 
-            Dim InitialFragmentation = GetFragmentation()
+            Const ProgressScale As Long = 1000000
 
-            Dim TotalProgressUnits =
-                Math.Max(1L,
-                         CLng(InitialFragmentation * 1000000.0R))
-
-            ReportDefragProgress(
-                ProgressCallback,
-                0,
-                TotalProgressUnits,
-                CancellationToken)
+            ReportDefragProgress(ProgressCallback, 0, ProgressScale, ProcessUnitTypes.Arbitrary, CancellationToken)
 
             Do
-
-                If CancellationToken.Cancel Then
-                    Return
-                End If
+                If CancellationToken.Cancel Then Return
 
                 Dim LiveEntries = GetLiveEntriesSortedByOffset()
                 Dim Holes = GetDeadHoles(LiveEntries)
 
-                If Holes.Count = 0 Then
-                    Exit Do
-                End If
+                If Holes.Count = 0 Then Exit Do
 
                 Dim MovedSomething = False
 
-                For Each Hole In Holes
+                'With the move operation the initial completed units are the chunks that are already "in place"
+                'So progress could start at 800000 / 1000000 ... which is not ideal...
+                'So instead we base the scale on 800000 -> 1000000 for ReportDefragProgress
+                Dim OrigFragmentation As Double?
 
-                    If CancellationToken.Cancel Then
-                        Return
-                    End If
+                For Each hole In Holes
+                    If CancellationToken.Cancel Then Return
 
-                    Dim CandidateIndex =
-                        FindLatestLiveEntryThatFitsHole(
-                            LiveEntries,
-                            Hole)
+                    Dim CandidateIndex = FindLatestLiveEntryThatFitsHole(LiveEntries, hole)
 
-                    If CandidateIndex < 0 Then
-                        Continue For
-                    End If
+                    If CandidateIndex < 0 Then Continue For
 
                     Dim Candidate = LiveEntries(CandidateIndex)
 
-                    MoveChunkRecordJournaled(
-                        Candidate.ChunkIndex,
-                        Hole.Offset)
-
+                    MoveChunkRecordJournaled(Candidate.ChunkIndex, hole.Offset)
                     MovedSomething = True
 
-                    Dim CurrentFragmentation =
-                        GetFragmentation()
-
-                    Dim CurrentUnits =
-                        CLng(CurrentFragmentation * 1000000.0R)
-
-                    Dim CompletedUnits =
-                        TotalProgressUnits - CurrentUnits
-
-                    If CompletedUnits < 0 Then
-                        CompletedUnits = 0
+                    Dim CurrentFragmentation = GetFragmentation()
+                    If OrigFragmentation.HasValue = False Then
+                        OrigFragmentation = CurrentFragmentation
                     End If
+                    Dim CompletedUnits = CLng(((OrigFragmentation - CurrentFragmentation) / OrigFragmentation) * ProgressScale)
 
-                    If CompletedUnits > TotalProgressUnits Then
-                        CompletedUnits = TotalProgressUnits
-                    End If
-
-                    ReportDefragProgress(
-                        ProgressCallback,
-                        CompletedUnits,
-                        TotalProgressUnits,
-                        CancellationToken)
+                    ReportDefragProgress(ProgressCallback,
+                                         CompletedUnits,
+                                         ProgressScale,
+                                         ProcessUnitTypes.Arbitrary,
+                                         CancellationToken)
 
                     Exit For
-
                 Next
 
-                If Not MovedSomething Then
-                    Exit Do
-                End If
-
+                If Not MovedSomething Then Exit Do
             Loop
 
             CommitDefragCheckpoint(GetDataEndFromIndex())
 
-            ReportDefragProgress(
-                ProgressCallback,
-                TotalProgressUnits,
-                TotalProgressUnits,
-                CancellationToken)
+            ReportDefragProgress(ProgressCallback,
+                                  ProgressScale,
+                                  ProgressScale,
+                                  ProcessUnitTypes.Arbitrary,
+                                  CancellationToken)
 
         End Sub
 
         Private Function FindLatestLiveEntryThatFitsHole(LiveEntries As List(Of DefragLiveEntry),
                                                          Hole As DefragHole) As Integer
 
-            For Index = LiveEntries.Count - 1 To 0 Step -1
+            For index = LiveEntries.Count - 1 To 0 Step -1
+                Dim Entry = LiveEntries(index)
 
-                Dim Entry = LiveEntries(Index)
-
-                If Entry.Offset <= Hole.Offset Then
-                    Exit For
-                End If
-
-                If Entry.RecordLength <= Hole.Length Then
-                    Return Index
-                End If
-
+                If Entry.Offset <= Hole.Offset Then Exit For
+                If Entry.RecordLength <= Hole.Length Then Return index
             Next
 
             Return -1
@@ -1389,7 +1522,7 @@ Namespace Encryption
                 End If
 
                 ProcessedBytes += Entry.RecordLength
-                ReportDefragProgress(ProgressCallback, ProcessedBytes, TotalBytes, CancellationToken)
+                ReportDefragProgress(ProgressCallback, ProcessedBytes, TotalBytes, ProcessUnitTypes.Bytes, CancellationToken)
 
                 TargetOffset += Entry.RecordLength
             Next
@@ -1422,7 +1555,7 @@ Namespace Encryption
                 PersistIndexAndHeader(_IndexOffset)
 
                 ProcessedBytes += Entry.RecordLength
-                ReportDefragProgress(ProgressCallback, ProcessedBytes, TotalBytes, CancellationToken)
+                ReportDefragProgress(ProgressCallback, ProcessedBytes, TotalBytes, ProcessUnitTypes.Bytes, CancellationToken)
             Next
 
             If CancellationToken.Cancel Then Return
@@ -1448,7 +1581,6 @@ Namespace Encryption
                 MoveChunkRecordJournaled(OverlapChunkIndex, AppendOffset)
 
                 Dim Entry = _Index(OverlapChunkIndex)
-                ReportDefragProgress(ProgressCallback, Entry.RecordLength, Entry.RecordLength, CancellationToken)
             End While
 
         End Sub
@@ -1495,9 +1627,7 @@ Namespace Encryption
 
         Private Sub CommitDefragCheckpoint(DataEnd As Long)
 
-            If DataEnd < DataStartOffset Then
-                Throw New InvalidDataException("Invalid defrag data end.")
-            End If
+            If DataEnd < DataStartOffset Then Throw New InvalidDataException("Invalid defrag data end.")
 
             PersistIndexAndHeader(DataEnd, True)
 
@@ -1510,17 +1640,9 @@ Namespace Encryption
             For ChunkIndex = 0 To _Index.Count - 1
                 Dim Entry = _Index(ChunkIndex)
 
-                If Entry.Offset = 0 AndAlso Entry.RecordLength = 0 Then
-                    Continue For
-                End If
-
-                If Entry.Offset < DataStartOffset Then
-                    Throw New InvalidDataException($"Invalid chunk offset for chunk {ChunkIndex}.")
-                End If
-
-                If Entry.RecordLength < MinChunkRecordSize Then
-                    Throw New InvalidDataException($"Invalid chunk record length for chunk {ChunkIndex}.")
-                End If
+                If Entry.Offset = 0 AndAlso Entry.RecordLength = 0 Then Continue For
+                If Entry.Offset < DataStartOffset Then Throw New InvalidDataException($"Invalid chunk offset for chunk {ChunkIndex}.")
+                If Entry.RecordLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid chunk record length for chunk {ChunkIndex}.")
 
                 Result.Add(New DefragLiveEntry With {
                     .ChunkIndex = ChunkIndex,
@@ -1556,13 +1678,14 @@ Namespace Encryption
         End Function
 
         Private Sub ReportDefragProgress(ProgressCallback As StreamProgressCallback,
-                                         BytesProcessed As Long,
-                                         TotalBytes As Long,
+                                         ProcessedUnits As Long,
+                                         TotalUnits As Long,
+                                         UnitType As ProcessUnitTypes,
                                          CancellationToken As CancellationToken)
 
             If ProgressCallback Is Nothing Then Return
 
-            ProgressCallback(BytesProcessed, TotalBytes, CancellationToken)
+            ProgressCallback(ProcessedUnits, TotalUnits, UnitType, CancellationToken)
 
         End Sub
 
@@ -1572,32 +1695,32 @@ Namespace Encryption
             If CompressedLength <= 0 OrElse CompressedLength >= PlainLength Then Return False
 
             Dim SavedPercent = ((PlainLength - CompressedLength) * 100.0R) / PlainLength
-            Return SavedPercent >= _Options.CompressionMinimumSavingsPercent
+            Return SavedPercent >= Options.CompressionMinimumSavingsPercent
 
         End Function
 
-        Private Sub MarkCompressionFlag(Method As CompressionMethod)
+        Private Sub MarkCompressionFlag(Method As ChunkedStreamOptions.CompressionMethods)
 
             Select Case Method
-                Case CompressionMethod.Lz4
+                Case ChunkedStreamOptions.CompressionMethods.Lz4
                     _HeaderFlags = _HeaderFlags Or HeaderFlags.CompressionLz4
-                Case CompressionMethod.Deflate
+                Case ChunkedStreamOptions.CompressionMethods.Deflate
                     _HeaderFlags = _HeaderFlags Or HeaderFlags.CompressionDeflate
-                Case CompressionMethod.GZip
+                Case ChunkedStreamOptions.CompressionMethods.GZip
                     _HeaderFlags = _HeaderFlags Or HeaderFlags.CompressionGZip
             End Select
 
         End Sub
 
-        Private Shared Function CompressPayload(Method As CompressionMethod, Input As Byte(), Count As Integer) As Byte()
+        Private Shared Function CompressPayload(Method As ChunkedStreamOptions.CompressionMethods, Input As Byte(), Count As Integer) As Byte()
 
             Select Case Method
-                Case CompressionMethod.Lz4
+                Case ChunkedStreamOptions.CompressionMethods.Lz4
                     Return Lz4Block.Compress(Input, 0, Count)
-                Case CompressionMethod.Deflate
-                    Return CompressWithFrameworkStream(Input, Count, CompressionMethod.Deflate)
-                Case CompressionMethod.GZip
-                    Return CompressWithFrameworkStream(Input, Count, CompressionMethod.GZip)
+                Case ChunkedStreamOptions.CompressionMethods.Deflate
+                    Return CompressWithFrameworkStream(Input, Count, ChunkedStreamOptions.CompressionMethods.Deflate)
+                Case ChunkedStreamOptions.CompressionMethods.GZip
+                    Return CompressWithFrameworkStream(Input, Count, ChunkedStreamOptions.CompressionMethods.GZip)
                 Case Else
                     Dim Output(Count - 1) As Byte
                     System.Buffer.BlockCopy(Input, 0, Output, 0, Count)
@@ -1606,28 +1729,28 @@ Namespace Encryption
 
         End Function
 
-        Private Shared Function DecompressPayload(Method As CompressionMethod, Input As Byte(), ExpectedLength As Integer) As Byte()
+        Private Shared Function DecompressPayload(Method As ChunkedStreamOptions.CompressionMethods, Input As Byte(), ExpectedLength As Integer) As Byte()
 
             Select Case Method
-                Case CompressionMethod.None
+                Case ChunkedStreamOptions.CompressionMethods.None
                     If Input.Length <> ExpectedLength Then Throw New InvalidDataException("Uncompressed data length does not match expected plain length.")
                     Return Input
-                Case CompressionMethod.Lz4
+                Case ChunkedStreamOptions.CompressionMethods.Lz4
                     Return Lz4Block.Decompress(Input, ExpectedLength)
-                Case CompressionMethod.Deflate
-                    Return DecompressWithFrameworkStream(Input, ExpectedLength, CompressionMethod.Deflate)
-                Case CompressionMethod.GZip
-                    Return DecompressWithFrameworkStream(Input, ExpectedLength, CompressionMethod.GZip)
+                Case ChunkedStreamOptions.CompressionMethods.Deflate
+                    Return DecompressWithFrameworkStream(Input, ExpectedLength, ChunkedStreamOptions.CompressionMethods.Deflate)
+                Case ChunkedStreamOptions.CompressionMethods.GZip
+                    Return DecompressWithFrameworkStream(Input, ExpectedLength, ChunkedStreamOptions.CompressionMethods.GZip)
                 Case Else
                     Throw New InvalidDataException($"Unsupported chunk compression method: {CInt(Method)}.")
             End Select
 
         End Function
 
-        Private Shared Function CompressWithFrameworkStream(Input As Byte(), Count As Integer, Method As CompressionMethod) As Byte()
+        Private Shared Function CompressWithFrameworkStream(Input As Byte(), Count As Integer, Method As ChunkedStreamOptions.CompressionMethods) As Byte()
 
             Using Output As New MemoryStream()
-                If Method = CompressionMethod.GZip Then
+                If Method = ChunkedStreamOptions.CompressionMethods.GZip Then
                     Using Compressor As New GZipStream(Output, CompressionLevel.Fastest, True)
                         Compressor.Write(Input, 0, Count)
                     End Using
@@ -1642,7 +1765,7 @@ Namespace Encryption
 
         End Function
 
-        Private Shared Function DecompressWithFrameworkStream(Input As Byte(), ExpectedLength As Integer, Method As CompressionMethod) As Byte()
+        Private Shared Function DecompressWithFrameworkStream(Input As Byte(), ExpectedLength As Integer, Method As ChunkedStreamOptions.CompressionMethods) As Byte()
 
             If ExpectedLength = 0 Then
                 If Input.Length <> 0 Then Throw New InvalidDataException("Compressed data exists for zero-length output.")
@@ -1652,7 +1775,7 @@ Namespace Encryption
             Dim Output(ExpectedLength - 1) As Byte
 
             Using InputMs As New MemoryStream(Input)
-                If Method = CompressionMethod.GZip Then
+                If Method = ChunkedStreamOptions.CompressionMethods.GZip Then
                     Using Decompressor As New GZipStream(InputMs, CompressionMode.Decompress)
                         ReadExactlyFromDecompressor(Decompressor, Output, ExpectedLength)
                     End Using
@@ -1732,9 +1855,7 @@ Namespace Encryption
         Private Sub PersistIndexAndHeader(IndexOffset As Long,
                                           Optional Durable As Boolean = False)
 
-            If IndexOffset < DataStartOffset Then
-                Throw New InvalidDataException("Invalid index offset.")
-            End If
+            If IndexOffset < DataStartOffset Then Throw New InvalidDataException("Invalid index offset.")
 
             _IndexOffset = IndexOffset
 
@@ -1753,17 +1874,13 @@ Namespace Encryption
                 _Fs.Write(EntryBuffer, 0, EntryBuffer.Length)
             Next
 
-            If Durable Then
-                FlushDurable(_Fs)
-            End If
+            If Durable Then FlushDurable(_Fs)
 
             UpdateHeader(Durable)
 
             _Fs.SetLength(NewLength)
 
-            If Durable Then
-                FlushDurable(_Fs)
-            End If
+            If Durable Then FlushDurable(_Fs)
 
         End Sub
 
@@ -1771,7 +1888,7 @@ Namespace Encryption
 
             _HeaderFlags = _HeaderFlags Or HeaderFlags.VariableChunkIndex
 
-            If Not _Options.StoreSparseChunks Then
+            If Not Options.StoreSparseChunks Then
                 _HeaderFlags = _HeaderFlags Or HeaderFlags.SparseChunks
             End If
 
@@ -1795,10 +1912,11 @@ Namespace Encryption
 
             WriteHeaderMac(_Header, _MacKey)
 
-            _Fs.Position = 0
-            _Fs.Write(_Header, 0, _Header.Length)
+            _ActiveHeaderCopy = (_ActiveHeaderCopy + 1) Mod HeaderCopyCount
 
-            _Fs.Position = HeaderSize
+            Dim HeaderOffset = _ActiveHeaderCopy * HeaderSize
+
+            _Fs.Position = HeaderOffset
             _Fs.Write(_Header, 0, _Header.Length)
 
             If Durable Then FlushDurable(_Fs)
@@ -1865,7 +1983,7 @@ Namespace Encryption
 
         Private Sub ThrowIfDisposed()
 
-            If _Disposed Then Throw New ObjectDisposedException(GetType(EncryptedStream).FullName)
+            If _Disposed Then Throw New ObjectDisposedException(GetType(ChunkedStream).FullName)
 
         End Sub
 
@@ -1879,9 +1997,14 @@ Namespace Encryption
 
         End Sub
 
-        Private Shared Function DeriveKey(MasterKey As Byte(), FileSalt As Byte(), Purpose As String) As Byte()
+        Private Enum KeyPurpose
+            Mac
+            Enc
+        End Enum
 
-            Dim PurposeBytes = Encoding.ASCII.GetBytes(Purpose)
+        Private Shared Function DeriveKey(MasterKey As Byte(), FileSalt As Byte(), Purpose As KeyPurpose) As Byte()
+
+            Dim PurposeBytes = Encoding.ASCII.GetBytes(Purpose.ToString())
             Dim Material(PurposeBytes.Length + FileSalt.Length - 1) As Byte
 
             System.Buffer.BlockCopy(PurposeBytes, 0, Material, 0, PurposeBytes.Length)

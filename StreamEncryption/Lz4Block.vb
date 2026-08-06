@@ -2,7 +2,7 @@
 Imports System.Collections.Generic
 Imports System.IO
 
-Namespace Encryption
+Namespace Streams
 
     Friend NotInheritable Class Lz4Block
 
