@@ -1,7 +1,7 @@
 ﻿Imports System.Runtime.CompilerServices
 Imports System.Runtime.InteropServices
 
-Public Module Extensions
+Partial Module Extensions
 
     Public Class FragmentationDrawOptions
 

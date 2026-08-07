@@ -77,10 +77,10 @@ Namespace Streams
                         AssertBytesEqual(Data, Result, $"Compressed round-trip failed for compression method {CompressionMethod}.")
 
                         Dim Struct = Cs.GetStructure()
-                        Dim CompressionPercent = (Struct.PhysicalPayloadBytes / CDbl(Data.Length)) * 100.0R
+                        Dim CompressionPercent = Struct.PayloadCompressionRatio
 
-                        If CompressionPercent >= 10.0R Then
-                            Throw New Exception($"Compression method {CompressionMethod} did not compress ideal input below 10%. Actual={CompressionPercent:0.00}%.")
+                        If CompressionPercent >= 0.1R Then
+                            Throw New Exception($"Compression method {CompressionMethod} did not compress ideal input below 10%. Actual={CompressionPercent:P2}.")
                         End If
 
                         If Not Struct.Chunks.Any(Function(chunk) chunk.IsAllocated AndAlso chunk.IsCompressed) Then
