@@ -8,6 +8,64 @@ Namespace Tests
         Public NotInheritable Class Core
 
             ''' <summary>
+            ''' Verifies that physically stored all-zero chunks are stored correctly.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub SparseChunksStreamStorageCheck()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .StoreSparseChunks = True
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Data = MakeBuffer(ChunkedStream.ChunkSize)
+
+                        Cs.Write(0, Data)
+
+                        Dim Struct = Cs.GetStructure()
+                        Dim Chunk = Struct.Chunks.First()
+
+                        AssertEqual(Chunk.PayloadLength, ChunkedStream.ChunkSize, $"Empty chunk with {NameOf(ChunkedStream.ChunkedStreamOptions.StoreSparseChunks)} set should be {ChunkedStream.ChunkSize} bytes.")
+                        AssertTrue(Chunk.IsAllocated, "Expected stored zero chunk to be allocated.")
+                        AssertTrue(Chunk.IsPlaintextAllZero, "Stored zero chunk did not expose PlaintextAllZero.")
+                        AssertTrue((Chunk.ChunkFlags And ChunkedStream.ChunkFlags.PlaintextAllZero) = ChunkedStream.ChunkFlags.PlaintextAllZero,
+                                   "PlaintextAllZero flag was not set.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that sparse chunks are stored correctly.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub SparseChunksCheck()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.SetLength(ChunkedStream.ChunkSize)
+
+                        Dim Struct = Cs.GetStructure()
+                        Dim Chunk = Struct.Chunks.First()
+
+                        AssertEqual(Chunk.PayloadLength, 0, "Sparse chunk size should be 0.")
+                        AssertTrue(Chunk.IsSparse, "Expected chunk to be sparse.")
+                        AssertTrue(Chunk.IsPlaintextAllZero, "Sparse chunk did not expose PlaintextAllZero.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
             ''' Verifies that plaintext data can be written and read back at several offsets and lengths.
             ''' </summary>
             <UnitTester.SimpleTest({0, 0}, True)>

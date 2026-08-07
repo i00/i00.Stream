@@ -111,7 +111,8 @@
 '   12      4       Encryption Method
 '   16      4       Plain Length
 '   20      4       Payload Length
-'   24      8       Reserved
+'   24      4       Chunk Flags
+'   28      4       Reserved
 '
 '   32      16      IV / Counter Start
 '   48      N       Payload
@@ -475,6 +476,8 @@ Namespace Streams
         Private Const ChunkEncryptionMethodOffset As Integer = 12
         Private Const ChunkPlainLengthOffset As Integer = 16
         Private Const ChunkPayloadLengthOffset As Integer = 20
+        Private Const ChunkFlagsOffset As Integer = 24
+        Private Const ChunkReservedOffset As Integer = 28
 
         Private Shared ReadOnly HeaderMagic As Byte() = Encoding.ASCII.GetBytes("ESTRM001")
         Private Shared ReadOnly PublicIntegrityKey As Byte() = Encoding.UTF8.GetBytes("ChunkedStream Public Integrity Key v1")
@@ -545,6 +548,26 @@ Namespace Streams
         Private _IndexOffset As Long
         Private _Length As Long
         Private _Disposed As Boolean
+
+        ''' <summary>
+        ''' Flags stored in an individual physical chunk record.
+        ''' </summary>
+        <Flags>
+        Public Enum ChunkFlags As Integer
+
+            ''' <summary>
+            ''' No chunk flags are set.
+            ''' </summary>
+            None = 0
+
+            ''' <summary>
+            ''' The logical plaintext represented by the chunk is entirely zero bytes.
+            ''' </summary>
+            PlaintextAllZero = 1
+
+        End Enum
+
+        Private Const SupportedChunkFlags As ChunkFlags = ChunkFlags.PlaintextAllZero
 
         ''' <summary>
         ''' Gets the logical plaintext length of the stream.

@@ -30,7 +30,9 @@ Namespace Streams
             If ChunkIndex < 0 OrElse ChunkIndex > Integer.MaxValue Then Throw New ArgumentOutOfRangeException(NameOf(ChunkIndex))
             If PlainLength < 0 OrElse PlainLength > ChunkSize Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
 
-            If PlainLength = 0 OrElse (Not Options.StoreSparseChunks AndAlso IsAllZero(Plain, PlainLength)) Then
+            Dim PlaintextAllZero = PlainLength = 0 OrElse IsAllZero(Plain, PlainLength)
+
+            If PlainLength = 0 OrElse (Not Options.StoreSparseChunks AndAlso PlaintextAllZero) Then
 
                 EnsureIndexSize(CInt(ChunkIndex + 1))
                 _Index(CInt(ChunkIndex)) = New ChunkIndexEntry()
@@ -62,6 +64,12 @@ Namespace Streams
                    ChunkEncryptionMethods.AesCtrFileMasterKey,
                    ChunkEncryptionMethods.None)
 
+            Dim Flags = ChunkFlags.None
+
+            If PlaintextAllZero Then
+                Flags = Flags Or ChunkFlags.PlaintextAllZero
+            End If
+
             Dim RecordLength = ChunkRecordDataOffset + PayloadLength + MacSize
             Dim Record(RecordLength - 1) As Byte
 
@@ -70,6 +78,7 @@ Namespace Streams
             System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(EncryptionMethod)), 0, Record, ChunkEncryptionMethodOffset, 4)
             System.Buffer.BlockCopy(BitConverter.GetBytes(PlainLength), 0, Record, ChunkPlainLengthOffset, 4)
             System.Buffer.BlockCopy(BitConverter.GetBytes(PayloadLength), 0, Record, ChunkPayloadLengthOffset, 4)
+            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(Flags)), 0, Record, ChunkFlagsOffset, 4)
 
             _Rng.GetBytes(_Counter)
             System.Buffer.BlockCopy(_Counter, 0, Record, ChunkRecordIvOffset, IvSize)

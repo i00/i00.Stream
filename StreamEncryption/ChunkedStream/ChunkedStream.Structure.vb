@@ -71,6 +71,7 @@ Namespace Streams
             Public CompressionMethod As ChunkedStreamOptions.CompressionMethods
             Public EncryptionMethod As ChunkEncryptionMethods
             Public PayloadLength As Integer
+            Public ChunkFlags As ChunkFlags
         End Structure
 
         Private Structure ChunkHeaderSnapshot
@@ -78,12 +79,9 @@ Namespace Streams
             Public EncryptionMethod As ChunkEncryptionMethods
             Public PlainLength As Integer
             Public PayloadLength As Integer
+            Public ChunkFlags As ChunkFlags
         End Structure
 
-        ''' <summary>
-        ''' Returns an immutable snapshot of the current physical and logical stream structure.
-        ''' </summary>
-        ''' <returns>A read-only ChunkedStreamStructure snapshot.</returns>
         Public Function GetStructure() As ChunkedStreamStructure
 
             SyncLock _SyncRoot
@@ -142,7 +140,8 @@ Namespace Streams
                             .PhysicalLength = Entry.RecordLength,
                             .CompressionMethod = Header.CompressionMethod,
                             .EncryptionMethod = Header.EncryptionMethod,
-                            .PayloadLength = Header.PayloadLength
+                            .PayloadLength = Header.PayloadLength,
+                            .ChunkFlags = Header.ChunkFlags
                         })
 
                     Else
@@ -159,7 +158,8 @@ Namespace Streams
                             .PhysicalLength = 0,
                             .CompressionMethod = ChunkedStreamOptions.CompressionMethods.None,
                             .EncryptionMethod = ChunkEncryptionMethods.None,
-                            .PayloadLength = 0
+                            .PayloadLength = 0,
+                            .ChunkFlags = ChunkFlags.PlaintextAllZero
                         })
 
                     End If
@@ -263,6 +263,7 @@ Namespace Streams
                         CompressionMethod:=BuildInfo.CompressionMethod,
                         EncryptionMethod:=BuildInfo.EncryptionMethod,
                         PayloadLength:=BuildInfo.PayloadLength,
+                        ChunkFlags:=BuildInfo.ChunkFlags,
                         PreviousPhysicalGap:=PreviousPhysicalGap,
                         NextPhysicalGap:=NextPhysicalGap,
                         IsPhysicallyContiguousWithPrevious:=BuildInfo.IsAllocated AndAlso ContiguousWithPreviousByChunkIndex(BuildInfo.Index),
@@ -387,6 +388,7 @@ Namespace Streams
 
             Dim PlainLength = BitConverter.ToInt32(Header, ChunkPlainLengthOffset)
             Dim PayloadLength = BitConverter.ToInt32(Header, ChunkPayloadLengthOffset)
+            Dim Flags = CType(BitConverter.ToInt32(Header, ChunkFlagsOffset), ChunkFlags)
 
             If PlainLength < 0 OrElse PlainLength > ChunkSize Then
                 Throw New InvalidDataException($"Invalid plain length for chunk {ExpectedChunkIndex}.")
@@ -400,11 +402,16 @@ Namespace Streams
                 Throw New InvalidDataException($"Invalid chunk record length for chunk {ExpectedChunkIndex}.")
             End If
 
+            If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then
+                Throw New InvalidDataException($"Unsupported chunk flags for chunk {ExpectedChunkIndex}: {CInt(Flags)}.")
+            End If
+
             Return New ChunkHeaderSnapshot With {
                 .CompressionMethod = CompressionMethod,
                 .EncryptionMethod = EncryptionMethod,
                 .PlainLength = PlainLength,
-                .PayloadLength = PayloadLength
+                .PayloadLength = PayloadLength,
+                .ChunkFlags = Flags
             }
 
         End Function
@@ -1001,6 +1008,7 @@ Namespace Streams
                            CompressionMethod As ChunkedStream.ChunkedStreamOptions.CompressionMethods,
                            EncryptionMethod As ChunkedStream.ChunkEncryptionMethods,
                            PayloadLength As Integer,
+                           ChunkFlags As ChunkedStream.ChunkFlags,
                            PreviousPhysicalGap As Long?,
                            NextPhysicalGap As Long?,
                            IsPhysicallyContiguousWithPrevious As Boolean,
@@ -1020,6 +1028,7 @@ Namespace Streams
                 Me.CompressionMethod = CompressionMethod
                 Me.EncryptionMethod = EncryptionMethod
                 Me.PayloadLength = PayloadLength
+                Me.ChunkFlags = ChunkFlags
                 Me.PreviousPhysicalGap = PreviousPhysicalGap
                 Me.NextPhysicalGap = NextPhysicalGap
                 Me.IsPhysicallyContiguousWithPrevious = IsPhysicallyContiguousWithPrevious
@@ -1092,6 +1101,21 @@ Namespace Streams
             ''' Payload length stored in the chunk record.
             ''' </summary>
             Public ReadOnly Property PayloadLength As Integer
+
+            ''' <summary>
+            ''' Flags stored in the physical chunk record, or inferred for sparse chunks.
+            ''' </summary>
+            Public ReadOnly Property ChunkFlags As ChunkedStream.ChunkFlags
+
+            ''' <summary>
+            ''' True when the chunk plaintext is known to be entirely zero bytes.
+            ''' Sparse chunks always return True.
+            ''' </summary>
+            Public ReadOnly Property IsPlaintextAllZero As Boolean
+                Get
+                    Return (ChunkFlags And ChunkedStream.ChunkFlags.PlaintextAllZero) = ChunkedStream.ChunkFlags.PlaintextAllZero
+                End Get
+            End Property
 
             ''' <summary>
             ''' Gap before this chunk in physical order, or Nothing for sparse chunks.
@@ -1191,13 +1215,14 @@ Namespace Streams
             Public Overrides Function ToString() As String
 
                 If IsSparse Then
-                    Return $"Chunk {Index} [Sparse, {PlainLength.FormatFileSizeFromBytes()} logical]"
+                    Return $"Chunk {Index} [Sparse, {PlainLength.FormatFileSizeFromBytes()} logical, zero={IsPlaintextAllZero}]"
                 End If
 
                 Dim EncryptionText = If(IsEncrypted, ", encrypted", "")
                 Dim CompressionText = If(IsCompressed, $", {PayloadSpaceSavedRatio:P2} saved", "")
+                Dim ZeroText = If(IsPlaintextAllZero, ", zero", "")
 
-                Return $"Chunk {Index} [{PlainLength.FormatFileSizeFromBytes()} -> {PayloadLength.FormatFileSizeFromBytes()}{CompressionText}{EncryptionText}]"
+                Return $"Chunk {Index} [{PlainLength.FormatFileSizeFromBytes()} -> {PayloadLength.FormatFileSizeFromBytes()}{CompressionText}{EncryptionText}{ZeroText}]"
 
             End Function
 

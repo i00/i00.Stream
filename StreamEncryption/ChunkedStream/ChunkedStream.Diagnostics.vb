@@ -94,9 +94,14 @@ Namespace Streams
 
             Dim EncryptionMethod = CType(BitConverter.ToInt32(Record, ChunkEncryptionMethodOffset), ChunkEncryptionMethods)
             Dim PayloadLength = BitConverter.ToInt32(Record, ChunkPayloadLengthOffset)
+            Dim Flags = CType(BitConverter.ToInt32(Record, ChunkFlagsOffset), ChunkFlags)
 
             If PayloadLength < 0 Then Throw New InvalidDataException("Invalid chunk payload length.")
             If ChunkRecordDataOffset + PayloadLength + MacSize <> Record.Length Then Throw New InvalidDataException("Invalid chunk record length.")
+
+            If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then
+                Throw New InvalidDataException($"Unsupported chunk flags for chunk {ExpectedChunkIndex}: {CInt(Flags)}.")
+            End If
 
             Dim RecordMacKey =
                 If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey,
