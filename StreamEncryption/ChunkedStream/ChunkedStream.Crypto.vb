@@ -170,7 +170,7 @@ Namespace Streams
 
         End Sub
 
-        Private Sub Options_EncryptionInfoChanged(OldValue As EncryptionInfo, NewValue As EncryptionInfo) Handles Options.EncryptionInfoChanged
+        Private Sub Options_EncryptionInfoChanged(OldValue As EncryptionInfo, NewValue As EncryptionInfo)
 
             SyncLock _SyncRoot
                 ThrowIfDisposed()

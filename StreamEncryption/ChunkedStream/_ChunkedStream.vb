@@ -504,7 +504,25 @@ Namespace Streams
         Private ReadOnly _SyncRoot As New Object()
         Private ReadOnly _CheckpointStack As New List(Of ChunkedStreamCheckpoint)
 
-        Public WithEvents Options As ChunkedStreamOptions
+        Private _Options As ChunkedStreamOptions
+        Public Property Options As ChunkedStreamOptions
+            Get
+                Return _Options
+            End Get
+            Set
+                If Value Is Nothing Then Throw New ArgumentNullException(NameOf(Options))
+                Dim OldOptions = _Options
+                If OldOptions IsNot Nothing Then
+                    RemoveHandler OldOptions.EncryptionInfoChanged, AddressOf Options_EncryptionInfoChanged
+                End If
+
+                _Options = Value
+                If OldOptions IsNot Nothing Then
+                    Options_EncryptionInfoChanged(OldOptions.EncryptionInfo, _Options.EncryptionInfo)
+                End If
+                AddHandler _Options.EncryptionInfoChanged, AddressOf Options_EncryptionInfoChanged
+            End Set
+        End Property
 
         Private ReadOnly _Header As Byte()
         Private ReadOnly _Index As List(Of ChunkIndexEntry)
@@ -1135,6 +1153,7 @@ Namespace Streams
                 If _Disposed Then Return
 
                 Try
+                    RemoveHandler Options.EncryptionInfoChanged, AddressOf Options_EncryptionInfoChanged
 
                     While _CheckpointStack.Count > 0
                         RollbackCheckpoint(_CheckpointStack(_CheckpointStack.Count - 1))
