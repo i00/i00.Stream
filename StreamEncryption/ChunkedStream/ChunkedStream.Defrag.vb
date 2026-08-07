@@ -41,29 +41,52 @@ Namespace Streams
         ''' <summary>
         ''' Defragments the physical storage layout.
         ''' </summary>
+        ''' <remarks>
+        ''' Defragmentation cannot be performed while a checkpoint is active.
+        ''' </remarks>
         Public Function Defragment(Optional Type As DefragTypes = DefragTypes.Move,
                                    Optional ProgressCallback As StreamProgressCallback = Nothing) As Long
 
             SyncLock _SyncRoot
+
                 ThrowIfDisposed()
 
+                If HasActiveCheckpoint Then
+                    Throw New InvalidOperationException(
+                        "Defragmentation cannot be performed while a checkpoint is active.")
+                End If
+
                 Dim OriginalLength = _Fs.Length
+
                 Dim CancellationToken As New CancellationToken()
 
                 Select Case Type
+
                     Case DefragTypes.Move
                         DefragmentMove(ProgressCallback, CancellationToken)
+
                     Case DefragTypes.Sequence
-                        DefragmentSequence(DefragmentSequenceProgressModes.Normal, ProgressCallback, CancellationToken)
+                        DefragmentSequence(
+                            DefragmentSequenceProgressModes.Normal,
+                            ProgressCallback,
+                            CancellationToken)
+
                     Case DefragTypes.Rebuild
-                        DefragmentRebuild(ProgressCallback, CancellationToken)
+                        DefragmentRebuild(
+                            ProgressCallback,
+                            CancellationToken)
+
                     Case Else
                         Throw New ArgumentOutOfRangeException(NameOf(Type))
+
                 End Select
 
-                If CancellationToken.Cancel Then Return -1
+                If CancellationToken.Cancel Then
+                    Return -1
+                End If
 
                 Return Math.Max(0L, OriginalLength - _Fs.Length)
+
             End SyncLock
 
         End Function

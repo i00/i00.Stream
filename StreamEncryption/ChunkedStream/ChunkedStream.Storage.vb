@@ -1,6 +1,5 @@
 ﻿Imports System.IO
 Imports System.Security.Cryptography
-Imports System.Text
 
 Namespace Streams
 
@@ -32,10 +31,13 @@ Namespace Streams
             If PlainLength < 0 OrElse PlainLength > ChunkSize Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
 
             If PlainLength = 0 OrElse (Not Options.StoreSparseChunks AndAlso IsAllZero(Plain, PlainLength)) Then
+
                 EnsureIndexSize(CInt(ChunkIndex + 1))
                 _Index(CInt(ChunkIndex)) = New ChunkIndexEntry()
                 _HeaderFlags = _HeaderFlags Or HeaderFlags.SparseChunks
+
                 Return
+
             End If
 
             Dim Payload As Byte() = Plain
@@ -43,6 +45,7 @@ Namespace Streams
             Dim CompressionMethod = ChunkedStreamOptions.CompressionMethods.None
 
             If Options.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None Then
+
                 Dim Compressed = CompressPayload(Options.CompressionMethod, Plain, PlainLength)
 
                 If ShouldUseCompressed(PlainLength, Compressed.Length) Then
@@ -51,6 +54,7 @@ Namespace Streams
                     CompressionMethod = Options.CompressionMethod
                     MarkCompressionFlag(CompressionMethod)
                 End If
+
             End If
 
             Dim EncryptionMethod =
@@ -71,12 +75,15 @@ Namespace Streams
             System.Buffer.BlockCopy(_Counter, 0, Record, ChunkRecordIvOffset, IvSize)
 
             Select Case EncryptionMethod
+
                 Case ChunkEncryptionMethods.None
+
                     If PayloadLength > 0 Then
                         System.Buffer.BlockCopy(Payload, 0, Record, ChunkRecordDataOffset, PayloadLength)
                     End If
 
                 Case ChunkEncryptionMethods.AesCtrFileMasterKey
+
                     If _ChunkEncryptionKey Is Nothing Then
                         Throw New EncryptionMismatchException("Encryption is enabled but no file master key is available.")
                     End If
@@ -84,7 +91,9 @@ Namespace Streams
                     CryptPayload(Payload, 0, PayloadLength, Record, ChunkRecordDataOffset, _ChunkEncryptionKey)
 
                 Case Else
+
                     Throw New InvalidDataException($"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
+
             End Select
 
             Dim RecordMacKey =
@@ -97,25 +106,46 @@ Namespace Streams
                 System.Buffer.BlockCopy(Mac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize)
             End Using
 
-            Dim NewRecordOffset = _IndexOffset
+            Dim NewRecordOffset = GetNextChunkRecordWriteOffset()
 
             _Fs.Position = NewRecordOffset
             _Fs.Write(Record, 0, Record.Length)
 
             EnsureIndexSize(CInt(ChunkIndex + 1))
-            _Index(CInt(ChunkIndex)) = New ChunkIndexEntry With {.Offset = NewRecordOffset, .RecordLength = Record.Length}
+
+            _Index(CInt(ChunkIndex)) =
+                New ChunkIndexEntry With {
+                    .Offset = NewRecordOffset,
+                    .RecordLength = Record.Length
+                }
+
             _IndexOffset = NewRecordOffset + Record.Length
 
         End Sub
+
+        Private Function GetNextChunkRecordWriteOffset() As Long
+
+            If Not HasOpenCheckpoint Then
+                Return _IndexOffset
+            End If
+
+            ' While a checkpoint is active, never overwrite the currently committed
+            ' index table. Append tentative records beyond the physical end so a crash
+            ' before Commit leaves the previous header/index pair valid and recoverable.
+            Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
+
+        End Function
 
         Private Function GetDataEndFromIndex() As Long
 
             Dim DataEnd = CLng(DataStartOffset)
 
             For Each Entry In _Index
+
                 If Entry.Offset > 0 AndAlso Entry.RecordLength > 0 Then
                     DataEnd = Math.Max(DataEnd, Entry.Offset + CLng(Entry.RecordLength))
                 End If
+
             Next
 
             Return DataEnd

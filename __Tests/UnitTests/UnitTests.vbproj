@@ -74,14 +74,10 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Autoexec.vb" />
-    <Compile Include="Tests\Streams.vb" />
-    <Compile Include="Form1.vb">
-      <SubType>Form</SubType>
-    </Compile>
-    <Compile Include="Form1.Designer.vb">
-      <DependentUpon>Form1.vb</DependentUpon>
-      <SubType>Form</SubType>
-    </Compile>
+    <Compile Include="Tests\Checkpoints.vb" />
+    <Compile Include="Tests\CompressionAndEncryption.vb" />
+    <Compile Include="Helpers.vb" />
+    <Compile Include="Tests\_Core.vb" />
     <Compile Include="My Project\AssemblyInfo.vb" />
     <Compile Include="My Project\Application.Designer.vb">
       <AutoGen>True</AutoGen>

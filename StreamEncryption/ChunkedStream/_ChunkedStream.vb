@@ -15,6 +15,7 @@
 '   - Sparse chunk support.
 '   - Append-on-write chunk updates.
 '   - Defragmentation and recovery support.
+'   - Data-only checkpoints with automatic rollback if not committed.
 '
 ' Integrity Model
 '   - Every header, index table and chunk record is authenticated.
@@ -32,6 +33,19 @@
 '   - If EncryptionInfo is set to Nothing, the file master key is publicly wrapped.
 '     Existing encrypted chunks remain encrypted on disk, but can be read without a secret.
 '   - New chunks are encrypted only when Options.EncryptionInfo is not Nothing.
+'
+' Checkpoint Model
+'   - CreateCheckpoint() creates a data-only checkpoint.
+'   - Writes and length changes inside a checkpoint are visible immediately to reads.
+'   - If Commit() is called, changes are retained.
+'   - If Commit() is not called before disposal, the checkpoint rolls back.
+'   - Checkpoints may be nested, but must be committed or rolled back in LIFO order.
+'   - Committing an inner checkpoint only merges it into its parent checkpoint.
+'   - Only the outermost checkpoint writes the committed index/header.
+'   - Rolling back an outer checkpoint also rolls back committed inner checkpoints.
+'   - Checkpoints roll back stream data only. Options, encryption settings and key
+'     wrapping changes are not rolled back.
+'   - Defragmentation is not allowed while a checkpoint is active.
 '
 ' File Layout
 '
@@ -68,7 +82,7 @@
 '   60      8       Index Entry Count
 '   68      32      Index HMAC-SHA256
 '
-'   100     64      Chunk Operation Recovery Journal
+'   100     64      Recovery State Area
 '
 '   164     4       Master Key Wrap Mode
 '   168     16      Master Key Wrap Salt
@@ -250,6 +264,155 @@ Namespace Streams
                                                    UnitType As ProcessUnitTypes,
                                                    CancellationToken As CancellationToken)
 
+        ''' <summary>
+        ''' A data-only checkpoint for ChunkedStream.
+        ''' </summary>
+        ''' <remarks>
+        ''' Checkpoints may be nested, but must be committed or rolled back in LIFO order.
+        ''' A committed nested checkpoint is still part of its parent checkpoint and will be rolled back if the parent rolls back.
+        ''' Checkpoints protect stream data only. Options, encryption information and key wrapping changes are not rolled back.
+        ''' </remarks>
+        Public NotInheritable Class ChunkedStreamCheckpoint
+            Implements IDisposable
+
+            Private ReadOnly _Owner As ChunkedStream
+            Private _IsCommitted As Boolean
+            Private _IsRolledBack As Boolean
+            Private _Disposed As Boolean
+
+            Friend ReadOnly Property State As CheckpointState
+
+            Friend Sub New(Owner As ChunkedStream, Depth As Integer)
+
+                If Owner Is Nothing Then Throw New ArgumentNullException(NameOf(Owner))
+
+                _Owner = Owner
+                Me.Depth = Depth
+
+                State = New CheckpointState With {
+                    .LogicalLength = Owner._Length,
+                    .PhysicalLength = Owner._Fs.Length,
+                    .IndexOffset = Owner._IndexOffset,
+                    .HeaderFlags = Owner._HeaderFlags,
+                    .Index = New List(Of ChunkIndexEntry)(Owner._Index)
+                }
+
+            End Sub
+
+            ''' <summary>
+            ''' Gets the checkpoint nesting depth.
+            ''' </summary>
+            Public ReadOnly Property Depth As Integer
+
+            ''' <summary>
+            ''' True while the checkpoint has not been committed, rolled back or disposed.
+            ''' </summary>
+            Public ReadOnly Property IsActive As Boolean
+                Get
+                    Return Not _IsCommitted AndAlso Not _IsRolledBack AndAlso Not _Disposed
+                End Get
+            End Property
+
+            ''' <summary>
+            ''' True when this checkpoint has been committed.
+            ''' </summary>
+            Public ReadOnly Property IsCommitted As Boolean
+                Get
+                    Return _IsCommitted
+                End Get
+            End Property
+
+            ''' <summary>
+            ''' True when this checkpoint has been rolled back.
+            ''' </summary>
+            Public ReadOnly Property IsRolledBack As Boolean
+                Get
+                    Return _IsRolledBack
+                End Get
+            End Property
+
+            ''' <summary>
+            ''' Commits this checkpoint.
+            ''' </summary>
+            ''' <param name="Durable">
+            ''' If True, the outermost checkpoint commit flushes to durable storage when the backing stream supports it.
+            ''' </param>
+            ''' <remarks>
+            ''' For nested checkpoints, Commit promotes the checkpoint into its parent but does not persist the stream.
+            ''' Only the outermost checkpoint commit writes the new index and header.
+            ''' </remarks>
+            Public Sub Commit(Optional Durable As Boolean = True)
+
+                If Not IsActive Then
+                    Throw New InvalidOperationException("Checkpoint is no longer active.")
+                End If
+
+                _Owner.CommitCheckpoint(Me, Durable)
+
+            End Sub
+
+            ''' <summary>
+            ''' Rolls stream data back to the checkpoint state.
+            ''' </summary>
+            ''' <remarks>
+            ''' If this checkpoint contains committed child checkpoints, those child changes are rolled back as part of this rollback.
+            ''' Options and encryption settings are not rolled back.
+            ''' </remarks>
+            Public Sub Rollback()
+
+                If Not IsActive Then
+                    Throw New InvalidOperationException("Checkpoint is no longer active.")
+                End If
+
+                _Owner.RollbackCheckpoint(Me)
+
+            End Sub
+
+            Friend Sub MarkCommitted()
+
+                _IsCommitted = True
+
+            End Sub
+
+            Friend Sub MarkRolledBack()
+
+                _IsRolledBack = True
+
+            End Sub
+
+            ''' <summary>
+            ''' Rolls back the checkpoint if it has not already been committed or rolled back.
+            ''' </summary>
+            Public Sub Dispose() Implements IDisposable.Dispose
+
+                If _Disposed Then Return
+
+                Try
+                    If IsActive Then
+                        Rollback()
+                    End If
+                Finally
+                    _Disposed = True
+                End Try
+
+            End Sub
+
+        End Class
+
+        Friend NotInheritable Class CheckpointState
+
+            Public Property LogicalLength As Long
+
+            Public Property PhysicalLength As Long
+
+            Public Property IndexOffset As Long
+
+            Public Property HeaderFlags As HeaderFlags
+
+            Public Property Index As List(Of ChunkIndexEntry)
+
+        End Class
+
         Public Const ChunkSize As Integer = 64 * 1024
         Public Const IvSize As Integer = 16
         Public Const MacSize As Integer = 32
@@ -280,6 +443,14 @@ Namespace Streams
         Private Const JournalAreaOffset As Integer = 100
         Private Const JournalAreaLength As Integer = 64
 
+        Private Const RecoveryStateOffset As Integer = JournalStateOffset
+        Private Const RecoveryAreaOffset As Integer = JournalAreaOffset
+        Private Const RecoveryAreaLength As Integer = JournalAreaLength
+
+        Private Const RecoveryCheckpointPhysicalLengthOffset As Integer = JournalChunkIndexOffset
+        Private Const RecoveryCheckpointIndexOffsetOffset As Integer = JournalOldOffsetOffset
+        Private Const RecoveryCheckpointLogicalLengthOffset As Integer = JournalOldLengthOffset
+
         Private Const MasterKeyWrapModeOffset As Integer = 164
         Private Const MasterKeyWrapSaltOffset As Integer = 168
         Private Const MasterKeyWrapSaltSize As Integer = 16
@@ -309,7 +480,7 @@ Namespace Streams
         Private Shared ReadOnly PublicIntegrityKey As Byte() = Encoding.UTF8.GetBytes("ChunkedStream Public Integrity Key v1")
 
         <Flags>
-        Private Enum HeaderFlags As Long
+        Friend Enum HeaderFlags As Long
             None = 0
             VariableChunkIndex = 1
             CompressionLz4 = 2
@@ -318,7 +489,7 @@ Namespace Streams
             SparseChunks = 16
         End Enum
 
-        Private Structure ChunkIndexEntry
+        Friend Structure ChunkIndexEntry
             Public Offset As Long
             Public RecordLength As Integer
         End Structure
@@ -331,6 +502,7 @@ Namespace Streams
 
         Private ReadOnly _Fs As Stream
         Private ReadOnly _SyncRoot As New Object()
+        Private ReadOnly _CheckpointStack As New List(Of ChunkedStreamCheckpoint)
 
         Public WithEvents Options As ChunkedStreamOptions
 
@@ -365,6 +537,36 @@ Namespace Streams
                     ThrowIfDisposed()
                     Return _Length
                 End SyncLock
+            End Get
+        End Property
+
+        ''' <summary>
+        ''' True when one or more data-only checkpoints are active.
+        ''' </summary>
+        Public ReadOnly Property HasActiveCheckpoint As Boolean
+            Get
+                SyncLock _SyncRoot
+                    ThrowIfDisposed()
+                    Return HasOpenCheckpoint
+                End SyncLock
+            End Get
+        End Property
+
+        ''' <summary>
+        ''' Number of currently active nested checkpoints.
+        ''' </summary>
+        Public ReadOnly Property CheckpointDepth As Integer
+            Get
+                SyncLock _SyncRoot
+                    ThrowIfDisposed()
+                    Return _CheckpointStack.Count
+                End SyncLock
+            End Get
+        End Property
+
+        Private ReadOnly Property HasOpenCheckpoint As Boolean
+            Get
+                Return _CheckpointStack.Count > 0
             End Get
         End Property
 
@@ -439,16 +641,19 @@ Namespace Streams
 
             Select Case WrapMode
                 Case MasterKeyWrapModes.None, MasterKeyWrapModes.PublicWrap
+
                     If EffectiveOptions.EncryptionInfo IsNot Nothing Then
                         Throw New EncryptionMismatchException("Encryption information was supplied for a stream that does not require it. Open the stream without encryption information, then set Options.EncryptionInfo to enable encryption for future writes.")
                     End If
 
                 Case MasterKeyWrapModes.UserWrap
+
                     If EffectiveOptions.EncryptionInfo Is Nothing Then
                         Throw New EncryptionMismatchException("Encryption information is required to open this stream.")
                     End If
 
                 Case Else
+
                     Throw New InvalidDataException($"Unsupported master key wrap mode: {CInt(WrapMode)}.")
             End Select
 
@@ -489,7 +694,7 @@ Namespace Streams
                 Throw New EncryptionMismatchException("The supplied encryption information could not unwrap the file master key.")
             End If
 
-            Result.RecoverJournal()
+            Result.RecoverState()
 
             Return Result
 
@@ -553,6 +758,7 @@ Namespace Streams
             Dim Best As New HeaderCandidate()
 
             For HeaderCopyIndex = 0 To HeaderCopyCount - 1
+
                 Dim Header(HeaderSize - 1) As Byte
                 Dim HeaderOffset = HeaderCopyIndex * HeaderSize
 
@@ -560,7 +766,6 @@ Namespace Streams
                 ReadExactly(Fs, Header, 0, Header.Length)
 
                 If Not FixedTimeEquals(HeaderMagic, 0, Header, MagicOffset, MagicSize) Then Continue For
-
                 If Not VerifyHeaderMac(Header, PublicIntegrityKey) Then Continue For
 
                 Dim HeaderSequence = BitConverter.ToInt64(Header, HeaderSequenceOffset)
@@ -570,9 +775,202 @@ Namespace Streams
                     Best.HeaderSequence = HeaderSequence
                     Best.HeaderCopyIndex = HeaderCopyIndex
                 End If
+
             Next
 
             Return Best
+
+        End Function
+
+        ''' <summary>
+        ''' Creates a data-only checkpoint.
+        ''' </summary>
+        ''' <remarks>
+        ''' Writes and length changes made while the checkpoint is active are visible to reads immediately.
+        ''' If Commit is called, changes are retained. If Commit is not called before disposal,
+        ''' the stream rolls back to the checkpoint state.
+        '''
+        ''' Checkpoints may be nested, but must be committed or rolled back in LIFO order.
+        ''' A committed nested checkpoint is still part of its parent checkpoint and will be rolled back
+        ''' if the parent rolls back.
+        '''
+        ''' Checkpoints protect stream data only. Options, encryption information and file master key
+        ''' wrapping changes are not rolled back.
+        '''
+        ''' Defragmentation is not allowed while a checkpoint is active.
+        ''' </remarks>
+        Public Function CreateCheckpoint() As ChunkedStreamCheckpoint
+
+            SyncLock _SyncRoot
+
+                ThrowIfDisposed()
+
+                Dim Checkpoint = New ChunkedStreamCheckpoint(Me, _CheckpointStack.Count + 1)
+
+                _CheckpointStack.Add(Checkpoint)
+
+                If _CheckpointStack.Count = 1 Then
+                    WriteCheckpointRecoveryState()
+                End If
+
+                Return Checkpoint
+
+            End SyncLock
+
+        End Function
+
+        Private Sub CommitCheckpoint(Checkpoint As ChunkedStreamCheckpoint,
+                                     Durable As Boolean)
+
+            SyncLock _SyncRoot
+
+                ThrowIfDisposed()
+                EnsureTopCheckpoint(Checkpoint)
+
+                If _CheckpointStack.Count > 1 Then
+                    _CheckpointStack.RemoveAt(_CheckpointStack.Count - 1)
+                    Checkpoint.MarkCommitted()
+                    Return
+                End If
+
+                Dim RecoveryArea(RecoveryAreaLength - 1) As Byte
+                System.Buffer.BlockCopy(_Header, RecoveryAreaOffset, RecoveryArea, 0, RecoveryArea.Length)
+
+                Try
+                    ClearRecoveryAreaInMemory()
+
+                    Dim CommitIndexOffset = Math.Max(_Fs.Length, GetDataEndFromIndex())
+                    PersistIndexAndHeader(CommitIndexOffset, Durable)
+
+                    _CheckpointStack.RemoveAt(_CheckpointStack.Count - 1)
+                    Checkpoint.MarkCommitted()
+
+                Catch
+                    System.Buffer.BlockCopy(RecoveryArea, 0, _Header, RecoveryAreaOffset, RecoveryArea.Length)
+                    Throw
+                End Try
+
+            End SyncLock
+
+        End Sub
+
+        Private Sub RollbackCheckpoint(Checkpoint As ChunkedStreamCheckpoint)
+
+            SyncLock _SyncRoot
+
+                ThrowIfDisposed()
+                EnsureTopCheckpoint(Checkpoint)
+
+                _Length = Checkpoint.State.LogicalLength
+                _IndexOffset = Checkpoint.State.IndexOffset
+                _HeaderFlags = Checkpoint.State.HeaderFlags
+
+                _Index.Clear()
+                _Index.AddRange(Checkpoint.State.Index)
+
+                If _Fs.Length > Checkpoint.State.PhysicalLength Then
+                    _Fs.SetLength(Checkpoint.State.PhysicalLength)
+                End If
+
+                _CheckpointStack.RemoveAt(_CheckpointStack.Count - 1)
+                Checkpoint.MarkRolledBack()
+
+                If _CheckpointStack.Count = 0 Then
+                    ClearRecoveryState()
+                End If
+
+            End SyncLock
+
+        End Sub
+
+        Private Sub EnsureTopCheckpoint(Checkpoint As ChunkedStreamCheckpoint)
+
+            If Checkpoint Is Nothing Then Throw New ArgumentNullException(NameOf(Checkpoint))
+
+            If _CheckpointStack.Count = 0 OrElse Not Object.ReferenceEquals(_CheckpointStack(_CheckpointStack.Count - 1), Checkpoint) Then
+                Throw New InvalidOperationException("Checkpoints must be committed or rolled back in LIFO order.")
+            End If
+
+        End Sub
+
+        Private Sub ClearRecoveryAreaInMemory()
+
+            Array.Clear(_Header, RecoveryAreaOffset, RecoveryAreaLength)
+
+        End Sub
+
+        ''' <summary>
+        ''' Returns the entire logical plaintext stream as a byte array.
+        ''' </summary>
+        ''' <returns>
+        ''' A byte array containing every logical byte in the stream.
+        ''' </returns>
+        Public Function ToArray() As Byte()
+
+            SyncLock _SyncRoot
+
+                ThrowIfDisposed()
+
+                If _Length > Integer.MaxValue Then
+                    Throw New InvalidOperationException(
+                        "The logical length exceeds the maximum supported byte array size.")
+                End If
+
+                If _Length = 0 Then
+                    Return New Byte() {}
+                End If
+
+                Dim Result(CInt(_Length) - 1) As Byte
+
+                Read(0, Result)
+
+                Return Result
+
+            End SyncLock
+
+        End Function
+
+        ''' <summary>
+        ''' Returns a logical range from the stream as a byte array.
+        ''' </summary>
+        ''' <param name="Offset">
+        ''' Logical start offset.
+        ''' </param>
+        ''' <param name="Length">
+        ''' Number of bytes to return.
+        ''' </param>
+        Public Function ToArray(Offset As Long,
+                                Length As Integer) As Byte()
+
+            SyncLock _SyncRoot
+
+                ThrowIfDisposed()
+
+                If Offset < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(Offset))
+                End If
+
+                If Length < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(Length))
+                End If
+
+                If Length = 0 Then
+                    Return New Byte() {}
+                End If
+
+                Dim Result(Length - 1) As Byte
+
+                Dim BytesRead = Read(Offset, Result)
+
+                If BytesRead = Length Then
+                    Return Result
+                End If
+
+                Array.Resize(Result, BytesRead)
+
+                Return Result
+
+            End SyncLock
 
         End Function
 
@@ -582,6 +980,7 @@ Namespace Streams
         Public Function Read(Offset As Long, Output As Byte()) As Integer
 
             SyncLock _SyncRoot
+
                 ThrowIfDisposed()
 
                 If Output Is Nothing Then Throw New ArgumentNullException(NameOf(Output))
@@ -594,6 +993,7 @@ Namespace Streams
                 Dim LastChunk = (Offset + ToRead - 1) \ ChunkSize
 
                 For ChunkIndex = FirstChunk To LastChunk
+
                     Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
                     LoadChunk(ChunkIndex, _ChunkPlain)
 
@@ -603,9 +1003,11 @@ Namespace Streams
 
                     System.Buffer.BlockCopy(_ChunkPlain, SrcOffset, Output, OutPos, CopyLength)
                     OutPos += CopyLength
+
                 Next
 
                 Return OutPos
+
             End SyncLock
 
         End Function
@@ -616,6 +1018,7 @@ Namespace Streams
         Public Function Write(Offset As Long, Input As Byte()) As Integer
 
             SyncLock _SyncRoot
+
                 ThrowIfDisposed()
 
                 If Input Is Nothing Then Throw New ArgumentNullException(NameOf(Input))
@@ -631,6 +1034,7 @@ Namespace Streams
                 EnsureIndexSize(CInt(LastChunk + 1))
 
                 For ChunkIndex = FirstChunk To LastChunk
+
                     Dim ChunkStart = ChunkIndex * CLng(ChunkSize)
                     Dim DstOffset = CInt(Math.Max(0L, Offset - ChunkStart))
                     Dim CopyLength = Math.Min(ChunkSize - DstOffset, Input.Length - InPos)
@@ -648,12 +1052,17 @@ Namespace Streams
 
                     InPos += CopyLength
                     WriteChunkRecord(ChunkIndex, _ChunkPlain, LogicalPlainLength)
+
                 Next
 
                 _Length = NewLogicalLength
-                PersistIndexAndHeader(_IndexOffset)
+
+                If Not HasOpenCheckpoint Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
 
                 Return Input.Length
+
             End SyncLock
 
         End Function
@@ -664,6 +1073,7 @@ Namespace Streams
         Public Sub SetLength(Length As Long)
 
             SyncLock _SyncRoot
+
                 ThrowIfDisposed()
 
                 If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
@@ -679,6 +1089,7 @@ Namespace Streams
                 End If
 
                 If _Length > 0 AndAlso RequiredChunks > 0 Then
+
                     Dim LastChunkIndex = RequiredChunks - 1
                     Dim LastChunkStart = CLng(LastChunkIndex) * ChunkSize
                     Dim LastChunkPlainLength = CInt(_Length - LastChunkStart)
@@ -689,10 +1100,15 @@ Namespace Streams
                         Array.Clear(_ChunkPlain, LastChunkPlainLength, ChunkSize - LastChunkPlainLength)
                         WriteChunkRecord(LastChunkIndex, _ChunkPlain, LastChunkPlainLength)
                     End If
+
                 End If
 
                 _IndexOffset = GetDataEndFromIndex()
-                PersistIndexAndHeader(_IndexOffset)
+
+                If Not HasOpenCheckpoint Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
             End SyncLock
 
         End Sub
@@ -715,16 +1131,26 @@ Namespace Streams
         Public Sub Dispose() Implements IDisposable.Dispose
 
             SyncLock _SyncRoot
+
                 If _Disposed Then Return
 
-                _Disposed = True
-
                 Try
+
+                    While _CheckpointStack.Count > 0
+                        RollbackCheckpoint(_CheckpointStack(_CheckpointStack.Count - 1))
+                    End While
+
                     If _Fs.CanWrite Then _Fs.Flush()
+
                 Finally
+
+                    _Disposed = True
+
                     _AesProvider.Dispose()
                     _Rng.Dispose()
+
                 End Try
+
             End SyncLock
 
         End Sub
@@ -743,8 +1169,8 @@ Namespace Streams
 
         Private Shared Function IsAllZero(Buffer As Byte(), Count As Integer) As Boolean
 
-            For i = 0 To Count - 1
-                If Buffer(i) <> 0 Then Return False
+            For Index = 0 To Count - 1
+                If Buffer(Index) <> 0 Then Return False
             Next
 
             Return True
@@ -765,12 +1191,14 @@ Namespace Streams
             Dim EntryBuffer(IndexEntrySize - 1) As Byte
 
             For Each Entry In _Index
+
                 Array.Clear(EntryBuffer, 0, EntryBuffer.Length)
 
                 System.Buffer.BlockCopy(BitConverter.GetBytes(Entry.Offset), 0, EntryBuffer, 0, 8)
                 System.Buffer.BlockCopy(BitConverter.GetBytes(Entry.RecordLength), 0, EntryBuffer, 8, 4)
 
                 _Fs.Write(EntryBuffer, 0, EntryBuffer.Length)
+
             Next
 
             If Durable Then FlushDurable(_Fs)
@@ -840,7 +1268,8 @@ Namespace Streams
 
             Dim EntryBuffer(IndexEntrySize - 1) As Byte
 
-            For i = 0 To IndexCount - 1
+            For EntryIndex = 0 To IndexCount - 1
+
                 ReadExactly(Fs, EntryBuffer, 0, EntryBuffer.Length)
 
                 Dim Entry As New ChunkIndexEntry With {
@@ -849,11 +1278,12 @@ Namespace Streams
                 }
 
                 If Entry.Offset <> 0 OrElse Entry.RecordLength <> 0 Then
-                    If Entry.Offset < DataStartOffset OrElse Entry.RecordLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid index entry {i}.")
-                    If Entry.Offset + Entry.RecordLength > IndexOffset Then Throw New InvalidDataException($"Index entry {i} points outside the chunked data area.")
+                    If Entry.Offset < DataStartOffset OrElse Entry.RecordLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid index entry {EntryIndex}.")
+                    If Entry.Offset + Entry.RecordLength > IndexOffset Then Throw New InvalidDataException($"Index entry {EntryIndex} points outside the chunked data area.")
                 End If
 
                 Index.Add(Entry)
+
             Next
 
             Return Index
@@ -863,19 +1293,24 @@ Namespace Streams
         Private Shared Function ComputeIndexMac(Index As List(Of ChunkIndexEntry), MacKey As Byte()) As Byte()
 
             Using Hmac As New HMACSHA256(MacKey)
+
                 Dim EntryBuffer(IndexEntrySize - 1) As Byte
 
                 For Each Entry In Index
+
                     Array.Clear(EntryBuffer, 0, EntryBuffer.Length)
 
                     System.Buffer.BlockCopy(BitConverter.GetBytes(Entry.Offset), 0, EntryBuffer, 0, 8)
                     System.Buffer.BlockCopy(BitConverter.GetBytes(Entry.RecordLength), 0, EntryBuffer, 8, 4)
 
                     Hmac.TransformBlock(EntryBuffer, 0, EntryBuffer.Length, Nothing, 0)
+
                 Next
 
                 Hmac.TransformFinalBlock(New Byte() {}, 0, 0)
+
                 Return Hmac.Hash
+
             End Using
 
         End Function
@@ -889,9 +1324,11 @@ Namespace Streams
         Private Shared Sub RandomNumberGeneratorFill(Buffer As Byte(), Offset As Integer, Length As Integer)
 
             Using Rng = RandomNumberGenerator.Create()
+
                 Dim Temp(Length - 1) As Byte
                 Rng.GetBytes(Temp)
                 System.Buffer.BlockCopy(Temp, 0, Buffer, Offset, Length)
+
             End Using
 
         End Sub
@@ -904,11 +1341,13 @@ Namespace Streams
             Dim TotalRead = 0
 
             While TotalRead < Count
+
                 Dim ReadBytes = Source.Read(Buffer, Offset + TotalRead, Count - TotalRead)
 
                 If ReadBytes = 0 Then Throw New EndOfStreamException("Unexpected end of chunked stream.")
 
                 TotalRead += ReadBytes
+
             End While
 
         End Sub
@@ -925,8 +1364,8 @@ Namespace Streams
 
             Dim Diff = 0
 
-            For i = 0 To Count - 1
-                Diff = Diff Or (CInt(Left(LeftOffset + i)) Xor CInt(Right(RightOffset + i)))
+            For Index = 0 To Count - 1
+                Diff = Diff Or (CInt(Left(LeftOffset + Index)) Xor CInt(Right(RightOffset + Index)))
             Next
 
             Return Diff = 0

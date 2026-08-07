@@ -1,23 +1,114 @@
 ﻿Imports System.IO
-Imports System.IO.Compression
 Imports System.Security.Cryptography
-Imports System.Text
 
 Namespace Streams
 
     Partial Class ChunkedStream
 
-        Private Enum JournalStates As Integer
+        Private Enum RecoveryStates As Integer
+
             None = 0
-            Copying = 1
-            Copied = 2
+
+            CopyingChunk = 1
+            ChunkCopied = 2
+
+            CheckpointActive = 100
+
         End Enum
 
-        Private Sub RecoverJournal()
+        ' Compatibility enum for the existing Defrag partial.
+        ' Defrag can continue calling WriteJournal(JournalStates.Copying, ...)
+        ' while the recovery implementation uses RecoveryStates internally.
+        Private Enum JournalStates As Integer
 
-            Dim State = CType(BitConverter.ToInt32(_Header, JournalStateOffset), JournalStates)
+            None = RecoveryStates.None
+            Copying = RecoveryStates.CopyingChunk
+            Copied = RecoveryStates.ChunkCopied
 
-            If State = JournalStates.None Then Return
+        End Enum
+
+        Private Sub RecoverState()
+
+            Dim State = GetRecoveryState()
+
+            Select Case State
+
+                Case RecoveryStates.None
+
+                    Return
+
+                Case RecoveryStates.CheckpointActive
+
+                    RecoverCheckpoint()
+
+                Case RecoveryStates.CopyingChunk,
+                     RecoveryStates.ChunkCopied
+
+                    RecoverChunkMove(State)
+
+                Case Else
+
+                    Throw New InvalidDataException($"Unknown recovery state: {CInt(State)}.")
+
+            End Select
+
+        End Sub
+
+        Private Function GetRecoveryState() As RecoveryStates
+
+            Return CType(BitConverter.ToInt32(_Header, RecoveryStateOffset), RecoveryStates)
+
+        End Function
+
+        Private Sub RecoverCheckpoint()
+
+            Dim PhysicalLength =
+                BitConverter.ToInt64(
+                    _Header,
+                    RecoveryCheckpointPhysicalLengthOffset)
+
+            Dim IndexOffset =
+                BitConverter.ToInt64(
+                    _Header,
+                    RecoveryCheckpointIndexOffsetOffset)
+
+            Dim LogicalLength =
+                BitConverter.ToInt64(
+                    _Header,
+                    RecoveryCheckpointLogicalLengthOffset)
+
+            If PhysicalLength < DataStartOffset Then
+                Throw New InvalidDataException("Invalid checkpoint recovery physical length.")
+            End If
+
+            If PhysicalLength > _Fs.Length Then
+                Throw New InvalidDataException("Checkpoint recovery physical length is beyond end of stream.")
+            End If
+
+            If IndexOffset < DataStartOffset Then
+                Throw New InvalidDataException("Invalid checkpoint recovery index offset.")
+            End If
+
+            If IndexOffset > PhysicalLength Then
+                Throw New InvalidDataException("Checkpoint recovery index offset is beyond the checkpoint physical length.")
+            End If
+
+            If LogicalLength < 0 Then
+                Throw New InvalidDataException("Invalid checkpoint recovery logical length.")
+            End If
+
+            _Length = LogicalLength
+            _IndexOffset = IndexOffset
+
+            If _Fs.Length > PhysicalLength Then
+                _Fs.SetLength(PhysicalLength)
+            End If
+
+            ClearRecoveryState()
+
+        End Sub
+
+        Private Sub RecoverChunkMove(State As RecoveryStates)
 
             Dim ChunkIndex = BitConverter.ToInt64(_Header, JournalChunkIndexOffset)
             Dim OldOffset = BitConverter.ToInt64(_Header, JournalOldOffsetOffset)
@@ -32,36 +123,105 @@ Namespace Streams
             EnsureIndexSize(CInt(ChunkIndex + 1))
 
             Select Case State
-                Case JournalStates.Copying
+
+                Case RecoveryStates.CopyingChunk
+
                     If IsValidChunkRecordAt(CInt(ChunkIndex), OldOffset, OldLength) Then
-                        _Index(CInt(ChunkIndex)) = New ChunkIndexEntry With {.Offset = OldOffset, .RecordLength = OldLength}
+
+                        _Index(CInt(ChunkIndex)) =
+                            New ChunkIndexEntry With {
+                                .Offset = OldOffset,
+                                .RecordLength = OldLength
+                            }
+
                         PersistIndexAndHeader(GetDataEndFromIndex())
-                        ClearJournal()
+                        ClearRecoveryState()
+
                         Return
+
                     End If
 
                     Throw New CryptographicException("Recovery failed. Old chunk record is invalid.")
 
-                Case JournalStates.Copied
+                Case RecoveryStates.ChunkCopied
+
                     If IsValidChunkRecordAt(CInt(ChunkIndex), NewOffset, NewLength) Then
-                        _Index(CInt(ChunkIndex)) = New ChunkIndexEntry With {.Offset = NewOffset, .RecordLength = NewLength}
+
+                        _Index(CInt(ChunkIndex)) =
+                            New ChunkIndexEntry With {
+                                .Offset = NewOffset,
+                                .RecordLength = NewLength
+                            }
+
                         PersistIndexAndHeader(GetDataEndFromIndex())
-                        ClearJournal()
+                        ClearRecoveryState()
+
                         Return
+
                     End If
 
                     If IsValidChunkRecordAt(CInt(ChunkIndex), OldOffset, OldLength) Then
-                        _Index(CInt(ChunkIndex)) = New ChunkIndexEntry With {.Offset = OldOffset, .RecordLength = OldLength}
+
+                        _Index(CInt(ChunkIndex)) =
+                            New ChunkIndexEntry With {
+                                .Offset = OldOffset,
+                                .RecordLength = OldLength
+                            }
+
                         PersistIndexAndHeader(GetDataEndFromIndex())
-                        ClearJournal()
+                        ClearRecoveryState()
+
                         Return
+
                     End If
 
                     Throw New CryptographicException("Recovery failed. Neither old nor new chunk record is valid.")
 
                 Case Else
-                    Throw New InvalidDataException($"Unknown recovery journal state: {CInt(State)}.")
+
+                    Throw New InvalidDataException($"Unsupported chunk move recovery state: {CInt(State)}.")
+
             End Select
+
+        End Sub
+
+        Private Sub WriteCheckpointRecoveryState()
+
+            If GetRecoveryState() <> RecoveryStates.None Then
+                Throw New InvalidOperationException("Cannot create a checkpoint while another recovery state is active.")
+            End If
+
+            Array.Clear(_Header, RecoveryAreaOffset, RecoveryAreaLength)
+
+            System.Buffer.BlockCopy(
+                BitConverter.GetBytes(CInt(RecoveryStates.CheckpointActive)),
+                0,
+                _Header,
+                RecoveryStateOffset,
+                4)
+
+            System.Buffer.BlockCopy(
+                BitConverter.GetBytes(_Fs.Length),
+                0,
+                _Header,
+                RecoveryCheckpointPhysicalLengthOffset,
+                8)
+
+            System.Buffer.BlockCopy(
+                BitConverter.GetBytes(_IndexOffset),
+                0,
+                _Header,
+                RecoveryCheckpointIndexOffsetOffset,
+                8)
+
+            System.Buffer.BlockCopy(
+                BitConverter.GetBytes(_Length),
+                0,
+                _Header,
+                RecoveryCheckpointLogicalLengthOffset,
+                8)
+
+            WriteHeaderCopies(True)
 
         End Sub
 
@@ -72,14 +232,79 @@ Namespace Streams
                                  NewOffset As Long,
                                  NewLength As Integer)
 
-            Array.Clear(_Header, JournalAreaOffset, JournalAreaLength)
+            WriteChunkMoveRecoveryState(
+                CType(State, RecoveryStates),
+                ChunkIndex,
+                OldOffset,
+                OldLength,
+                NewOffset,
+                NewLength)
 
-            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(State)), 0, _Header, JournalStateOffset, 4)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(ChunkIndex), 0, _Header, JournalChunkIndexOffset, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(OldOffset), 0, _Header, JournalOldOffsetOffset, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(OldLength), 0, _Header, JournalOldLengthOffset, 4)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(NewOffset), 0, _Header, JournalNewOffsetOffset, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(NewLength), 0, _Header, JournalNewLengthOffset, 4)
+        End Sub
+
+        Private Sub WriteChunkMoveRecoveryState(State As RecoveryStates,
+                                                ChunkIndex As Long,
+                                                OldOffset As Long,
+                                                OldLength As Integer,
+                                                NewOffset As Long,
+                                                NewLength As Integer)
+
+            Select Case State
+
+                Case RecoveryStates.CopyingChunk,
+                     RecoveryStates.ChunkCopied
+
+                    ' Valid chunk move recovery state.
+
+                Case Else
+
+                    Throw New ArgumentOutOfRangeException(NameOf(State), $"Unsupported chunk move recovery state: {CInt(State)}.")
+
+            End Select
+
+            Array.Clear(_Header, RecoveryAreaOffset, RecoveryAreaLength)
+
+            System.Buffer.BlockCopy(
+                BitConverter.GetBytes(CInt(State)),
+                0,
+                _Header,
+                RecoveryStateOffset,
+                4)
+
+            System.Buffer.BlockCopy(
+                BitConverter.GetBytes(ChunkIndex),
+                0,
+                _Header,
+                JournalChunkIndexOffset,
+                8)
+
+            System.Buffer.BlockCopy(
+                BitConverter.GetBytes(OldOffset),
+                0,
+                _Header,
+                JournalOldOffsetOffset,
+                8)
+
+            System.Buffer.BlockCopy(
+                BitConverter.GetBytes(OldLength),
+                0,
+                _Header,
+                JournalOldLengthOffset,
+                4)
+
+            System.Buffer.BlockCopy(
+                BitConverter.GetBytes(NewOffset),
+                0,
+                _Header,
+                JournalNewOffsetOffset,
+                8)
+
+            System.Buffer.BlockCopy(
+                BitConverter.GetBytes(NewLength),
+                0,
+                _Header,
+                JournalNewLengthOffset,
+                4)
 
             WriteHeaderCopies(True)
 
@@ -87,7 +312,13 @@ Namespace Streams
 
         Private Sub ClearJournal()
 
-            Array.Clear(_Header, JournalAreaOffset, JournalAreaLength)
+            ClearRecoveryState()
+
+        End Sub
+
+        Private Sub ClearRecoveryState()
+
+            Array.Clear(_Header, RecoveryAreaOffset, RecoveryAreaLength)
             WriteHeaderCopies(True)
 
         End Sub
@@ -100,23 +331,34 @@ Namespace Streams
             If Offset + RecordLength > _Fs.Length Then Return False
 
             Try
+
                 Dim Record(RecordLength - 1) As Byte
 
                 _Fs.Position = Offset
                 ReadExactly(_Fs, Record, 0, Record.Length)
 
                 Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
+
                 DecryptChunkRecord(ChunkIndex, Record, _ChunkPlain)
 
                 Return True
-            Catch ex As IOException
+
+            Catch Ex As IOException
+
                 Return False
-            Catch ex As InvalidDataException
+
+            Catch Ex As InvalidDataException
+
                 Return False
-            Catch ex As CryptographicException
+
+            Catch Ex As CryptographicException
+
                 Return False
-            Catch ex As EncryptionMismatchException
+
+            Catch Ex As EncryptionMismatchException
+
                 Return False
+
             End Try
 
         End Function
