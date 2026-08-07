@@ -7,6 +7,39 @@ Namespace Tests
         Public NotInheritable Class CompressionAndEncryption
 
             ''' <summary>
+            ''' Verifies that the PlaintextAllZero flag is preserved on physically stored compressed and encrypted zero chunks.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ChunkFlagsZeroChunkWithCompressionAndEncryption()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .StoreSparseChunks = True,
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                        .CompressionMinimumSavingsPercent = 1,
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(77))
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, MakeBuffer(ChunkedStream.ChunkSize))
+
+                        Dim Struct = Cs.GetStructure()
+                        Dim Chunk = Struct.Chunks.First()
+
+                        AssertTrue(Chunk.IsAllocated, "Expected zero chunk to be physically allocated.")
+                        AssertTrue(Chunk.IsCompressed, "Expected zero chunk to be compressed.")
+                        AssertTrue(Chunk.IsEncrypted, "Expected zero chunk to be encrypted.")
+                        AssertTrue(Chunk.IsPlaintextAllZero, "Compressed/encrypted zero chunk did not expose PlaintextAllZero.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
             ''' Verifies that every compression method except None round-trips correctly and compresses ideal input below 10% of the original size.
             ''' Future compression enum values are automatically included.
             ''' </summary>

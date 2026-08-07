@@ -74,6 +74,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Autoexec.vb" />
+    <Compile Include="Tests\ChangingOptions.vb" />
     <Compile Include="Tests\Checkpoints.vb" />
     <Compile Include="Tests\CompressionAndEncryption.vb" />
     <Compile Include="Helpers.vb" />

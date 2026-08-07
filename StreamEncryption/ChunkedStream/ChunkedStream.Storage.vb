@@ -27,12 +27,41 @@ Namespace Streams
 
         Private Sub WriteChunkRecord(ChunkIndex As Long, Plain As Byte(), PlainLength As Integer)
 
+            Dim EncryptionMethod =
+                If(_CurrentWriteEncryptionEnabled,
+                   ChunkEncryptionMethods.AesCtrFileMasterKey,
+                   ChunkEncryptionMethods.None)
+
+            WriteChunkRecordWithPolicy(ChunkIndex,
+                                       Plain,
+                                       PlainLength,
+                                       Options.StoreSparseChunks,
+                                       Options.CompressionMethod,
+                                       Options.CompressionMinimumSavingsPercent,
+                                       False,
+                                       EncryptionMethod)
+
+        End Sub
+
+        Private Sub WriteChunkRecordWithPolicy(ChunkIndex As Long,
+                                               Plain As Byte(),
+                                               PlainLength As Integer,
+                                               StoreSparseChunks As Boolean,
+                                               CompressionMethodToUse As ChunkedStreamOptions.CompressionMethods,
+                                               CompressionMinimumSavingsPercent As Integer,
+                                               ForceCompression As Boolean,
+                                               EncryptionMethod As ChunkEncryptionMethods)
+
             If ChunkIndex < 0 OrElse ChunkIndex > Integer.MaxValue Then Throw New ArgumentOutOfRangeException(NameOf(ChunkIndex))
+            If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
             If PlainLength < 0 OrElse PlainLength > ChunkSize Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
+
+            If CompressionMinimumSavingsPercent < 0 Then CompressionMinimumSavingsPercent = 0
+            If CompressionMinimumSavingsPercent > 100 Then CompressionMinimumSavingsPercent = 100
 
             Dim PlaintextAllZero = PlainLength = 0 OrElse IsAllZero(Plain, PlainLength)
 
-            If PlainLength = 0 OrElse (Not Options.StoreSparseChunks AndAlso PlaintextAllZero) Then
+            If PlainLength = 0 OrElse (Not StoreSparseChunks AndAlso PlaintextAllZero) Then
 
                 EnsureIndexSize(CInt(ChunkIndex + 1))
                 _Index(CInt(ChunkIndex)) = New ChunkIndexEntry()
@@ -44,25 +73,20 @@ Namespace Streams
 
             Dim Payload As Byte() = Plain
             Dim PayloadLength = PlainLength
-            Dim CompressionMethod = ChunkedStreamOptions.CompressionMethods.None
+            Dim StoredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None
 
-            If Options.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None Then
+            If CompressionMethodToUse <> ChunkedStreamOptions.CompressionMethods.None Then
 
-                Dim Compressed = CompressPayload(Options.CompressionMethod, Plain, PlainLength)
+                Dim Compressed = CompressPayload(CompressionMethodToUse, Plain, PlainLength)
 
-                If ShouldUseCompressed(PlainLength, Compressed.Length) Then
+                If ForceCompression OrElse ShouldUseCompressed(PlainLength, Compressed.Length, CompressionMinimumSavingsPercent) Then
                     Payload = Compressed
                     PayloadLength = Compressed.Length
-                    CompressionMethod = Options.CompressionMethod
-                    MarkCompressionFlag(CompressionMethod)
+                    StoredCompressionMethod = CompressionMethodToUse
+                    MarkCompressionFlag(StoredCompressionMethod)
                 End If
 
             End If
-
-            Dim EncryptionMethod =
-                If(_CurrentWriteEncryptionEnabled,
-                   ChunkEncryptionMethods.AesCtrFileMasterKey,
-                   ChunkEncryptionMethods.None)
 
             Dim Flags = ChunkFlags.None
 
@@ -74,7 +98,7 @@ Namespace Streams
             Dim Record(RecordLength - 1) As Byte
 
             System.Buffer.BlockCopy(BitConverter.GetBytes(ChunkIndex), 0, Record, 0, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(CompressionMethod)), 0, Record, ChunkCompressionMethodOffset, 4)
+            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(StoredCompressionMethod)), 0, Record, ChunkCompressionMethodOffset, 4)
             System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(EncryptionMethod)), 0, Record, ChunkEncryptionMethodOffset, 4)
             System.Buffer.BlockCopy(BitConverter.GetBytes(PlainLength), 0, Record, ChunkPlainLengthOffset, 4)
             System.Buffer.BlockCopy(BitConverter.GetBytes(PayloadLength), 0, Record, ChunkPayloadLengthOffset, 4)
@@ -111,8 +135,10 @@ Namespace Streams
                    PublicIntegrityKey)
 
             Using Hmac As New HMACSHA256(RecordMacKey)
+
                 Dim Mac = Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
                 System.Buffer.BlockCopy(Mac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize)
+
             End Using
 
             Dim NewRecordOffset = GetNextChunkRecordWriteOffset()
@@ -131,6 +157,22 @@ Namespace Streams
             _IndexOffset = NewRecordOffset + Record.Length
 
         End Sub
+
+        Private Function ShouldUseCompressed(PlainLength As Integer,
+                                             CompressedLength As Integer,
+                                             CompressionMinimumSavingsPercent As Integer) As Boolean
+
+            If PlainLength <= 0 Then Return False
+            If CompressedLength <= 0 OrElse CompressedLength >= PlainLength Then Return False
+
+            If CompressionMinimumSavingsPercent < 0 Then CompressionMinimumSavingsPercent = 0
+            If CompressionMinimumSavingsPercent > 100 Then CompressionMinimumSavingsPercent = 100
+
+            Dim SavedPercent = ((PlainLength - CompressedLength) * 100.0R) / PlainLength
+
+            Return SavedPercent >= CompressionMinimumSavingsPercent
+
+        End Function
 
         Private Function GetNextChunkRecordWriteOffset() As Long
 
