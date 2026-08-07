@@ -4,13 +4,13 @@
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
-    <ProjectGuid>{4D29CECB-5C0B-4DF4-B97E-90740B76544D}</ProjectGuid>
-    <OutputType>WinExe</OutputType>
-    <StartupObject>StreamEncryption.My.MyApplication</StartupObject>
-    <RootNamespace>StreamEncryption</RootNamespace>
-    <AssemblyName>StreamEncryption</AssemblyName>
+    <ProjectGuid>{7DD66AFB-3628-40C5-92A8-5CE0FB4FEA32}</ProjectGuid>
+    <OutputType>Exe</OutputType>
+    <StartupObject>UnitTests.Autoexec</StartupObject>
+    <RootNamespace>UnitTests</RootNamespace>
+    <AssemblyName>UnitTests</AssemblyName>
     <FileAlignment>512</FileAlignment>
-    <MyType>WindowsForms</MyType>
+    <MyType>Console</MyType>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
     <Deterministic>true</Deterministic>
@@ -22,9 +22,8 @@
     <DefineDebug>true</DefineDebug>
     <DefineTrace>true</DefineTrace>
     <OutputPath>bin\Debug\</OutputPath>
-    <DocumentationFile>StreamEncryption.xml</DocumentationFile>
+    <DocumentationFile>UnitTests.xml</DocumentationFile>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
-    <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
     <PlatformTarget>AnyCPU</PlatformTarget>
@@ -33,7 +32,7 @@
     <DefineTrace>true</DefineTrace>
     <Optimize>true</Optimize>
     <OutputPath>bin\Release\</OutputPath>
-    <DocumentationFile>StreamEncryption.xml</DocumentationFile>
+    <DocumentationFile>UnitTests.xml</DocumentationFile>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
   </PropertyGroup>
   <PropertyGroup>
@@ -49,9 +48,6 @@
     <OptionInfer>On</OptionInfer>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="i00CodeLib">
-      <HintPath>..\..\GEKCo\i00CodeLib\bin\Debug\i00CodeLib.dll</HintPath>
-    </Reference>
     <Reference Include="System" />
     <Reference Include="System.Data" />
     <Reference Include="System.Deployment" />
@@ -77,15 +73,8 @@
     <Import Include="System.Threading.Tasks" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="ChunkedStream\ChunkedStream.Compression.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Diagnostics.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Recovery.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Defrag.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Crypto.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Storage.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Structure.vb" />
-    <Compile Include="Lz4Block.vb" />
-    <Compile Include="ChunkedStream\_ChunkedStream.vb" />
+    <Compile Include="Autoexec.vb" />
+    <Compile Include="Tests\Streams.vb" />
     <Compile Include="Form1.vb">
       <SubType>Form</SubType>
     </Compile>
@@ -97,6 +86,7 @@
     <Compile Include="My Project\Application.Designer.vb">
       <AutoGen>True</AutoGen>
       <DependentUpon>Application.myapp</DependentUpon>
+      <DesignTime>True</DesignTime>
     </Compile>
     <Compile Include="My Project\Resources.Designer.vb">
       <AutoGen>True</AutoGen>
@@ -108,12 +98,8 @@
       <DependentUpon>Settings.settings</DependentUpon>
       <DesignTimeSharedInput>True</DesignTimeSharedInput>
     </Compile>
-    <Compile Include="ChunkedStream\ChunkedStream.Structure.Extensions.vb" />
   </ItemGroup>
   <ItemGroup>
-    <EmbeddedResource Include="Form1.resx">
-      <DependentUpon>Form1.vb</DependentUpon>
-    </EmbeddedResource>
     <EmbeddedResource Include="My Project\Resources.resx">
       <Generator>VbMyResourcesResXFileCodeGenerator</Generator>
       <LastGenOutput>Resources.Designer.vb</LastGenOutput>
@@ -134,9 +120,14 @@
     <None Include="App.config" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="Test.png">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
+    <ProjectReference Include="..\..\StreamEncryption\StreamEncryption.vbproj">
+      <Project>{4d29cecb-5c0b-4df4-b97e-90740b76544d}</Project>
+      <Name>StreamEncryption</Name>
+    </ProjectReference>
+    <ProjectReference Include="..\UnitTester\UnitTester.vbproj">
+      <Project>{7409357f-b8e6-41d9-849d-39433fb452a5}</Project>
+      <Name>UnitTester</Name>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.VisualBasic.targets" />
 </Project>
