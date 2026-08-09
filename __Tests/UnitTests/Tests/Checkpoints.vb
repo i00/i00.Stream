@@ -283,17 +283,15 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Outer = Cs.CreateCheckpoint()
-                        Dim Inner = Cs.CreateCheckpoint()
-
-                        AssertThrows(Of InvalidOperationException)(
-                            Sub()
-                                Outer.Commit()
-                            End Sub,
-                            "Checkpoint commit should require LIFO order.")
-
-                        Inner.Rollback()
-                        Outer.Rollback()
+                        Using Outer = Cs.CreateCheckpoint()
+                            Using Inner = Cs.CreateCheckpoint()
+                                AssertThrows(Of InvalidOperationException)(
+                                    Sub()
+                                        Outer.Commit()
+                                    End Sub,
+                                    "Checkpoint commit should require LIFO order.")
+                            End Using
+                        End Using
 
                     End Using
 

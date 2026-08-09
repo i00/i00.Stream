@@ -65,6 +65,34 @@ Namespace Tests
 
         End Function
 
+        Friend Function MakeRandomData(Length As Integer,
+                                       Seed As Integer) As Byte()
+
+            Dim Result = MakeBuffer(Length)
+
+            Dim rng As New Random(Seed)
+
+            For i = 0 To Result.Length - 1
+                Result(i) = CByte(rng.Next(256))
+            Next
+            Return Result
+
+        End Function
+
+        Friend Function MakeCompressableData(CompressableRatio As Double,
+                                             Length As Integer,
+                                             Seed As Integer) As Byte()
+
+            Dim RandomDataPartLen = CInt(Length * CompressableRatio)
+            Dim PatternPartLen = Length - RandomDataPartLen
+            Dim Result = MakeRandomData(RandomDataPartLen, Seed).Concat(
+                         MakeRepeatingPattern(PatternPartLen, Seed)).
+                         ToArray()
+
+            Return Result
+
+        End Function
+
         Friend Function MakeRepeatingPattern(Length As Integer,
                                               Period As Integer) As Byte()
 

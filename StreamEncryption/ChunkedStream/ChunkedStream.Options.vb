@@ -241,123 +241,83 @@
 
                 Dim Struct = GetStructure()
                 Dim CancellationToken As New CancellationToken()
-                Dim Checkpoint As ChunkedStreamCheckpoint = Nothing
 
-                Try
+                For Each chunk In Struct.Chunks
 
-                    For Each chunk In Struct.Chunks
+                    Result.ExaminedChunks += 1
 
-                        Result.ExaminedChunks += 1
+                    Dim PlainLoaded = False
+                    Dim NeedsCompressionChange = False
+                    Dim NeedsEncryptionChange = False
+                    Dim NeedsSparsenessChange = False
+                    Dim NewlySparse = False
+                    Dim NewlyAllocated = False
 
-                        Dim PlainLoaded = False
-                        Dim NeedsCompressionChange = False
-                        Dim NeedsEncryptionChange = False
-                        Dim NeedsSparsenessChange = False
-                        Dim NewlySparse = False
-                        Dim NewlyAllocated = False
+                    Dim StoreSparsePolicy = GetApplyOptionsStoreSparsePolicy(chunk, AppliesSparseness)
 
-                        Dim StoreSparsePolicy = GetApplyOptionsStoreSparsePolicy(chunk, AppliesSparseness)
+                    Dim WillBeSparse =
+                        chunk.PlainLength = 0 OrElse
+                        (Not StoreSparsePolicy AndAlso chunk.IsPlaintextAllZero)
 
-                        Dim WillBeSparse =
-                            chunk.PlainLength = 0 OrElse
-                            (Not StoreSparsePolicy AndAlso chunk.IsPlaintextAllZero)
+                    Dim CompressionPolicy =
+                        GetApplyOptionsCompressionPolicy(chunk, AppliesCompression)
 
-                        Dim CompressionPolicy =
-                            GetApplyOptionsCompressionPolicy(chunk, AppliesCompression)
+                    Dim ForceCompression =
+                        Not AppliesCompression AndAlso
+                        chunk.IsAllocated AndAlso
+                        chunk.IsCompressed
 
-                        Dim ForceCompression =
-                            Not AppliesCompression AndAlso
-                            chunk.IsAllocated AndAlso
-                            chunk.IsCompressed
+                    Dim EncryptionPolicy =
+                        GetApplyOptionsEncryptionPolicy(chunk, AppliesEncryption)
 
-                        Dim EncryptionPolicy =
-                            GetApplyOptionsEncryptionPolicy(chunk, AppliesEncryption)
+                    If AppliesSparseness Then
 
-                        If AppliesSparseness Then
+                        If chunk.IsPlaintextAllZero AndAlso chunk.PlainLength > 0 Then
 
-                            If chunk.IsPlaintextAllZero AndAlso chunk.PlainLength > 0 Then
+                            If Options.StoreSparseChunks AndAlso chunk.IsSparse Then
 
-                                If Options.StoreSparseChunks AndAlso chunk.IsSparse Then
+                                NeedsSparsenessChange = True
+                                NewlyAllocated = True
 
-                                    NeedsSparsenessChange = True
-                                    NewlyAllocated = True
+                            ElseIf Not Options.StoreSparseChunks AndAlso chunk.IsAllocated Then
 
-                                ElseIf Not Options.StoreSparseChunks AndAlso chunk.IsAllocated Then
-
-                                    NeedsSparsenessChange = True
-                                    NewlySparse = True
-
-                                End If
+                                NeedsSparsenessChange = True
+                                NewlySparse = True
 
                             End If
 
                         End If
 
-                        If AppliesEncryption AndAlso chunk.IsAllocated AndAlso Not WillBeSparse Then
+                    End If
 
-                            Dim DesiredEncryption =
-                                If(_CurrentWriteEncryptionEnabled,
-                                   ChunkEncryptionMethods.AesCtrFileMasterKey,
-                                   ChunkEncryptionMethods.None)
+                    If AppliesEncryption AndAlso chunk.IsAllocated AndAlso Not WillBeSparse Then
 
-                            If chunk.EncryptionMethod <> DesiredEncryption Then
-                                NeedsEncryptionChange = True
-                            End If
+                        Dim DesiredEncryption =
+                            If(_CurrentWriteEncryptionEnabled,
+                                ChunkEncryptionMethods.AesCtrFileMasterKey,
+                                ChunkEncryptionMethods.None)
 
+                        If chunk.EncryptionMethod <> DesiredEncryption Then
+                            NeedsEncryptionChange = True
                         End If
 
-                        If AppliesCompression AndAlso chunk.IsAllocated AndAlso Not WillBeSparse Then
+                    End If
 
-                            NeedsCompressionChange =
-                                NeedsCompressionRewrite(chunk,
-                                                        CompressionPolicy,
-                                                        PlainLoaded)
+                    If AppliesCompression AndAlso chunk.IsAllocated AndAlso Not WillBeSparse Then
 
-                        End If
+                        NeedsCompressionChange =
+                            NeedsCompressionRewrite(chunk,
+                                                    CompressionPolicy,
+                                                    PlainLoaded)
 
-                        Dim NeedsRewrite =
-                            NeedsCompressionChange OrElse
-                            NeedsEncryptionChange OrElse
-                            NeedsSparsenessChange
+                    End If
 
-                        If Not NeedsRewrite Then
-                            ReportProgress(ProgressCallback, Result.ExaminedChunks, Struct.ChunkCount, ProcessUnitTypes.Chunks, CancellationToken)
+                    Dim NeedsRewrite =
+                        NeedsCompressionChange OrElse
+                        NeedsEncryptionChange OrElse
+                        NeedsSparsenessChange
 
-                            If CancellationToken.Cancel Then
-                                Result.WasCancelled = True
-                                Exit For
-                            End If
-
-                            Continue For
-                        End If
-
-                        If Checkpoint Is Nothing Then
-                            Checkpoint = CreateCheckpoint()
-                        End If
-
-                        EnsurePlainLoadedForApplyOptions(chunk, PlainLoaded)
-
-                        WriteChunkRecordWithPolicy(chunk.Index,
-                                                   _ChunkPlain,
-                                                   chunk.PlainLength,
-                                                   StoreSparsePolicy,
-                                                   CompressionPolicy,
-                                                   Options.CompressionMinimumSavingsPercent,
-                                                   ForceCompression,
-                                                   EncryptionPolicy)
-
-                        Result.RewrittenChunks += 1
-
-                        If NeedsCompressionChange Then Result.CompressionChanges += 1
-                        If NeedsEncryptionChange Then Result.EncryptionChanges += 1
-
-                        If NeedsSparsenessChange Then
-                            Result.SparsenessChanges += 1
-
-                            If NewlySparse Then Result.NewlySparseChunks += 1
-                            If NewlyAllocated Then Result.NewlyAllocatedChunks += 1
-                        End If
-
+                    If Not NeedsRewrite Then
                         ReportProgress(ProgressCallback, Result.ExaminedChunks, Struct.ChunkCount, ProcessUnitTypes.Chunks, CancellationToken)
 
                         If CancellationToken.Cancel Then
@@ -365,35 +325,52 @@
                             Exit For
                         End If
 
-                    Next
-
-                    If Result.WasCancelled Then
-
-                        If Checkpoint IsNot Nothing AndAlso Checkpoint.IsActive Then
-                            Checkpoint.Rollback()
-                        End If
-
-                        Result.PhysicalLengthAfter = _Fs.Length
-
-                        Return Result
-
+                        Continue For
                     End If
 
-                    If Checkpoint IsNot Nothing Then
-                        Checkpoint.Commit(Durable)
+                    EnsurePlainLoadedForApplyOptions(chunk, PlainLoaded)
+
+                    WriteChunkRecordWithPolicy(chunk.Index,
+                                                _ChunkPlain,
+                                                chunk.PlainLength,
+                                                StoreSparsePolicy,
+                                                CompressionPolicy,
+                                                Options.CompressionMinimumSavingsPercent,
+                                                ForceCompression,
+                                                EncryptionPolicy)
+
+                    Result.RewrittenChunks += 1
+
+                    If NeedsCompressionChange Then Result.CompressionChanges += 1
+                    If NeedsEncryptionChange Then Result.EncryptionChanges += 1
+
+                    If NeedsSparsenessChange Then
+                        Result.SparsenessChanges += 1
+
+                        If NewlySparse Then Result.NewlySparseChunks += 1
+                        If NewlyAllocated Then Result.NewlyAllocatedChunks += 1
                     End If
+
+                    ReportProgress(ProgressCallback, Result.ExaminedChunks, Struct.ChunkCount, ProcessUnitTypes.Chunks, CancellationToken)
+
+                    If CancellationToken.Cancel Then
+                        Result.WasCancelled = True
+                        Exit For
+                    End If
+
+                Next
+
+                If Result.WasCancelled Then
 
                     Result.PhysicalLengthAfter = _Fs.Length
 
                     Return Result
 
-                Finally
+                End If
 
-                    If Checkpoint IsNot Nothing AndAlso Checkpoint.IsActive Then
-                        Checkpoint.Dispose()
-                    End If
+                Result.PhysicalLengthAfter = _Fs.Length
 
-                End Try
+                Return Result
 
             End SyncLock
 

@@ -188,155 +188,6 @@ Namespace Streams
                                                    UnitType As ProcessUnitTypes,
                                                    CancellationToken As CancellationToken)
 
-        ''' <summary>
-        ''' A data-only checkpoint for ChunkedStream.
-        ''' </summary>
-        ''' <remarks>
-        ''' Checkpoints may be nested, but must be committed or rolled back in LIFO order.
-        ''' A committed nested checkpoint is still part of its parent checkpoint and will be rolled back if the parent rolls back.
-        ''' Checkpoints protect stream data only. Options, encryption information and key wrapping changes are not rolled back.
-        ''' </remarks>
-        Public NotInheritable Class ChunkedStreamCheckpoint
-            Implements IDisposable
-
-            Private ReadOnly _Owner As ChunkedStream
-            Private _IsCommitted As Boolean
-            Private _IsRolledBack As Boolean
-            Private _Disposed As Boolean
-
-            Friend ReadOnly Property State As CheckpointState
-
-            Friend Sub New(Owner As ChunkedStream, Depth As Integer)
-
-                If Owner Is Nothing Then Throw New ArgumentNullException(NameOf(Owner))
-
-                _Owner = Owner
-                Me.Depth = Depth
-
-                State = New CheckpointState With {
-                    .LogicalLength = Owner._Length,
-                    .PhysicalLength = Owner._Fs.Length,
-                    .IndexOffset = Owner._IndexOffset,
-                    .HeaderFlags = Owner._HeaderFlags,
-                    .Index = New List(Of ChunkIndexEntry)(Owner._Index)
-                }
-
-            End Sub
-
-            ''' <summary>
-            ''' Gets the checkpoint nesting depth.
-            ''' </summary>
-            Public ReadOnly Property Depth As Integer
-
-            ''' <summary>
-            ''' True while the checkpoint has not been committed, rolled back or disposed.
-            ''' </summary>
-            Public ReadOnly Property IsActive As Boolean
-                Get
-                    Return Not _IsCommitted AndAlso Not _IsRolledBack AndAlso Not _Disposed
-                End Get
-            End Property
-
-            ''' <summary>
-            ''' True when this checkpoint has been committed.
-            ''' </summary>
-            Public ReadOnly Property IsCommitted As Boolean
-                Get
-                    Return _IsCommitted
-                End Get
-            End Property
-
-            ''' <summary>
-            ''' True when this checkpoint has been rolled back.
-            ''' </summary>
-            Public ReadOnly Property IsRolledBack As Boolean
-                Get
-                    Return _IsRolledBack
-                End Get
-            End Property
-
-            ''' <summary>
-            ''' Commits this checkpoint.
-            ''' </summary>
-            ''' <param name="Durable">
-            ''' If True, the outermost checkpoint commit flushes to durable storage when the backing stream supports it.
-            ''' </param>
-            ''' <remarks>
-            ''' For nested checkpoints, Commit promotes the checkpoint into its parent but does not persist the stream.
-            ''' Only the outermost checkpoint commit writes the new index and header.
-            ''' </remarks>
-            Public Sub Commit(Optional Durable As Boolean = True)
-
-                If Not IsActive Then
-                    Throw New InvalidOperationException("Checkpoint is no longer active.")
-                End If
-
-                _Owner.CommitCheckpoint(Me, Durable)
-
-            End Sub
-
-            ''' <summary>
-            ''' Rolls stream data back to the checkpoint state.
-            ''' </summary>
-            ''' <remarks>
-            ''' If this checkpoint contains committed child checkpoints, those child changes are rolled back as part of this rollback.
-            ''' Options and encryption settings are not rolled back.
-            ''' </remarks>
-            Public Sub Rollback()
-
-                If Not IsActive Then
-                    Throw New InvalidOperationException("Checkpoint is no longer active.")
-                End If
-
-                _Owner.RollbackCheckpoint(Me)
-
-            End Sub
-
-            Friend Sub MarkCommitted()
-
-                _IsCommitted = True
-
-            End Sub
-
-            Friend Sub MarkRolledBack()
-
-                _IsRolledBack = True
-
-            End Sub
-
-            ''' <summary>
-            ''' Rolls back the checkpoint if it has not already been committed or rolled back.
-            ''' </summary>
-            Public Sub Dispose() Implements IDisposable.Dispose
-
-                If _Disposed Then Return
-
-                Try
-                    If IsActive Then
-                        Rollback()
-                    End If
-                Finally
-                    _Disposed = True
-                End Try
-
-            End Sub
-
-        End Class
-
-        Friend NotInheritable Class CheckpointState
-
-            Public Property LogicalLength As Long
-
-            Public Property PhysicalLength As Long
-
-            Public Property IndexOffset As Long
-
-            Public Property HeaderFlags As HeaderFlags
-
-            Public Property Index As List(Of ChunkIndexEntry)
-
-        End Class
-
         Public Const ChunkSize As Integer = 64 * 1024
         Public Const IvSize As Integer = 16
         Public Const MacSize As Integer = 32
@@ -428,7 +279,6 @@ Namespace Streams
 
         Private ReadOnly _Fs As Stream
         Private ReadOnly _SyncRoot As New Object()
-        Private ReadOnly _CheckpointStack As New List(Of ChunkedStreamCheckpoint)
 
         Private _Options As ChunkedStreamOptions
         Public Property Options As ChunkedStreamOptions
@@ -501,36 +351,6 @@ Namespace Streams
                     ThrowIfDisposed()
                     Return _Length
                 End SyncLock
-            End Get
-        End Property
-
-        ''' <summary>
-        ''' True when one or more data-only checkpoints are active.
-        ''' </summary>
-        Public ReadOnly Property HasActiveCheckpoint As Boolean
-            Get
-                SyncLock _SyncRoot
-                    ThrowIfDisposed()
-                    Return HasOpenCheckpoint
-                End SyncLock
-            End Get
-        End Property
-
-        ''' <summary>
-        ''' Number of currently active nested checkpoints.
-        ''' </summary>
-        Public ReadOnly Property CheckpointDepth As Integer
-            Get
-                SyncLock _SyncRoot
-                    ThrowIfDisposed()
-                    Return _CheckpointStack.Count
-                End SyncLock
-            End Get
-        End Property
-
-        Private ReadOnly Property HasOpenCheckpoint As Boolean
-            Get
-                Return _CheckpointStack.Count > 0
             End Get
         End Property
 
@@ -745,117 +565,6 @@ Namespace Streams
             Return Best
 
         End Function
-
-        ''' <summary>
-        ''' Creates a data-only checkpoint.
-        ''' </summary>
-        ''' <remarks>
-        ''' Writes and length changes made while the checkpoint is active are visible to reads immediately.
-        ''' If Commit is called, changes are retained. If Commit is not called before disposal,
-        ''' the stream rolls back to the checkpoint state.
-        '''
-        ''' Checkpoints may be nested, but must be committed or rolled back in LIFO order.
-        ''' A committed nested checkpoint is still part of its parent checkpoint and will be rolled back
-        ''' if the parent rolls back.
-        '''
-        ''' Checkpoints protect stream data only. Options, encryption information and file master key
-        ''' wrapping changes are not rolled back.
-        '''
-        ''' Defragmentation is not allowed while a checkpoint is active.
-        ''' </remarks>
-        Public Function CreateCheckpoint() As ChunkedStreamCheckpoint
-
-            SyncLock _SyncRoot
-
-                ThrowIfDisposed()
-
-                Dim Checkpoint = New ChunkedStreamCheckpoint(Me, _CheckpointStack.Count + 1)
-
-                _CheckpointStack.Add(Checkpoint)
-
-                If _CheckpointStack.Count = 1 Then
-                    WriteCheckpointRecoveryState()
-                End If
-
-                Return Checkpoint
-
-            End SyncLock
-
-        End Function
-
-        Private Sub CommitCheckpoint(Checkpoint As ChunkedStreamCheckpoint,
-                                     Durable As Boolean)
-
-            SyncLock _SyncRoot
-
-                ThrowIfDisposed()
-                EnsureTopCheckpoint(Checkpoint)
-
-                If _CheckpointStack.Count > 1 Then
-                    _CheckpointStack.RemoveAt(_CheckpointStack.Count - 1)
-                    Checkpoint.MarkCommitted()
-                    Return
-                End If
-
-                Dim RecoveryArea(RecoveryAreaLength - 1) As Byte
-                System.Buffer.BlockCopy(_Header, RecoveryAreaOffset, RecoveryArea, 0, RecoveryArea.Length)
-
-                Try
-                    ClearRecoveryAreaInMemory()
-
-                    Dim CommitIndexOffset = Math.Max(_Fs.Length, GetDataEndFromIndex())
-                    PersistIndexAndHeader(CommitIndexOffset, Durable)
-
-                    _CheckpointStack.RemoveAt(_CheckpointStack.Count - 1)
-                    Checkpoint.MarkCommitted()
-
-                Catch
-                    System.Buffer.BlockCopy(RecoveryArea, 0, _Header, RecoveryAreaOffset, RecoveryArea.Length)
-                    Throw
-                End Try
-
-            End SyncLock
-
-        End Sub
-
-        Private Sub RollbackCheckpoint(Checkpoint As ChunkedStreamCheckpoint)
-
-            SyncLock _SyncRoot
-
-                ThrowIfDisposed()
-                EnsureTopCheckpoint(Checkpoint)
-
-                _Length = Checkpoint.State.LogicalLength
-                _IndexOffset = Checkpoint.State.IndexOffset
-                _HeaderFlags = Checkpoint.State.HeaderFlags
-
-                _Index.Clear()
-                _Index.AddRange(Checkpoint.State.Index)
-
-                If _Fs.Length > Checkpoint.State.PhysicalLength Then
-                    _Fs.SetLength(Checkpoint.State.PhysicalLength)
-                End If
-
-                _CheckpointStack.RemoveAt(_CheckpointStack.Count - 1)
-                Checkpoint.MarkRolledBack()
-
-                If _CheckpointStack.Count = 0 Then
-                    ClearRecoveryState()
-                End If
-
-            End SyncLock
-
-        End Sub
-
-        Private Sub EnsureTopCheckpoint(Checkpoint As ChunkedStreamCheckpoint)
-
-            If Checkpoint Is Nothing Then Throw New ArgumentNullException(NameOf(Checkpoint))
-
-            If _CheckpointStack.Count = 0 OrElse Not Object.ReferenceEquals(_CheckpointStack(_CheckpointStack.Count - 1), Checkpoint) Then
-                Throw New InvalidOperationException("Checkpoints must be committed or rolled back in LIFO order.")
-            End If
-
-        End Sub
 
         Private Sub ClearRecoveryAreaInMemory()
 
@@ -1102,7 +811,7 @@ Namespace Streams
                     RemoveHandler Options.EncryptionInfoChanged, AddressOf Options_EncryptionInfoChanged
 
                     While _CheckpointStack.Count > 0
-                        RollbackCheckpoint(_CheckpointStack(_CheckpointStack.Count - 1))
+                        CloseCheckpoint(_CheckpointStack(_CheckpointStack.Count - 1))
                     End While
 
                     If _Fs.CanWrite Then _Fs.Flush()

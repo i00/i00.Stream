@@ -187,8 +187,14 @@ Namespace Streams
 
         Private Sub WriteCheckpointRecoveryState()
 
-            If GetRecoveryState() <> RecoveryStates.None Then
-                Throw New InvalidOperationException("Cannot create a checkpoint while another recovery state is active.")
+            Dim CurrentState = GetRecoveryState()
+
+            If CurrentState <> RecoveryStates.None AndAlso
+               CurrentState <> RecoveryStates.CheckpointActive Then
+
+                Throw New InvalidOperationException(
+                    "Another recovery operation is active.")
+
             End If
 
             Array.Clear(_Header, RecoveryAreaOffset, RecoveryAreaLength)
