@@ -23,7 +23,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Cs.Write(0, MakeBuffer(ChunkedStream.ChunkSize))
+                        Cs.Write(0, MakeBuffer(ChunkedStream.DefaultChunkSize))
 
                         Dim Struct = Cs.GetStructure()
                         Dim Chunk = Struct.Chunks.First()
@@ -269,20 +269,20 @@ Namespace Tests
 
                 Using Ms As New MemoryStream()
 
-                    Dim PlainData = MakePattern(ChunkedStream.ChunkSize, 19)
-                    Dim EncryptedData = MakePattern(ChunkedStream.ChunkSize, 23)
+                    Dim PlainData = MakePattern(ChunkedStream.DefaultChunkSize, 19)
+                    Dim EncryptedData = MakePattern(ChunkedStream.DefaultChunkSize, 23)
 
                     Using Cs = ChunkedStream.Open(Ms)
 
                         Cs.Write(0, PlainData)
                         Cs.Options.EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(6))
-                        Cs.Write(ChunkedStream.ChunkSize, EncryptedData)
+                        Cs.Write(ChunkedStream.DefaultChunkSize, EncryptedData)
 
                         Dim PlainResult = MakeBuffer(PlainData.Length)
                         Dim EncryptedResult = MakeBuffer(EncryptedData.Length)
 
                         Cs.Read(0, PlainResult)
-                        Cs.Read(ChunkedStream.ChunkSize, EncryptedResult)
+                        Cs.Read(ChunkedStream.DefaultChunkSize, EncryptedResult)
 
                         AssertBytesEqual(PlainData, PlainResult, "Plain data changed after enabling encryption.")
                         AssertBytesEqual(EncryptedData, EncryptedResult, "Encrypted data did not round-trip after enabling encryption.")

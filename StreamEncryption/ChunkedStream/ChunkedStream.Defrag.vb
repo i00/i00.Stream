@@ -372,36 +372,198 @@ Namespace Streams
         Private Sub DefragmentRebuild(ProgressCallback As StreamProgressCallback,
                                       CancellationToken As CancellationToken)
 
-            Dim TotalBytes = _Index.Where(Function(entry) entry.Offset > 0 AndAlso entry.RecordLength > 0).
-                                    Sum(Function(entry) CLng(entry.RecordLength))
-            Dim ProcessedBytes As Long = 0
+            If Options.ChunkSize <= 0 Then
+                Throw New InvalidOperationException("Chunk size must be greater than zero.")
+            End If
 
-            For ChunkIndex = 0 To _Index.Count - 1
+            Dim OriginalPhysicalLength = _Fs.Length
+            Dim OriginalChunkSize = _ChunkSize
+            Dim OriginalChunkPlain = _ChunkPlain
+
+            WriteChunkSizeRebuildRecoveryState(OriginalPhysicalLength)
+
+            Dim TargetChunkSize = Options.ChunkSize
+            Dim TargetChunkCount = If(_Length <= 0,
+                                      0,
+                                      CInt(((_Length - 1) \ TargetChunkSize) + 1))
+
+            Dim NewIndex As New List(Of ChunkIndexEntry)(TargetChunkCount)
+            Dim TargetBuffer(TargetChunkSize - 1) As Byte
+            Dim PhysicalOffset = Math.Max(_Fs.Length, GetDataEndFromIndex())
+
+            Dim ProcessedBytes As Long = 0
+            Dim TotalBytes = Math.Max(1L, _Length)
+
+            For TargetChunkIndex = 0 To TargetChunkCount - 1
+
                 If CancellationToken.Cancel Then Return
 
-                Dim Entry = _Index(ChunkIndex)
+                Array.Clear(TargetBuffer, 0, TargetBuffer.Length)
 
-                If Entry.Offset = 0 AndAlso Entry.RecordLength = 0 Then Continue For
+                Dim LogicalOffset = CLng(TargetChunkIndex) * TargetChunkSize
+                Dim PlainLength = CInt(Math.Min(CLng(TargetChunkSize), _Length - LogicalOffset))
 
-                Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
-                LoadChunk(ChunkIndex, _ChunkPlain)
+                If PlainLength > 0 Then
+                    Dim ReadBuffer(PlainLength - 1) As Byte
+                    Read(LogicalOffset, ReadBuffer)
+                    System.Buffer.BlockCopy(ReadBuffer, 0, TargetBuffer, 0, PlainLength)
+                End If
 
-                Dim ChunkStart = CLng(ChunkIndex) * ChunkSize
-                Dim PlainLength = CInt(Math.Min(CLng(ChunkSize), Math.Max(0L, _Length - ChunkStart)))
+                Dim Entry = WriteChunkRecordForRebuild(TargetChunkIndex,
+                                                       TargetBuffer,
+                                                       PlainLength,
+                                                       PhysicalOffset)
 
-                WriteChunkRecord(ChunkIndex, _ChunkPlain, PlainLength)
-                PersistIndexAndHeader(_IndexOffset)
+                NewIndex.Add(Entry)
 
-                ProcessedBytes += Entry.RecordLength
-                Dim ReportedProcessedBytes = ProcessedBytes \ 2 '< \ 2 here so that we do 0-50% ... then DefragmentSequence does 50% - 100% due to the DefragmentSequenceProgressModes.RebuildFinalPhase
-                ReportProgress(ProgressCallback, ReportedProcessedBytes, TotalBytes, ProcessUnitTypes.Bytes, CancellationToken)
+                If Entry.Offset > 0 AndAlso Entry.RecordLength > 0 Then
+                    PhysicalOffset = Entry.Offset + Entry.RecordLength
+                End If
+
+                ProcessedBytes += PlainLength
+
+                ReportProgress(ProgressCallback,
+                               Math.Min(ProcessedBytes, TotalBytes),
+                               TotalBytes,
+                               ProcessUnitTypes.Bytes,
+                               CancellationToken)
+
             Next
 
-            If CancellationToken.Cancel Then Return
+            If CancellationToken.Cancel Then
+                _ChunkSize = OriginalChunkSize
+                _ChunkPlain = OriginalChunkPlain
+                Return
+            End If
 
-            DefragmentSequence(DefragmentSequenceProgressModes.RebuildFinalPhase, ProgressCallback, CancellationToken)
+            _Index.Clear()
+            _Index.AddRange(NewIndex)
+
+            _ChunkSize = TargetChunkSize
+            _ChunkPlain = New Byte(_ChunkSize - 1) {}
+
+            ClearRecoveryAreaInMemory()
+
+            PersistIndexAndHeader(PhysicalOffset, True)
+
+            ReportProgress(ProgressCallback,
+                           TotalBytes,
+                           TotalBytes,
+                           ProcessUnitTypes.Bytes,
+                           CancellationToken)
 
         End Sub
+
+        Private Function WriteChunkRecordForRebuild(ChunkIndex As Long,
+                                                    Plain As Byte(),
+                                                    PlainLength As Integer,
+                                                    PhysicalOffset As Long) As ChunkIndexEntry
+
+            If ChunkIndex < 0 OrElse ChunkIndex > Integer.MaxValue Then Throw New ArgumentOutOfRangeException(NameOf(ChunkIndex))
+            If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
+            If PlainLength < 0 OrElse PlainLength > Options.ChunkSize Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
+
+            Dim CompressionRatioThreshold = Options.CompressionRatioThreshold
+
+            If CompressionRatioThreshold < MinimumCompressionRatioThreshold Then CompressionRatioThreshold = MinimumCompressionRatioThreshold
+            If CompressionRatioThreshold > MaximumCompressionRatioThreshold Then CompressionRatioThreshold = MaximumCompressionRatioThreshold
+
+            Dim PlaintextAllZero = PlainLength = 0 OrElse IsAllZero(Plain, PlainLength)
+
+            If PlainLength = 0 OrElse (Not Options.StoreSparseChunks AndAlso PlaintextAllZero) Then
+                _HeaderFlags = _HeaderFlags Or HeaderFlags.SparseChunks
+                Return New ChunkIndexEntry()
+            End If
+
+            Dim Payload As Byte() = Plain
+            Dim PayloadLength = PlainLength
+            Dim StoredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None
+            Dim CompressionEvaluatedMethod = ChunkedStreamOptions.CompressionMethods.None
+            Dim CompressionEvaluatedPercent As Byte = 100
+
+            If Options.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None AndAlso PlainLength > 0 Then
+
+                Dim Compressed = CompressPayload(Options.CompressionMethod, Plain, PlainLength)
+
+                CompressionEvaluatedMethod = Options.CompressionMethod
+                CompressionEvaluatedPercent = GetCompressionEvaluatedPercent(PlainLength, Compressed.Length)
+
+                If CompressionEvaluatedPercent / 100.0R <= CompressionRatioThreshold Then
+                    Payload = Compressed
+                    PayloadLength = Compressed.Length
+                    StoredCompressionMethod = Options.CompressionMethod
+                    MarkCompressionFlag(StoredCompressionMethod)
+                End If
+
+            End If
+
+            Dim EncryptionMethod =
+                        If(_CurrentWriteEncryptionEnabled,
+                           ChunkEncryptionMethods.AesCtrFileMasterKey,
+                           ChunkEncryptionMethods.None)
+
+            Dim Flags = ChunkFlags.None
+
+            If PlaintextAllZero Then
+                Flags = Flags Or ChunkFlags.PlaintextAllZero
+            End If
+
+            Dim RecordLength = ChunkRecordDataOffset + PayloadLength + MacSize
+            Dim Record(RecordLength - 1) As Byte
+
+            System.Buffer.BlockCopy(BitConverter.GetBytes(ChunkIndex), 0, Record, 0, 8)
+            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(StoredCompressionMethod)), 0, Record, ChunkCompressionMethodOffset, 4)
+            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(EncryptionMethod)), 0, Record, ChunkEncryptionMethodOffset, 4)
+            System.Buffer.BlockCopy(BitConverter.GetBytes(PlainLength), 0, Record, ChunkPlainLengthOffset, 4)
+            System.Buffer.BlockCopy(BitConverter.GetBytes(PayloadLength), 0, Record, ChunkPayloadLengthOffset, 4)
+            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(Flags)), 0, Record, ChunkFlagsOffset, 4)
+            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(CompressionEvaluatedMethod)), 0, Record, ChunkCompressionEvaluatedMethodOffset, 4)
+            Record(ChunkCompressionEvaluatedPercentOffset) = CompressionEvaluatedPercent
+
+            _Rng.GetBytes(_Counter)
+            System.Buffer.BlockCopy(_Counter, 0, Record, ChunkRecordIvOffset, IvSize)
+
+            Select Case EncryptionMethod
+
+                Case ChunkEncryptionMethods.None
+
+                    If PayloadLength > 0 Then
+                        System.Buffer.BlockCopy(Payload, 0, Record, ChunkRecordDataOffset, PayloadLength)
+                    End If
+
+                Case ChunkEncryptionMethods.AesCtrFileMasterKey
+
+                    If _ChunkEncryptionKey Is Nothing Then
+                        Throw New EncryptionMismatchException("Encryption is enabled but no file master key is available.")
+                    End If
+
+                    CryptPayload(Payload, 0, PayloadLength, Record, ChunkRecordDataOffset, _ChunkEncryptionKey)
+
+                Case Else
+
+                    Throw New InvalidDataException($"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
+
+            End Select
+
+            Dim RecordMacKey =
+                        If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey,
+                           _ChunkMacKey,
+                           PublicIntegrityKey)
+
+            Using Hmac As New HMACSHA256(RecordMacKey)
+                Dim Mac = Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
+                System.Buffer.BlockCopy(Mac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize)
+            End Using
+
+            _Fs.Position = PhysicalOffset
+            _Fs.Write(Record, 0, Record.Length)
+
+            Return New ChunkIndexEntry With {
+                        .Offset = PhysicalOffset,
+                        .RecordLength = Record.Length
+                    }
+
+        End Function
 
     End Class
 

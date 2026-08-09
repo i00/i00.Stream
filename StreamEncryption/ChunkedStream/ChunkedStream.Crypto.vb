@@ -383,7 +383,7 @@ Namespace Streams
             Dim CompressionEvaluatedPercent =
                 CInt(Record(ChunkCompressionEvaluatedPercentOffset))
 
-            If PlainLength < 0 OrElse PlainLength > ChunkSize Then
+            If PlainLength < 0 OrElse PlainLength > _ChunkSize Then
                 Throw New InvalidDataException("Invalid chunk plain length.")
             End If
 

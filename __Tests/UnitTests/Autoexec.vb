@@ -21,7 +21,7 @@ Public Class Autoexec
             }
             Using Cs = ChunkedStream.Open(Ms, Options)
                 'make a payload that will be able to be compressable to about 75%
-                Dim Data = Tests.Helpers.MakeCompressableData(0.25, ChunkedStream.ChunkSize, 8)
+                Dim Data = Tests.Helpers.MakeCompressableData(0.25, ChunkedStream.DefaultChunkSize, 8)
 
                 Cs.Write(0, Data)
                 Dim c = Cs.GetStructure().Chunks

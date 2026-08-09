@@ -101,14 +101,14 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Dim Data = MakeBuffer(ChunkedStream.ChunkSize)
+                        Dim Data = MakeBuffer(ChunkedStream.DefaultChunkSize)
 
                         Cs.Write(0, Data)
 
                         Dim Struct = Cs.GetStructure()
                         Dim Chunk = Struct.Chunks.First()
 
-                        AssertEqual(Chunk.PayloadLength, ChunkedStream.ChunkSize, $"Empty chunk with {NameOf(ChunkedStream.ChunkedStreamOptions.StoreSparseChunks)} set should be {ChunkedStream.ChunkSize} bytes.")
+                        AssertEqual(Chunk.PayloadLength, ChunkedStream.DefaultChunkSize, $"Empty chunk with {NameOf(ChunkedStream.ChunkedStreamOptions.StoreSparseChunks)} set should be {ChunkedStream.DefaultChunkSize} bytes.")
                         AssertTrue(Chunk.IsAllocated, "Expected stored zero chunk to be allocated.")
                         AssertTrue(Chunk.IsPlaintextAllZero, "Stored zero chunk did not expose PlaintextAllZero.")
                         AssertTrue((Chunk.ChunkFlags And ChunkedStream.ChunkFlags.PlaintextAllZero) = ChunkedStream.ChunkFlags.PlaintextAllZero,
@@ -130,7 +130,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Cs.SetLength(ChunkedStream.ChunkSize)
+                        Cs.SetLength(ChunkedStream.DefaultChunkSize)
 
                         Dim Struct = Cs.GetStructure()
                         Dim Chunk = Struct.Chunks.First()
@@ -193,10 +193,10 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Cs.SetLength(CLng(ChunkedStream.ChunkSize) * 10L)
+                        Cs.SetLength(CLng(ChunkedStream.DefaultChunkSize) * 10L)
 
                         Dim Output = MakeBuffer(4096)
-                        Dim ReadOffset = CLng(ChunkedStream.ChunkSize) * CLng(ChunkOffset)
+                        Dim ReadOffset = CLng(ChunkedStream.DefaultChunkSize) * CLng(ChunkOffset)
 
                         Cs.Read(ReadOffset, Output)
 
@@ -348,10 +348,10 @@ Namespace Tests
                         Dim Data = MakePattern(1000, 31)
 
                         Cs.Write(0, Data)
-                        Cs.SetLength(CLng(ChunkedStream.ChunkSize) * 3L)
+                        Cs.SetLength(CLng(ChunkedStream.DefaultChunkSize) * 3L)
 
                         Dim Output = MakeBuffer(4096)
-                        Cs.Read(ChunkedStream.ChunkSize * 2L, Output)
+                        Cs.Read(ChunkedStream.DefaultChunkSize * 2L, Output)
 
                         For Each value In Output
                             If value <> 0 Then
@@ -375,9 +375,9 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Original = MakePattern(ChunkedStream.ChunkSize * 2, 37)
+                        Dim Original = MakePattern(ChunkedStream.DefaultChunkSize * 2, 37)
                         Dim Patch = MakePattern(1000, 43)
-                        Dim PatchOffset = ChunkedStream.ChunkSize - 500
+                        Dim PatchOffset = ChunkedStream.DefaultChunkSize - 500
 
                         Cs.Write(0, Original)
                         Cs.Write(PatchOffset, Patch)
@@ -465,7 +465,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Cs.Write(0, MakePattern(ChunkedStream.ChunkSize * 2, 59))
+                        Cs.Write(0, MakePattern(ChunkedStream.DefaultChunkSize * 2, 59))
 
                         Dim Struct = Cs.GetStructure()
 

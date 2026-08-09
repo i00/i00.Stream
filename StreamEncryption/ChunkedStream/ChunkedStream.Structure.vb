@@ -110,7 +110,7 @@ Namespace Streams
                 For ChunkIndex = 0 To _Index.Count - 1
 
                     Dim Entry = _Index(ChunkIndex)
-                    Dim LogicalOffset = CLng(ChunkIndex) * ChunkSize
+                    Dim LogicalOffset = CLng(ChunkIndex) * _ChunkSize
                     Dim LogicalPlainLength = GetLogicalPlainLengthForChunk(ChunkIndex)
 
                     If Entry.Offset <> 0 AndAlso Entry.RecordLength > 0 Then
@@ -305,7 +305,7 @@ Namespace Streams
                 Return New ChunkedStreamStructure(
                     LogicalLength:=_Length,
                     PhysicalLength:=_Fs.Length,
-                    ChunkSize:=ChunkSize,
+                    ChunkSize:=_ChunkSize,
                     ChunkCount:=_Index.Count,
                     AllocatedChunkCount:=AllocatedChunkCount,
                     SparseChunkCount:=SparseChunkCount,
@@ -351,14 +351,14 @@ Namespace Streams
 
         Private Function GetLogicalPlainLengthForChunk(ChunkIndex As Integer) As Integer
 
-            Dim LogicalOffset = CLng(ChunkIndex) * ChunkSize
+            Dim LogicalOffset = CLng(ChunkIndex) * _ChunkSize
             Dim Remaining = _Length - LogicalOffset
 
             If Remaining <= 0 Then
                 Return 0
             End If
 
-            Return CInt(Math.Min(CLng(ChunkSize), Remaining))
+            Return CInt(Math.Min(CLng(_ChunkSize), Remaining))
 
         End Function
 

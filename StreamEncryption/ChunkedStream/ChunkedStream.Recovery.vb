@@ -14,6 +14,8 @@ Namespace Streams
 
             CheckpointActive = 100
 
+            ChunkSizeRebuildActive = 200
+
         End Enum
 
         ' Compatibility enum for the existing Defrag partial.
@@ -41,6 +43,10 @@ Namespace Streams
 
                     RecoverCheckpoint()
 
+                Case RecoveryStates.ChunkSizeRebuildActive
+
+                    RecoverChunkSizeRebuild()
+
                 Case RecoveryStates.CopyingChunk,
                      RecoveryStates.ChunkCopied
 
@@ -51,6 +57,47 @@ Namespace Streams
                     Throw New InvalidDataException($"Unknown recovery state: {CInt(State)}.")
 
             End Select
+
+        End Sub
+
+        Private Sub WriteChunkSizeRebuildRecoveryState(OriginalPhysicalLength As Long)
+
+            Dim CurrentState = GetRecoveryState()
+
+            If CurrentState <> RecoveryStates.None Then
+                Throw New InvalidOperationException("Another recovery operation is active.")
+            End If
+
+            If OriginalPhysicalLength < DataStartOffset Then
+                Throw New InvalidDataException("Invalid chunk-size rebuild recovery length.")
+            End If
+
+            Array.Clear(_Header, RecoveryAreaOffset, RecoveryAreaLength)
+
+            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(RecoveryStates.ChunkSizeRebuildActive)), 0, _Header, RecoveryStateOffset, 4)
+            System.Buffer.BlockCopy(BitConverter.GetBytes(OriginalPhysicalLength), 0, _Header, JournalChunkIndexOffset, 8)
+
+            WriteHeaderCopies(True)
+
+        End Sub
+
+        Private Sub RecoverChunkSizeRebuild()
+
+            Dim OriginalPhysicalLength = BitConverter.ToInt64(_Header, JournalChunkIndexOffset)
+
+            If OriginalPhysicalLength < DataStartOffset Then
+                Throw New InvalidDataException("Invalid chunk-size rebuild recovery length.")
+            End If
+
+            If OriginalPhysicalLength > _Fs.Length Then
+                Throw New InvalidDataException("Chunk-size rebuild recovery length is beyond end of stream.")
+            End If
+
+            If _Fs.Length > OriginalPhysicalLength Then
+                _Fs.SetLength(OriginalPhysicalLength)
+            End If
+
+            ClearRecoveryState()
 
         End Sub
 

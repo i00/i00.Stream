@@ -48,7 +48,7 @@ Namespace Tests
 
                 Using Ms As New MemoryStream()
 
-                    Dim Data = Helpers.MakePattern(ChunkedStream.ChunkSize * 3, 42)
+                    Dim Data = Helpers.MakePattern(ChunkedStream.DefaultChunkSize * 3, 42)
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .EncryptionInfo = New ChunkedStream.EncryptionInfo(Helpers.MakeKey(42))
@@ -145,7 +145,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Cs.Write(0, MakeBuffer(ChunkedStream.ChunkSize))
+                        Cs.Write(0, MakeBuffer(ChunkedStream.DefaultChunkSize))
 
                         Dim Before = Cs.GetStructure()
 
@@ -180,7 +180,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Cs.SetLength(ChunkedStream.ChunkSize)
+                        Cs.SetLength(ChunkedStream.DefaultChunkSize)
 
                         Dim Before = Cs.GetStructure()
 
@@ -332,7 +332,7 @@ Namespace Tests
                         Dim Data =
                             Helpers.MakeCompressableData(
                                 0.5,
-                                ChunkedStream.ChunkSize,
+                                ChunkedStream.DefaultChunkSize,
                                 8)
 
                         Cs.Write(0, Data)
@@ -375,7 +375,7 @@ Namespace Tests
                         Dim Data =
                             Helpers.MakeCompressableData(
                                 0.5,
-                                ChunkedStream.ChunkSize,
+                                ChunkedStream.DefaultChunkSize,
                                 8)
 
                         Cs.Write(0, Data)
@@ -413,7 +413,7 @@ Namespace Tests
                         Dim Data =
                             Helpers.MakeCompressableData(
                                 0.5,
-                                ChunkedStream.ChunkSize,
+                                ChunkedStream.DefaultChunkSize,
                                 8)
 
                         Cs.Write(0, Data)
@@ -465,10 +465,10 @@ Namespace Tests
 
                         Dim Chunks = 6
                         For i = 0 To (Chunks - 1)
-                            Cs.Write(i * ChunkedStream.ChunkSize,
+                            Cs.Write(i * ChunkedStream.DefaultChunkSize,
                                  Helpers.MakeCompressableData(
                                      i / (Chunks - 1),
-                                     ChunkedStream.ChunkSize,
+                                     ChunkedStream.DefaultChunkSize,
                                      1))
                         Next
 
@@ -495,63 +495,45 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Verifies that rebuild defragmentation applies a changed chunk size.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DefragmentRebuildAppliesChangedChunkSize()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 32 * 1024
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Data = Helpers.MakeRandomData(300000, 123)
+
+                        Cs.Write(0, Data)
+
+                        AssertEqual(32 * 1024, Cs.ChunkSize, "Unexpected initial chunk size.")
+
+                        Cs.Options.ChunkSize = 128 * 1024
+
+                        Cs.Defragment(ChunkedStream.DefragTypes.Rebuild)
+
+                        AssertEqual(128 * 1024, Cs.ChunkSize, "Rebuild did not apply the new chunk size.")
+                        AssertBytesEqual(Data, Cs.ToArray(), "Data was corrupted after chunk-size rebuild.")
+
+                    End Using
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        AssertEqual(128 * 1024, Cs.ChunkSize, "Reopened stream did not retain rebuilt chunk size.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
         End Class
     End Class
 End Namespace
-
-Public Class asd
-    Inherits Stream
-
-    Public Overrides ReadOnly Property CanRead As Boolean
-        Get
-            Throw New NotImplementedException()
-        End Get
-    End Property
-
-    Public Overrides ReadOnly Property CanSeek As Boolean
-        Get
-            Throw New NotImplementedException()
-        End Get
-    End Property
-
-    Public Overrides ReadOnly Property CanWrite As Boolean
-        Get
-            Throw New NotImplementedException()
-        End Get
-    End Property
-
-    Public Overrides ReadOnly Property Length As Long
-        Get
-            Throw New NotImplementedException()
-        End Get
-    End Property
-
-    Public Overrides Property Position As Long
-        Get
-            Throw New NotImplementedException()
-        End Get
-        Set(value As Long)
-            Throw New NotImplementedException()
-        End Set
-    End Property
-
-    Public Overrides Sub Flush()
-        Throw New NotImplementedException()
-    End Sub
-
-    Public Overrides Sub SetLength(value As Long)
-        Throw New NotImplementedException()
-    End Sub
-
-    Public Overrides Sub Write(buffer() As Byte, offset As Integer, count As Integer)
-        Throw New NotImplementedException()
-    End Sub
-
-    Public Overrides Function Seek(offset As Long, origin As SeekOrigin) As Long
-        Throw New NotImplementedException()
-    End Function
-
-    Public Overrides Function Read(buffer() As Byte, offset As Integer, count As Integer) As Integer
-        Throw New NotImplementedException()
-    End Function
-End Class

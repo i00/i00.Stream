@@ -54,7 +54,7 @@ Namespace Streams
 
             If ChunkIndex < 0 OrElse ChunkIndex > Integer.MaxValue Then Throw New ArgumentOutOfRangeException(NameOf(ChunkIndex))
             If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
-            If PlainLength < 0 OrElse PlainLength > ChunkSize Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
+            If PlainLength < 0 OrElse PlainLength > _ChunkSize Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
 
             If CompressionRatioThreshold < MinimumCompressionRatioThreshold Then CompressionRatioThreshold = MinimumCompressionRatioThreshold
             If CompressionRatioThreshold > MaximumCompressionRatioThreshold Then CompressionRatioThreshold = MaximumCompressionRatioThreshold
@@ -202,11 +202,11 @@ Namespace Streams
 
         End Sub
 
-        Private Shared Function GetRequiredChunkCount(Length As Long) As Integer
+        Private Function GetRequiredChunkCount(Length As Long) As Integer
 
             If Length <= 0 Then Return 0
 
-            Dim Count = ((Length - 1) \ ChunkSize) + 1
+            Dim Count = ((Length - 1) \ _ChunkSize) + 1
 
             If Count > Integer.MaxValue Then Throw New InvalidDataException("Chunked stream has too many chunks for this implementation.")
 

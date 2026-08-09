@@ -8,6 +8,32 @@
         ''' </summary>
         Public Class ChunkedStreamOptions
 
+            Private _ChunkSize As Integer = ChunkedStream.DefaultChunkSize
+            ''' <summary>
+            ''' Logical chunk size used when creating new streams and during rebuild defragmentation.
+            ''' </summary>
+            ''' <remarks>
+            ''' Opening an existing stream updates this property to the chunk size stored in the stream.
+            ''' Changing this property does not immediately affect existing chunks.
+            ''' To apply a new chunk size to an existing stream, set this property and then call Defragment(DefragTypes.Rebuild).
+            ''' </remarks>
+            Public Property ChunkSize As Integer
+                Get
+                    Return _ChunkSize
+                End Get
+                Set
+                    If Value <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(ChunkSize))
+                    If Value = _ChunkSize Then Return
+
+                    _ChunkSize = Value
+
+#If DEBUG Then
+                    System.Diagnostics.Debug.Print($"ChunkedStream chunk size changed to {Value:N0} bytes. Existing chunks will not be affected until Defragment(Rebuild) is performed.")
+#End If
+
+                End Set
+            End Property
+
             ''' <summary>
             ''' Raised when EncryptionInfo changes.
             ''' </summary>

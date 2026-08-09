@@ -263,7 +263,7 @@ Namespace Streams
                                                    UnitType As ProcessUnitTypes,
                                                    CancellationToken As CancellationToken)
 
-        Public Const ChunkSize As Integer = 64 * 1024
+        Public Const DefaultChunkSize As Integer = 64 * 1024
         Public Const IvSize As Integer = 16
         Public Const MacSize As Integer = 32
         Public Const HeaderSize As Integer = 512
@@ -383,7 +383,8 @@ Namespace Streams
         Private ReadOnly _Header As Byte()
         Private ReadOnly _Index As List(Of ChunkIndexEntry)
 
-        Private ReadOnly _ChunkPlain As Byte()
+        Private _ChunkPlain As Byte()
+
         Private ReadOnly _Counter As Byte()
         Private ReadOnly _KeyStream As Byte()
 
@@ -400,6 +401,7 @@ Namespace Streams
         Private _ActiveHeaderCopy As Integer
         Private _IndexOffset As Long
         Private _Length As Long
+        Private _ChunkSize As Integer
         Private _Disposed As Boolean
 
         ''' <summary>
@@ -427,6 +429,7 @@ Namespace Streams
         Private Const MaximumCompressionEvaluatedPercent As Integer = 100
         Private Const MinimumCompressionRatioThreshold As Double = 0.0R
         Private Const MaximumCompressionRatioThreshold As Double = 1.0R
+
         ''' <summary>
         ''' Gets the logical plaintext length of the stream.
         ''' </summary>
@@ -435,6 +438,18 @@ Namespace Streams
                 SyncLock _SyncRoot
                     ThrowIfDisposed()
                     Return _Length
+                End SyncLock
+            End Get
+        End Property
+
+        ''' <summary>
+        ''' Logical chunk size currently used by this stream instance.
+        ''' </summary>
+        Public ReadOnly Property ChunkSize As Integer
+            Get
+                SyncLock _SyncRoot
+                    ThrowIfDisposed()
+                    Return _ChunkSize
                 End SyncLock
             End Get
         End Property
@@ -459,10 +474,12 @@ Namespace Streams
             _HeaderFlags = HeaderFlags
             Me.Options = If(Options, New ChunkedStreamOptions())
 
+            If Me.Options.ChunkSize <= 0 Then Me.Options.ChunkSize = DefaultChunkSize
             If Me.Options.CompressionRatioThreshold < MinimumCompressionRatioThreshold Then Me.Options.CompressionRatioThreshold = MinimumCompressionRatioThreshold
             If Me.Options.CompressionRatioThreshold > MaximumCompressionRatioThreshold Then Me.Options.CompressionRatioThreshold = MaximumCompressionRatioThreshold
 
-            _ChunkPlain = New Byte(ChunkSize - 1) {}
+            _ChunkSize = Me.Options.ChunkSize
+            _ChunkPlain = New Byte(_ChunkSize - 1) {}
             _Counter = New Byte(IvSize - 1) {}
             _KeyStream = New Byte(15) {}
 
@@ -539,8 +556,12 @@ Namespace Streams
             End If
 
             Dim StoredChunkSize = BitConverter.ToInt32(Header, ChunkSizeOffset)
-            If StoredChunkSize <> ChunkSize Then Throw New InvalidDataException($"Unsupported chunked stream chunk size: {StoredChunkSize}.")
 
+            If StoredChunkSize <= 0 Then
+                Throw New InvalidDataException($"Invalid chunked stream chunk size: {StoredChunkSize}.")
+            End If
+
+            EffectiveOptions.ChunkSize = StoredChunkSize
             Dim IndexOffset = BitConverter.ToInt64(Header, IndexOffsetOffset)
             Dim IndexCount = BitConverter.ToInt64(Header, IndexCountOffset)
             Dim FileLength = BitConverter.ToInt64(Header, LengthOffset)
@@ -589,11 +610,13 @@ Namespace Streams
                     Flags = Flags Or HeaderFlags.CompressionGZip
             End Select
 
+            If EffectiveOptions.ChunkSize <= 0 Then EffectiveOptions.ChunkSize = DefaultChunkSize
+
             System.Buffer.BlockCopy(HeaderMagic, 0, Header, MagicOffset, HeaderMagic.Length)
             System.Buffer.BlockCopy(BitConverter.GetBytes(1L), 0, Header, HeaderSequenceOffset, 8)
             System.Buffer.BlockCopy(BitConverter.GetBytes(CLng(Flags)), 0, Header, FlagsOffset, 8)
             System.Buffer.BlockCopy(BitConverter.GetBytes(0L), 0, Header, LengthOffset, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(ChunkSize), 0, Header, ChunkSizeOffset, 4)
+            System.Buffer.BlockCopy(BitConverter.GetBytes(EffectiveOptions.ChunkSize), 0, Header, ChunkSizeOffset, 4)
             System.Buffer.BlockCopy(BitConverter.GetBytes(CLng(DataStartOffset)), 0, Header, IndexOffsetOffset, 8)
             System.Buffer.BlockCopy(BitConverter.GetBytes(0L), 0, Header, IndexCountOffset, 8)
 
@@ -733,8 +756,8 @@ Namespace Streams
         End Function
 
         Public Overrides Function Read(Buffer As Byte(),
-                                   Offset As Integer,
-                                   Count As Integer) As Integer
+                                       Offset As Integer,
+                                       Count As Integer) As Integer
 
             If Buffer Is Nothing Then
                 Throw New ArgumentNullException(NameOf(Buffer))
@@ -781,19 +804,20 @@ Namespace Streams
 
                 Dim ToRead = CInt(Math.Min(CLng(Output.Length), _Length - LogicalOffset))
                 Dim OutPos = 0
-                Dim FirstChunk = LogicalOffset \ ChunkSize
-                Dim LastChunk = (LogicalOffset + ToRead - 1) \ ChunkSize
+                Dim FirstChunk = LogicalOffset \ _ChunkSize
+                Dim LastChunk = (LogicalOffset + ToRead - 1) \ _ChunkSize
 
                 For ChunkIndex = FirstChunk To LastChunk
 
                     Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
                     LoadChunk(ChunkIndex, _ChunkPlain)
 
-                    Dim ChunkStart = ChunkIndex * CLng(ChunkSize)
+                    Dim ChunkStart = ChunkIndex * CLng(_ChunkSize)
                     Dim SrcOffset = CInt(Math.Max(0L, LogicalOffset - ChunkStart))
-                    Dim CopyLength = Math.Min(ChunkSize - SrcOffset, ToRead - OutPos)
+                    Dim CopyLength = Math.Min(_ChunkSize - SrcOffset, ToRead - OutPos)
 
                     System.Buffer.BlockCopy(_ChunkPlain, SrcOffset, Output, OutPos, CopyLength)
+
                     OutPos += CopyLength
 
                 Next
@@ -854,17 +878,17 @@ Namespace Streams
                 Dim EndOffset = LogicalOffset + CLng(Input.Length)
                 Dim NewLogicalLength = Math.Max(_Length, EndOffset)
                 Dim InPos = 0
-                Dim FirstChunk = LogicalOffset \ ChunkSize
-                Dim LastChunk = (EndOffset - 1) \ ChunkSize
+                Dim FirstChunk = LogicalOffset \ _ChunkSize
+                Dim LastChunk = (EndOffset - 1) \ _ChunkSize
 
                 EnsureIndexSize(CInt(LastChunk + 1))
 
                 For ChunkIndex = FirstChunk To LastChunk
 
-                    Dim ChunkStart = ChunkIndex * CLng(ChunkSize)
+                    Dim ChunkStart = ChunkIndex * CLng(_ChunkSize)
                     Dim DstOffset = CInt(Math.Max(0L, LogicalOffset - ChunkStart))
-                    Dim CopyLength = Math.Min(ChunkSize - DstOffset, Input.Length - InPos)
-                    Dim LogicalPlainLength = CInt(Math.Min(CLng(ChunkSize), Math.Max(0L, NewLogicalLength - ChunkStart)))
+                    Dim CopyLength = Math.Min(_ChunkSize - DstOffset, Input.Length - InPos)
+                    Dim LogicalPlainLength = CInt(Math.Min(CLng(_ChunkSize), Math.Max(0L, NewLogicalLength - ChunkStart)))
                     Dim IsFullLogicalChunkWrite = DstOffset = 0 AndAlso CopyLength = LogicalPlainLength
 
                     If IsFullLogicalChunkWrite Then
@@ -877,6 +901,7 @@ Namespace Streams
                     End If
 
                     InPos += CopyLength
+
                     WriteChunkRecord(ChunkIndex, _ChunkPlain, LogicalPlainLength)
 
                 Next
@@ -917,13 +942,13 @@ Namespace Streams
                 If _Length > 0 AndAlso RequiredChunks > 0 Then
 
                     Dim LastChunkIndex = RequiredChunks - 1
-                    Dim LastChunkStart = CLng(LastChunkIndex) * ChunkSize
+                    Dim LastChunkStart = CLng(LastChunkIndex) * _ChunkSize
                     Dim LastChunkPlainLength = CInt(_Length - LastChunkStart)
 
-                    If LastChunkPlainLength > 0 AndAlso LastChunkPlainLength < ChunkSize Then
+                    If LastChunkPlainLength > 0 AndAlso LastChunkPlainLength < _ChunkSize Then
                         Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
                         LoadChunk(LastChunkIndex, _ChunkPlain)
-                        Array.Clear(_ChunkPlain, LastChunkPlainLength, ChunkSize - LastChunkPlainLength)
+                        Array.Clear(_ChunkPlain, LastChunkPlainLength, _ChunkSize - LastChunkPlainLength)
                         WriteChunkRecord(LastChunkIndex, _ChunkPlain, LastChunkPlainLength)
                     End If
 
@@ -1055,11 +1080,12 @@ Namespace Streams
 
             System.Buffer.BlockCopy(BitConverter.GetBytes(CLng(_HeaderFlags)), 0, _Header, FlagsOffset, 8)
             System.Buffer.BlockCopy(BitConverter.GetBytes(_Length), 0, _Header, LengthOffset, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(ChunkSize), 0, _Header, ChunkSizeOffset, 4)
+            System.Buffer.BlockCopy(BitConverter.GetBytes(_ChunkSize), 0, _Header, ChunkSizeOffset, 4)
             System.Buffer.BlockCopy(BitConverter.GetBytes(_IndexOffset), 0, _Header, IndexOffsetOffset, 8)
             System.Buffer.BlockCopy(BitConverter.GetBytes(CLng(_Index.Count)), 0, _Header, IndexCountOffset, 8)
 
             Dim IndexMac = ComputeIndexMac(_Index, PublicIntegrityKey)
+
             System.Buffer.BlockCopy(IndexMac, 0, _Header, IndexMacOffset, MacSize)
 
             WriteHeaderCopies(Durable)

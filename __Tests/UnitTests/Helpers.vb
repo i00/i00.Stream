@@ -6,13 +6,13 @@ Namespace Tests
 
         Friend Function CreateFragmentedContent(Cs As ChunkedStream) As Byte()
 
-            Dim TotalLength = ChunkedStream.ChunkSize * 8
+            Dim TotalLength = ChunkedStream.DefaultChunkSize * 8
             Dim Expected = MakeBuffer(TotalLength)
 
             For ChunkIndex = 0 To 7
 
-                Dim Data = MakePattern(ChunkedStream.ChunkSize, 100 + ChunkIndex)
-                Dim Offset = ChunkIndex * ChunkedStream.ChunkSize
+                Dim Data = MakePattern(ChunkedStream.DefaultChunkSize, 100 + ChunkIndex)
+                Dim Offset = ChunkIndex * ChunkedStream.DefaultChunkSize
 
                 Cs.Write(Offset, Data)
                 Buffer.BlockCopy(Data, 0, Expected, Offset, Data.Length)
@@ -21,8 +21,8 @@ Namespace Tests
 
             For ChunkIndex = 0 To 7 Step 2
 
-                Dim Data = MakePattern(ChunkedStream.ChunkSize, 200 + ChunkIndex)
-                Dim Offset = ChunkIndex * ChunkedStream.ChunkSize
+                Dim Data = MakePattern(ChunkedStream.DefaultChunkSize, 200 + ChunkIndex)
+                Dim Offset = ChunkIndex * ChunkedStream.DefaultChunkSize
 
                 Cs.Write(Offset, Data)
                 Buffer.BlockCopy(Data, 0, Expected, Offset, Data.Length)
@@ -31,8 +31,8 @@ Namespace Tests
 
             For ChunkIndex = 1 To 7 Step 2
 
-                Dim Data = MakePattern(ChunkedStream.ChunkSize, 300 + ChunkIndex)
-                Dim Offset = ChunkIndex * ChunkedStream.ChunkSize
+                Dim Data = MakePattern(ChunkedStream.DefaultChunkSize, 300 + ChunkIndex)
+                Dim Offset = ChunkIndex * ChunkedStream.DefaultChunkSize
 
                 Cs.Write(Offset, Data)
                 Buffer.BlockCopy(Data, 0, Expected, Offset, Data.Length)
