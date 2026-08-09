@@ -217,9 +217,6 @@
         '''
         ''' Defragmentation is not allowed while a checkpoint is active.
         ''' </remarks>
-        ''' <summary>
-        ''' Creates a reusable data-only checkpoint.
-        ''' </summary>
         Public Function CreateCheckpoint() As ChunkedStreamCheckpoint
 
             SyncLock _SyncRoot

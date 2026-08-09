@@ -433,28 +433,30 @@
                                                  ByRef PlainLoaded As Boolean) As Boolean
 
             If DesiredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None Then
+
                 Return chunk.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None
+
             End If
 
-            If chunk.CompressionMethod = DesiredCompressionMethod Then
-                Return False
-            End If
+            If chunk.CompressionEvaluatedMethod <> DesiredCompressionMethod Then
 
-            If chunk.IsPlaintextAllZero Then
                 Return True
+
             End If
 
-            If chunk.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None Then
-                Return True
+            Dim ShouldBeCompressed =
+                chunk.CompressionSavingsPercent >=
+                Math.Max(MinimumCompressionSavingsPercent,
+                         Math.Min(MaximumCompressionSavingsPercent,
+                                  Options.CompressionMinimumSavingsPercent))
+
+            If ShouldBeCompressed Then
+
+                Return chunk.CompressionMethod <> DesiredCompressionMethod
+
             End If
 
-            EnsurePlainLoadedForApplyOptions(chunk, PlainLoaded)
-
-            Dim Compressed = CompressPayload(DesiredCompressionMethod, _ChunkPlain, chunk.PlainLength)
-
-            Return ShouldUseCompressed(chunk.PlainLength,
-                                       Compressed.Length,
-                                       Options.CompressionMinimumSavingsPercent)
+            Return chunk.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None
 
         End Function
 

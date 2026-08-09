@@ -255,6 +255,212 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Verifies that chunks remain uncompressed when the compression threshold is not met.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CompressionThresholdPreventsCompression()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                        .CompressionMinimumSavingsPercent = 90
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Data =
+                            Helpers.MakeCompressableData(
+                                0.5,
+                                ChunkedStream.ChunkSize,
+                                8)
+
+                        Cs.Write(0, Data)
+
+                        Dim Chunk =
+                            Cs.GetStructure().
+                                Chunks.
+                                Single()
+
+                        AssertFalse(
+                            Chunk.IsCompressed,
+                            "Chunk should not have been compressed.")
+
+                        AssertEqual(
+                            ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                            Chunk.CompressionEvaluatedMethod,
+                            "Compression evaluation metadata lost.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that ApplyOptions does not repeatedly re-evaluate already-evaluated chunks.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ApplyOptionsCompressionAlreadyEvaluatedNoOp()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                        .CompressionMinimumSavingsPercent = 90
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Data =
+                            Helpers.MakeCompressableData(
+                                0.5,
+                                ChunkedStream.ChunkSize,
+                                8)
+
+                        Cs.Write(0, Data)
+
+                        Dim Result =
+                            Cs.ApplyOptions(
+                                ChunkedStream.ApplyOptionTypes.Compression)
+
+                        AssertEqual(
+                            0,
+                            Result.RewrittenChunks,
+                            "Chunk should already satisfy compression policy.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that lowering the threshold causes a previously evaluated chunk to become compressed.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ApplyOptionsCompressionThresholdLowered()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                        .CompressionMinimumSavingsPercent = 90
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Data =
+                            Helpers.MakeCompressableData(
+                                0.5,
+                                ChunkedStream.ChunkSize,
+                                8)
+
+                        Cs.Write(0, Data)
+
+                        Cs.Options.CompressionMinimumSavingsPercent = 20
+
+                        Dim Result =
+                            Cs.ApplyOptions(
+                                ChunkedStream.ApplyOptionTypes.Compression)
+
+                        AssertTrue(
+                            Result.RewrittenChunks > 0,
+                            "Expected ApplyOptions to rewrite chunk.")
+
+                        Dim Chunk =
+                            Cs.GetStructure().
+                                Chunks.
+                                Single()
+
+                        AssertTrue(
+                            Chunk.IsCompressed,
+                            "Chunk should now be compressed.")
+
+                        AssertBytesEqual(
+                            Data,
+                            Cs.ToArray(),
+                            "Data corrupted.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that ApplyOptions only rewrites chunks whose compression decision changes.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ApplyOptionsCompressionSelectiveRewrite()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                        .CompressionMinimumSavingsPercent = 75
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0 * ChunkedStream.ChunkSize,
+                                 Helpers.MakeCompressableData(
+                                     0.1,
+                                     ChunkedStream.ChunkSize,
+                                     1))
+
+                        Cs.Write(1 * ChunkedStream.ChunkSize,
+                                 Helpers.MakeCompressableData(
+                                     0.3,
+                                     ChunkedStream.ChunkSize,
+                                     2))
+
+                        Cs.Write(2 * ChunkedStream.ChunkSize,
+                                 Helpers.MakeCompressableData(
+                                     0.5,
+                                     ChunkedStream.ChunkSize,
+                                     3))
+
+                        Cs.Write(3 * ChunkedStream.ChunkSize,
+                                 Helpers.MakeCompressableData(
+                                     0.7,
+                                     ChunkedStream.ChunkSize,
+                                     4))
+
+                        Cs.Write(4 * ChunkedStream.ChunkSize,
+                                 Helpers.MakeCompressableData(
+                                     0.9,
+                                     ChunkedStream.ChunkSize,
+                                     5))
+
+                        Dim Before =
+                            Cs.GetStructure().
+                                Chunks.
+                                Select(Function(c) c.CompressionSavingsPercent).
+                                ToArray()
+
+                        Cs.Options.CompressionMinimumSavingsPercent = 40
+
+                        Dim Result =
+                            Cs.ApplyOptions(
+                                ChunkedStream.ApplyOptionTypes.Compression)
+
+                        AssertTrue(
+                            Result.RewrittenChunks > 0,
+                            "Expected some chunks to change compression state.")
+
+                        AssertEqual(
+                            5,
+                            Cs.GetStructure().ChunkCount,
+                            "Unexpected chunk count.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
         End Class
     End Class
 End Namespace

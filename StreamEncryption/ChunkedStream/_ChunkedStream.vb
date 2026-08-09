@@ -112,11 +112,13 @@
 '   16      4       Plain Length
 '   20      4       Payload Length
 '   24      4       Chunk Flags
-'   28      4       Reserved
+'   28      4       Compression Evaluated Method
+'   32      1       Compression Evaluated Savings Percent
+'   33      15      Reserved
 '
-'   32      16      IV / Counter Start
-'   48      N       Payload
-'   48 + N  32      Chunk HMAC-SHA256
+'   48      16      IV / Counter Start
+'   64      N       Payload
+'   64 + N  32      Chunk HMAC-SHA256
 '
 ' Chunk HMAC covers:
 '   Record header + IV + payload
@@ -241,7 +243,7 @@ Namespace Streams
 
         Private Const IndexEntrySize As Integer = 16
 
-        Private Const ChunkRecordHeaderSize As Integer = 32
+        Private Const ChunkRecordHeaderSize As Integer = 48
         Private Const ChunkRecordIvOffset As Integer = ChunkRecordHeaderSize
         Private Const ChunkRecordDataOffset As Integer = ChunkRecordHeaderSize + IvSize
         Private Const MinChunkRecordSize As Integer = ChunkRecordHeaderSize + IvSize + MacSize
@@ -251,7 +253,12 @@ Namespace Streams
         Private Const ChunkPlainLengthOffset As Integer = 16
         Private Const ChunkPayloadLengthOffset As Integer = 20
         Private Const ChunkFlagsOffset As Integer = 24
-        Private Const ChunkReservedOffset As Integer = 28
+
+        Private Const ChunkCompressionEvaluatedMethodOffset As Integer = 28
+        Private Const ChunkCompressionSavingsPercentOffset As Integer = 32
+
+        Private Const ChunkReservedOffset As Integer = 33
+        Private Const ChunkReservedSize As Integer = 15
 
         Private Shared ReadOnly HeaderMagic As Byte() = Encoding.ASCII.GetBytes("ESTRM001")
         Private Shared ReadOnly PublicIntegrityKey As Byte() = Encoding.UTF8.GetBytes("ChunkedStream Public Integrity Key v1")
@@ -341,6 +348,8 @@ Namespace Streams
         End Enum
 
         Private Const SupportedChunkFlags As ChunkFlags = ChunkFlags.PlaintextAllZero
+        Private Const MinimumCompressionSavingsPercent As Integer = 0
+        Private Const MaximumCompressionSavingsPercent As Integer = 100
 
         ''' <summary>
         ''' Gets the logical plaintext length of the stream.

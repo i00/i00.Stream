@@ -4,11 +4,11 @@ Imports StreamEncryption.Streams
 Public Class Autoexec
 
     Public Shared Function Main() As Integer
-        Test()
+        'Test()
         'Tests.StreamChunked.Checkpoints.CheckpointLifoEnforced()
 
 
-        'Return UnitTester.Autoexec.Main()
+        Return UnitTester.Autoexec.Main()
     End Function
 
     Public Shared Sub Test()
@@ -20,7 +20,7 @@ Public Class Autoexec
             }
             Using Cs = ChunkedStream.Open(Ms, Options)
                 'make a payload that will be able to be compressable to about 75%
-                Dim Data = Tests.Helpers.MakeCompressableData(0.75, ChunkedStream.ChunkSize, 8)
+                Dim Data = Tests.Helpers.MakeCompressableData(0.25, ChunkedStream.ChunkSize, 8)
 
                 Cs.Write(0, Data)
                 Dim c = Cs.GetStructure().Chunks

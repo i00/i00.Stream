@@ -56,8 +56,7 @@ Namespace Streams
             If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
             If PlainLength < 0 OrElse PlainLength > ChunkSize Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
 
-            If CompressionMinimumSavingsPercent < 0 Then CompressionMinimumSavingsPercent = 0
-            If CompressionMinimumSavingsPercent > 100 Then CompressionMinimumSavingsPercent = 100
+            CompressionMinimumSavingsPercent = ClampCompressionMinimumSavingsPercent(CompressionMinimumSavingsPercent)
 
             Dim PlaintextAllZero = PlainLength = 0 OrElse IsAllZero(Plain, PlainLength)
 
@@ -74,12 +73,17 @@ Namespace Streams
             Dim Payload As Byte() = Plain
             Dim PayloadLength = PlainLength
             Dim StoredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None
+            Dim CompressionEvaluatedMethod = ChunkedStreamOptions.CompressionMethods.None
+            Dim CompressionSavingsPercent As Byte = 0
 
-            If CompressionMethodToUse <> ChunkedStreamOptions.CompressionMethods.None Then
+            If CompressionMethodToUse <> ChunkedStreamOptions.CompressionMethods.None AndAlso PlainLength > 0 Then
 
                 Dim Compressed = CompressPayload(CompressionMethodToUse, Plain, PlainLength)
 
-                If ForceCompression OrElse ShouldUseCompressed(PlainLength, Compressed.Length, CompressionMinimumSavingsPercent) Then
+                CompressionEvaluatedMethod = CompressionMethodToUse
+                CompressionSavingsPercent = GetCompressionSavingsPercent(PlainLength, Compressed.Length)
+
+                If ForceCompression OrElse CompressionSavingsPercent >= CompressionMinimumSavingsPercent Then
                     Payload = Compressed
                     PayloadLength = Compressed.Length
                     StoredCompressionMethod = CompressionMethodToUse
@@ -103,6 +107,8 @@ Namespace Streams
             System.Buffer.BlockCopy(BitConverter.GetBytes(PlainLength), 0, Record, ChunkPlainLengthOffset, 4)
             System.Buffer.BlockCopy(BitConverter.GetBytes(PayloadLength), 0, Record, ChunkPayloadLengthOffset, 4)
             System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(Flags)), 0, Record, ChunkFlagsOffset, 4)
+            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(CompressionEvaluatedMethod)), 0, Record, ChunkCompressionEvaluatedMethodOffset, 4)
+            Record(ChunkCompressionSavingsPercentOffset) = CompressionSavingsPercent
 
             _Rng.GetBytes(_Counter)
             System.Buffer.BlockCopy(_Counter, 0, Record, ChunkRecordIvOffset, IvSize)
@@ -135,10 +141,8 @@ Namespace Streams
                    PublicIntegrityKey)
 
             Using Hmac As New HMACSHA256(RecordMacKey)
-
                 Dim Mac = Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
                 System.Buffer.BlockCopy(Mac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize)
-
             End Using
 
             Dim NewRecordOffset = GetNextChunkRecordWriteOffset()
@@ -162,15 +166,34 @@ Namespace Streams
                                              CompressedLength As Integer,
                                              CompressionMinimumSavingsPercent As Integer) As Boolean
 
-            If PlainLength <= 0 Then Return False
-            If CompressedLength <= 0 OrElse CompressedLength >= PlainLength Then Return False
+            CompressionMinimumSavingsPercent = ClampCompressionMinimumSavingsPercent(CompressionMinimumSavingsPercent)
 
-            If CompressionMinimumSavingsPercent < 0 Then CompressionMinimumSavingsPercent = 0
-            If CompressionMinimumSavingsPercent > 100 Then CompressionMinimumSavingsPercent = 100
+            Return GetCompressionSavingsPercent(PlainLength, CompressedLength) >= CompressionMinimumSavingsPercent
 
-            Dim SavedPercent = ((PlainLength - CompressedLength) * 100.0R) / PlainLength
+        End Function
 
-            Return SavedPercent >= CompressionMinimumSavingsPercent
+        Private Shared Function ClampCompressionMinimumSavingsPercent(CompressionMinimumSavingsPercent As Integer) As Integer
+
+            If CompressionMinimumSavingsPercent < MinimumCompressionSavingsPercent Then Return MinimumCompressionSavingsPercent
+            If CompressionMinimumSavingsPercent > MaximumCompressionSavingsPercent Then Return MaximumCompressionSavingsPercent
+
+            Return CompressionMinimumSavingsPercent
+
+        End Function
+
+        Private Shared Function GetCompressionSavingsPercent(PlainLength As Integer,
+                                                             CompressedLength As Integer) As Byte
+
+            If PlainLength <= 0 Then Return 0
+            If CompressedLength <= 0 Then Return 100
+            If CompressedLength >= PlainLength Then Return 0
+
+            Dim SavingsPercent = CInt(Math.Floor(((PlainLength - CompressedLength) * 100.0R) / PlainLength))
+
+            If SavingsPercent < MinimumCompressionSavingsPercent Then Return CByte(MinimumCompressionSavingsPercent)
+            If SavingsPercent > MaximumCompressionSavingsPercent Then Return CByte(MaximumCompressionSavingsPercent)
+
+            Return CByte(SavingsPercent)
 
         End Function
 
