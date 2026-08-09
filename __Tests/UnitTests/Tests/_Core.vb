@@ -1,11 +1,104 @@
 ﻿Imports System.IO
 Imports System.Text
 Imports StreamEncryption.Streams
+Imports System.IO.Compression
 
 Namespace Tests
     Partial Public NotInheritable Class StreamChunked
 
         Public NotInheritable Class Core
+
+            ''' <summary>
+            ''' Verifies that ChunkedStream behaves as a fully compatible .NET Stream
+            ''' by successfully round-tripping a ZipArchive through an encrypted
+            ''' ChunkedStream instance.
+            '''
+            ''' This test intentionally exercises the standard Stream API surface
+            ''' rather than the ChunkedStream random-access methods. The ZipArchive
+            ''' implementation performs arbitrary combinations of Read, Write,
+            ''' Seek, Position and Length operations, making it an effective
+            ''' integration test for Stream compatibility.
+            '''
+            ''' The test writes a ZIP file containing random data directly into an
+            ''' encrypted ChunkedStream, then reopens the ZIP archive from the same
+            ''' ChunkedStream and verifies that the extracted payload exactly matches
+            ''' the original source data.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub StreamCompatibility_ZipArchiveRoundTrip()
+
+                Dim SourceData =
+                    Helpers.MakeRandomData(
+                        1024 * 1024,
+                        123)
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs =
+                        ChunkedStream.Open(
+                            Ms,
+                            New ChunkedStream.ChunkedStreamOptions With {
+                                .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                                .EncryptionInfo = New ChunkedStream.EncryptionInfo("Password")
+                            })
+
+                        Using Archive =
+                            New ZipArchive(
+                                Cs,
+                                ZipArchiveMode.Create,
+                                True)
+
+                            Dim Entry =
+                                Archive.CreateEntry(
+                                    "Test.bin",
+                                    CompressionLevel.Optimal)
+
+                            Using EntryStream = Entry.Open()
+
+                                EntryStream.Write(
+                                    SourceData,
+                                    0,
+                                    SourceData.Length)
+
+                            End Using
+
+                        End Using
+
+                        Cs.Position = 0
+
+                        Using Archive =
+                            New ZipArchive(
+                                Cs,
+                                ZipArchiveMode.Read,
+                                True)
+
+                            Dim Entry =
+                                Archive.GetEntry("Test.bin")
+
+                            AssertTrue(Entry IsNot Nothing, "Zip entry not found.")
+
+                            Using EntryStream = Entry.Open()
+
+                                Using Result As New MemoryStream()
+
+                                    EntryStream.CopyTo(Result)
+
+                                    AssertBytesEqual(
+                                        SourceData,
+                                        Result.ToArray(),
+                                        "Zip round-trip data mismatch.")
+
+                                End Using
+
+                            End Using
+
+                        End Using
+
+                    End Using
+
+                End Using
+
+            End Sub
 
             ''' <summary>
             ''' Verifies that physically stored all-zero chunks are stored correctly.

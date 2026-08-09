@@ -142,7 +142,80 @@ Imports System.Text
 Namespace Streams
 
     Public NotInheritable Class ChunkedStream
-        Implements IDisposable
+        Inherits Stream
+
+        Private _Position As Long
+        Public Overrides Property Position As Long
+            Get
+                SyncLock _SyncRoot
+                    ThrowIfDisposed()
+                    Return _Position
+                End SyncLock
+            End Get
+            Set
+                SyncLock _SyncRoot
+                    ThrowIfDisposed()
+
+                    If Value < 0 Then
+                        Throw New ArgumentOutOfRangeException(NameOf(Value))
+                    End If
+
+                    _Position = Value
+
+                End SyncLock
+            End Set
+        End Property
+
+        Public Overrides ReadOnly Property CanRead As Boolean
+            Get
+                Return True
+            End Get
+        End Property
+
+        Public Overrides ReadOnly Property CanWrite As Boolean
+            Get
+                Return True
+            End Get
+        End Property
+
+        Public Overrides ReadOnly Property CanSeek As Boolean
+            Get
+                Return True
+            End Get
+        End Property
+
+        Public Overrides Function Seek(Offset As Long,
+                                       Origin As SeekOrigin) As Long
+
+            SyncLock _SyncRoot
+
+                ThrowIfDisposed()
+
+                Select Case Origin
+
+                    Case SeekOrigin.Begin
+
+                        Position = Offset
+
+                    Case SeekOrigin.Current
+
+                        Position = _Position + Offset
+
+                    Case SeekOrigin.[End]
+
+                        Position = _Length + Offset
+
+                    Case Else
+
+                        Throw New ArgumentOutOfRangeException(NameOf(Origin))
+
+                End Select
+
+                Return _Position
+
+            End SyncLock
+
+        End Function
 
         ''' <summary>
         ''' Unit type used by long-running operation progress callbacks.
@@ -357,7 +430,7 @@ Namespace Streams
         ''' <summary>
         ''' Gets the logical plaintext length of the stream.
         ''' </summary>
-        Public ReadOnly Property Length As Long
+        Public Overrides ReadOnly Property Length As Long
             Get
                 SyncLock _SyncRoot
                     ThrowIfDisposed()
@@ -659,23 +732,57 @@ Namespace Streams
 
         End Function
 
+        Public Overrides Function Read(Buffer As Byte(),
+                                   Offset As Integer,
+                                   Count As Integer) As Integer
+
+            If Buffer Is Nothing Then
+                Throw New ArgumentNullException(NameOf(Buffer))
+            End If
+
+            If Offset < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Offset))
+            End If
+
+            If Count < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Count))
+            End If
+
+            If Buffer.Length - Offset < Count Then
+                Throw New ArgumentException("Invalid offset/count.")
+            End If
+
+            Dim Temp(Count - 1) As Byte
+
+            Dim BytesRead = Read(_Position, Temp)
+
+            If BytesRead > 0 Then
+                System.Buffer.BlockCopy(Temp, 0, Buffer, Offset, BytesRead)
+            End If
+
+            _Position += BytesRead
+
+            Return BytesRead
+
+        End Function
+
         ''' <summary>
         ''' Reads plaintext from the logical stream at the specified offset.
         ''' </summary>
-        Public Function Read(Offset As Long, Output As Byte()) As Integer
+        Public Overloads Function Read(LogicalOffset As Long, Output As Byte()) As Integer
 
             SyncLock _SyncRoot
 
                 ThrowIfDisposed()
 
                 If Output Is Nothing Then Throw New ArgumentNullException(NameOf(Output))
-                If Offset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Offset))
-                If Output.Length = 0 OrElse Offset >= _Length Then Return 0
+                If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+                If Output.Length = 0 OrElse LogicalOffset >= _Length Then Return 0
 
-                Dim ToRead = CInt(Math.Min(CLng(Output.Length), _Length - Offset))
+                Dim ToRead = CInt(Math.Min(CLng(Output.Length), _Length - LogicalOffset))
                 Dim OutPos = 0
-                Dim FirstChunk = Offset \ ChunkSize
-                Dim LastChunk = (Offset + ToRead - 1) \ ChunkSize
+                Dim FirstChunk = LogicalOffset \ ChunkSize
+                Dim LastChunk = (LogicalOffset + ToRead - 1) \ ChunkSize
 
                 For ChunkIndex = FirstChunk To LastChunk
 
@@ -683,7 +790,7 @@ Namespace Streams
                     LoadChunk(ChunkIndex, _ChunkPlain)
 
                     Dim ChunkStart = ChunkIndex * CLng(ChunkSize)
-                    Dim SrcOffset = CInt(Math.Max(0L, Offset - ChunkStart))
+                    Dim SrcOffset = CInt(Math.Max(0L, LogicalOffset - ChunkStart))
                     Dim CopyLength = Math.Min(ChunkSize - SrcOffset, ToRead - OutPos)
 
                     System.Buffer.BlockCopy(_ChunkPlain, SrcOffset, Output, OutPos, CopyLength)
@@ -697,23 +804,57 @@ Namespace Streams
 
         End Function
 
+        Public Overrides Sub Write(Buffer As Byte(),
+                                   Offset As Integer,
+                                   Count As Integer)
+
+            If Buffer Is Nothing Then
+                Throw New ArgumentNullException(NameOf(Buffer))
+            End If
+
+            If Offset < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Offset))
+            End If
+
+            If Count < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Count))
+            End If
+
+            If Buffer.Length - Offset < Count Then
+                Throw New ArgumentException("Invalid offset/count.")
+            End If
+
+            If Count = 0 Then
+                Return
+            End If
+
+            Dim Temp(Count - 1) As Byte
+
+            System.Buffer.BlockCopy(Buffer, Offset, Temp, 0, Count)
+
+            Write(_Position, Temp)
+
+            _Position += Count
+
+        End Sub
+
         ''' <summary>
         ''' Writes plaintext data at the specified logical offset.
         ''' </summary>
-        Public Function Write(Offset As Long, Input As Byte()) As Integer
+        Public Overloads Function Write(LogicalOffset As Long, Input As Byte()) As Integer
 
             SyncLock _SyncRoot
 
                 ThrowIfDisposed()
 
                 If Input Is Nothing Then Throw New ArgumentNullException(NameOf(Input))
-                If Offset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Offset))
+                If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
                 If Input.Length = 0 Then Return 0
 
-                Dim EndOffset = Offset + CLng(Input.Length)
+                Dim EndOffset = LogicalOffset + CLng(Input.Length)
                 Dim NewLogicalLength = Math.Max(_Length, EndOffset)
                 Dim InPos = 0
-                Dim FirstChunk = Offset \ ChunkSize
+                Dim FirstChunk = LogicalOffset \ ChunkSize
                 Dim LastChunk = (EndOffset - 1) \ ChunkSize
 
                 EnsureIndexSize(CInt(LastChunk + 1))
@@ -721,7 +862,7 @@ Namespace Streams
                 For ChunkIndex = FirstChunk To LastChunk
 
                     Dim ChunkStart = ChunkIndex * CLng(ChunkSize)
-                    Dim DstOffset = CInt(Math.Max(0L, Offset - ChunkStart))
+                    Dim DstOffset = CInt(Math.Max(0L, LogicalOffset - ChunkStart))
                     Dim CopyLength = Math.Min(ChunkSize - DstOffset, Input.Length - InPos)
                     Dim LogicalPlainLength = CInt(Math.Min(CLng(ChunkSize), Math.Max(0L, NewLogicalLength - ChunkStart)))
                     Dim IsFullLogicalChunkWrite = DstOffset = 0 AndAlso CopyLength = LogicalPlainLength
@@ -755,7 +896,7 @@ Namespace Streams
         ''' <summary>
         ''' Changes the logical plaintext length of the stream.
         ''' </summary>
-        Public Sub SetLength(Length As Long)
+        Public Overrides Sub SetLength(Length As Long)
 
             SyncLock _SyncRoot
 
@@ -801,11 +942,16 @@ Namespace Streams
         ''' <summary>
         ''' Flushes pending changes to the backing stream.
         ''' </summary>
-        Public Sub Flush()
+        Public Overrides Sub Flush()
 
             SyncLock _SyncRoot
+
                 ThrowIfDisposed()
-                If _Fs.CanWrite Then _Fs.Flush()
+
+                If _Fs.CanWrite Then
+                    _Fs.Flush()
+                End If
+
             End SyncLock
 
         End Sub
@@ -813,7 +959,7 @@ Namespace Streams
         ''' <summary>
         ''' Releases resources owned by the ChunkedStream. The underlying stream is not disposed.
         ''' </summary>
-        Public Sub Dispose() Implements IDisposable.Dispose
+        Protected Overrides Sub Dispose(Disposing As Boolean)
 
             SyncLock _SyncRoot
 
@@ -838,6 +984,8 @@ Namespace Streams
                 End Try
 
             End SyncLock
+
+            MyBase.Dispose(Disposing)
 
         End Sub
 

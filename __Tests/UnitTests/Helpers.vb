@@ -156,6 +156,7 @@ Namespace Tests
 
         End Sub
 
+
         Friend Sub AssertTrue(Value As Boolean,
                               Message As String)
 

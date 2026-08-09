@@ -4,7 +4,7 @@ Imports StreamEncryption.Streams
 Public Class Autoexec
 
     Public Shared Function Main() As Integer
-        'Test()
+        Test()
         'Tests.StreamChunked.Checkpoints.CheckpointLifoEnforced()
 
 
