@@ -216,7 +216,8 @@
         ''' checkpoint is nested and committed into the parent checkpoint.
         ''' </remarks>
         Public Function ApplyOptions(Optional Types As ApplyOptionTypes = ApplyOptionTypes.All,
-                                     Optional ProgressCallback As StreamProgressCallback = Nothing) As ApplyOptionsResult
+                                     Optional ProgressCallback As StreamProgressCallback = Nothing,
+                                     Optional Durable As Boolean = True) As ApplyOptionsResult
 
             SyncLock _SyncRoot
 
@@ -298,12 +299,7 @@
                     End If
 
                     If AppliesCompression AndAlso chunk.IsAllocated AndAlso Not WillBeSparse Then
-
-                        NeedsCompressionChange =
-                            NeedsCompressionRewrite(chunk,
-                                                    CompressionPolicy,
-                                                    PlainLoaded)
-
+                        NeedsCompressionChange = NeedsCompressionRewrite(chunk, CompressionPolicy, PlainLoaded)
                     End If
 
                     Dim NeedsRewrite =
@@ -364,11 +360,44 @@
 
                 Next
 
+                Dim RemovedFileMasterKey = False
+
+                If Result.WasCancelled = False AndAlso AppliesEncryption Then
+                    RemovedFileMasterKey = RemoveUnusedFileMasterKeyIfPossible()
+                End If
+
+                If HasOpenCheckpoint = False AndAlso (Result.RewrittenChunks > 0 OrElse RemovedFileMasterKey) Then
+                    PersistIndexAndHeader(_IndexOffset, Durable)
+                End If
+
                 Result.PhysicalLengthAfter = _Fs.Length
 
                 Return Result
 
             End SyncLock
+
+        End Function
+
+        Private Function RemoveUnusedFileMasterKeyIfPossible() As Boolean
+
+            If _CurrentWriteEncryptionEnabled Then Return False
+            If _FileMasterKey Is Nothing Then Return False
+
+            ' If a checkpoint is active, a rollback may restore encrypted chunks.
+            ' Defer key removal until the outermost checkpoint is closed.
+            If HasOpenCheckpoint Then Return False
+
+            Dim Struct = GetStructure()
+
+            If Struct.EncryptedChunkCount <> 0 Then Return False
+
+            _FileMasterKey = Nothing
+            _ChunkEncryptionKey = Nothing
+            _ChunkMacKey = Nothing
+
+            Array.Clear(_Header, MasterKeyWrapAreaOffset, MasterKeyWrapAreaLength)
+
+            Return True
 
         End Function
 

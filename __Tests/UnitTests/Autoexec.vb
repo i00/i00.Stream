@@ -4,7 +4,7 @@ Imports StreamEncryption.Streams
 Public Class Autoexec
 
     Public Shared Function Main() As Integer
-        Test()
+        'Test()
         'Tests.StreamChunked.Checkpoints.CheckpointLifoEnforced()
 
 
@@ -15,6 +15,7 @@ Public Class Autoexec
 
         Using Ms As New MemoryStream()
             Dim Options = New ChunkedStream.ChunkedStreamOptions With {
+                .EncryptionInfo = New ChunkedStream.EncryptionInfo("Hello"),
                 .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
                 .CompressionRatioThreshold = 50
             }

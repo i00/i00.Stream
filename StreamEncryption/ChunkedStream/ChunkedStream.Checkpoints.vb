@@ -303,6 +303,11 @@
 
                 If _CheckpointStack.Count = 0 Then
                     ClearRecoveryState()
+
+                    If RemoveUnusedFileMasterKeyIfPossible() Then
+                        PersistIndexAndHeader(_IndexOffset, True)
+                    End If
+
                 End If
 
             End SyncLock

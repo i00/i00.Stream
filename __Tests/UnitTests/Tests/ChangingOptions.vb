@@ -41,6 +41,65 @@ Namespace Tests
             End Sub
 
             ''' <summary>
+            ''' Verifies that disabling encryption and applying encryption options removes the unused file master key.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ApplyOptionsEncryptionDisabledRemovesUnusedFileMasterKey()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Data = Helpers.MakePattern(ChunkedStream.ChunkSize * 3, 42)
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(Helpers.MakeKey(42))
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, Data)
+
+                        Dim Before = Cs.GetStructure()
+
+                        AssertTrue(Before.EncryptedChunkCount > 0, "Expected encrypted chunks before ApplyOptions.")
+                        AssertTrue(Before.HasFileMasterKey, "Expected a file master key before ApplyOptions.")
+                        AssertTrue(Before.HasWrappedFileMasterKey, "Expected a wrapped file master key before ApplyOptions.")
+
+                        Cs.Options.EncryptionInfo = Nothing
+
+                        Dim Result = Cs.ApplyOptions(ChunkedStream.ApplyOptionTypes.Encryption)
+
+                        AssertTrue(Result.RewrittenChunks > 0, "Expected encrypted chunks to be rewritten.")
+                        AssertTrue(Result.EncryptionChanges > 0, "Expected encryption changes.")
+
+                        Dim After = Cs.GetStructure()
+
+                        AssertEqual(0, After.EncryptedChunkCount, "Expected all chunks to be unencrypted after ApplyOptions.")
+                        AssertTrue(Not After.HasFileMasterKey, "Expected the unused file master key to be removed.")
+                        AssertTrue(Not After.HasWrappedFileMasterKey, "Expected the wrapped file master key to be removed.")
+
+                        AssertBytesEqual(Data, Cs.ToArray(), "Data was corrupted after removing encryption.")
+
+                    End Using
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Dim Reopened = Cs.ToArray()
+
+                        AssertBytesEqual(Data, Reopened, "Reopened unencrypted stream data mismatch.")
+
+                        Dim ReopenedStructure = Cs.GetStructure()
+
+                        AssertEqual(0, ReopenedStructure.EncryptedChunkCount, "Expected reopened stream to contain no encrypted chunks.")
+                        AssertTrue(Not ReopenedStructure.HasFileMasterKey, "Expected reopened stream to have no file master key.")
+                        AssertTrue(Not ReopenedStructure.HasWrappedFileMasterKey, "Expected reopened stream to have no wrapped file master key.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
             ''' Verifies that ApplyOptions can encrypt existing allocated chunks without changing logical data.
             ''' </summary>
             <UnitTester.SimpleTest()>

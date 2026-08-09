@@ -9,20 +9,7 @@ Namespace Tests
         Public NotInheritable Class Core
 
             ''' <summary>
-            ''' Verifies that ChunkedStream behaves as a fully compatible .NET Stream
-            ''' by successfully round-tripping a ZipArchive through an encrypted
-            ''' ChunkedStream instance.
-            '''
-            ''' This test intentionally exercises the standard Stream API surface
-            ''' rather than the ChunkedStream random-access methods. The ZipArchive
-            ''' implementation performs arbitrary combinations of Read, Write,
-            ''' Seek, Position and Length operations, making it an effective
-            ''' integration test for Stream compatibility.
-            '''
-            ''' The test writes a ZIP file containing random data directly into an
-            ''' encrypted ChunkedStream, then reopens the ZIP archive from the same
-            ''' ChunkedStream and verifies that the extracted payload exactly matches
-            ''' the original source data.
+            ''' Verifies that an encrypted ChunkedStream can round-trip a ZipArchive using only the standard .Net Stream.
             ''' </summary>
             <UnitTester.SimpleTest()>
             Public Shared Sub StreamCompatibility_ZipArchiveRoundTrip()
