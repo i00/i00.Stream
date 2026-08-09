@@ -48,9 +48,13 @@
             Public Property CompressionMethod As CompressionMethods = CompressionMethods.None
 
             ''' <summary>
-            ''' Minimum percentage saving required before a compressed chunk is stored compressed.
+            ''' Maximum compressed-size ratio allowed before a chunk is stored compressed.
             ''' </summary>
-            Public Property CompressionMinimumSavingsPercent As Integer = 5
+            ''' <remarks>
+            ''' A value of 0.95 means the compressed payload must be no larger than 95% of the original plaintext size.
+            ''' Lower values require better compression before storing the chunk compressed.
+            ''' </remarks>
+            Public Property CompressionRatioThreshold As Double = 0.95R
 
             ''' <summary>
             ''' If True, all-zero chunks are stored as physical authenticated chunk records.
@@ -196,9 +200,6 @@
         ''' <param name="ProgressCallback">
         ''' Optional progress callback.
         ''' </param>
-        ''' <param name="Durable">
-        ''' If True, the final commit is flushed to durable storage when supported by the backing stream.
-        ''' </param>
         ''' <returns>
         ''' A summary of the operation.
         ''' </returns>
@@ -215,8 +216,7 @@
         ''' checkpoint is nested and committed into the parent checkpoint.
         ''' </remarks>
         Public Function ApplyOptions(Optional Types As ApplyOptionTypes = ApplyOptionTypes.All,
-                                     Optional ProgressCallback As StreamProgressCallback = Nothing,
-                                     Optional Durable As Boolean = True) As ApplyOptionsResult
+                                     Optional ProgressCallback As StreamProgressCallback = Nothing) As ApplyOptionsResult
 
             SyncLock _SyncRoot
 
@@ -259,31 +259,25 @@
                         chunk.PlainLength = 0 OrElse
                         (Not StoreSparsePolicy AndAlso chunk.IsPlaintextAllZero)
 
-                    Dim CompressionPolicy =
-                        GetApplyOptionsCompressionPolicy(chunk, AppliesCompression)
+                    Dim CompressionPolicy = GetApplyOptionsCompressionPolicy(chunk, AppliesCompression)
 
                     Dim ForceCompression =
                         Not AppliesCompression AndAlso
                         chunk.IsAllocated AndAlso
                         chunk.IsCompressed
 
-                    Dim EncryptionPolicy =
-                        GetApplyOptionsEncryptionPolicy(chunk, AppliesEncryption)
+                    Dim EncryptionPolicy = GetApplyOptionsEncryptionPolicy(chunk, AppliesEncryption)
 
                     If AppliesSparseness Then
 
                         If chunk.IsPlaintextAllZero AndAlso chunk.PlainLength > 0 Then
 
                             If Options.StoreSparseChunks AndAlso chunk.IsSparse Then
-
                                 NeedsSparsenessChange = True
                                 NewlyAllocated = True
-
                             ElseIf Not Options.StoreSparseChunks AndAlso chunk.IsAllocated Then
-
                                 NeedsSparsenessChange = True
                                 NewlySparse = True
-
                             End If
 
                         End If
@@ -294,8 +288,8 @@
 
                         Dim DesiredEncryption =
                             If(_CurrentWriteEncryptionEnabled,
-                                ChunkEncryptionMethods.AesCtrFileMasterKey,
-                                ChunkEncryptionMethods.None)
+                               ChunkEncryptionMethods.AesCtrFileMasterKey,
+                               ChunkEncryptionMethods.None)
 
                         If chunk.EncryptionMethod <> DesiredEncryption Then
                             NeedsEncryptionChange = True
@@ -318,7 +312,12 @@
                         NeedsSparsenessChange
 
                     If Not NeedsRewrite Then
-                        ReportProgress(ProgressCallback, Result.ExaminedChunks, Struct.ChunkCount, ProcessUnitTypes.Chunks, CancellationToken)
+
+                        ReportProgress(ProgressCallback,
+                                       Result.ExaminedChunks,
+                                       Struct.ChunkCount,
+                                       ProcessUnitTypes.Chunks,
+                                       CancellationToken)
 
                         If CancellationToken.Cancel Then
                             Result.WasCancelled = True
@@ -326,18 +325,19 @@
                         End If
 
                         Continue For
+
                     End If
 
                     EnsurePlainLoadedForApplyOptions(chunk, PlainLoaded)
 
                     WriteChunkRecordWithPolicy(chunk.Index,
-                                                _ChunkPlain,
-                                                chunk.PlainLength,
-                                                StoreSparsePolicy,
-                                                CompressionPolicy,
-                                                Options.CompressionMinimumSavingsPercent,
-                                                ForceCompression,
-                                                EncryptionPolicy)
+                                               _ChunkPlain,
+                                               chunk.PlainLength,
+                                               StoreSparsePolicy,
+                                               CompressionPolicy,
+                                               Options.CompressionRatioThreshold,
+                                               ForceCompression,
+                                               EncryptionPolicy)
 
                     Result.RewrittenChunks += 1
 
@@ -351,7 +351,11 @@
                         If NewlyAllocated Then Result.NewlyAllocatedChunks += 1
                     End If
 
-                    ReportProgress(ProgressCallback, Result.ExaminedChunks, Struct.ChunkCount, ProcessUnitTypes.Chunks, CancellationToken)
+                    ReportProgress(ProgressCallback,
+                                   Result.ExaminedChunks,
+                                   Struct.ChunkCount,
+                                   ProcessUnitTypes.Chunks,
+                                   CancellationToken)
 
                     If CancellationToken.Cancel Then
                         Result.WasCancelled = True
@@ -359,14 +363,6 @@
                     End If
 
                 Next
-
-                If Result.WasCancelled Then
-
-                    Result.PhysicalLengthAfter = _Fs.Length
-
-                    Return Result
-
-                End If
 
                 Result.PhysicalLengthAfter = _Fs.Length
 
@@ -433,27 +429,23 @@
                                                  ByRef PlainLoaded As Boolean) As Boolean
 
             If DesiredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None Then
-
                 Return chunk.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None
-
             End If
 
             If chunk.CompressionEvaluatedMethod <> DesiredCompressionMethod Then
-
                 Return True
-
             End If
 
+            Dim CompressionRatioThreshold = Options.CompressionRatioThreshold
+
+            If CompressionRatioThreshold < MinimumCompressionRatioThreshold Then CompressionRatioThreshold = MinimumCompressionRatioThreshold
+            If CompressionRatioThreshold > MaximumCompressionRatioThreshold Then CompressionRatioThreshold = MaximumCompressionRatioThreshold
+
             Dim ShouldBeCompressed =
-                chunk.CompressionSavingsPercent >=
-                Math.Max(MinimumCompressionSavingsPercent,
-                         Math.Min(MaximumCompressionSavingsPercent,
-                                  Options.CompressionMinimumSavingsPercent))
+                chunk.CompressionEvaluatedRatio <= CompressionRatioThreshold
 
             If ShouldBeCompressed Then
-
                 Return chunk.CompressionMethod <> DesiredCompressionMethod
-
             End If
 
             Return chunk.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None

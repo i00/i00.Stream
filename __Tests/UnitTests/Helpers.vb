@@ -167,11 +167,7 @@ Namespace Tests
 
         Friend Sub AssertFalse(Value As Boolean,
                                Message As String)
-
-            If Value = False Then Return
-
-            Throw New Exception(Message)
-
+            AssertTrue(Not Value, Message)
         End Sub
 
         Friend Sub AssertNotNothing(Value As Object,

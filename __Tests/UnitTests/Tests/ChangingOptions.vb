@@ -20,7 +20,7 @@ Namespace Tests
                         Cs.Write(0, Data)
 
                         Cs.Options.CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate
-                        Cs.Options.CompressionMinimumSavingsPercent = 1
+                        Cs.Options.CompressionRatioThreshold = 0.99
 
                         Dim Result = Cs.ApplyOptions(ChunkedStream.ApplyOptionTypes.Compression)
 
@@ -155,7 +155,7 @@ Namespace Tests
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
-                        .CompressionMinimumSavingsPercent = 1
+                        .CompressionRatioThreshold = 0.99
                     }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
@@ -232,7 +232,7 @@ Namespace Tests
                         Using Checkpoint = Cs.CreateCheckpoint()
 
                             Cs.Options.CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate
-                            Cs.Options.CompressionMinimumSavingsPercent = 1
+                            Cs.Options.CompressionRatioThreshold = 0.99
 
                             Dim Result = Cs.ApplyOptions(ChunkedStream.ApplyOptionTypes.Compression)
 
@@ -265,7 +265,7 @@ Namespace Tests
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
-                        .CompressionMinimumSavingsPercent = 90
+                        .CompressionRatioThreshold = 0.1
                     }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
@@ -308,7 +308,7 @@ Namespace Tests
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
-                        .CompressionMinimumSavingsPercent = 90
+                        .CompressionRatioThreshold = 0.1
                     }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
@@ -346,7 +346,7 @@ Namespace Tests
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
-                        .CompressionMinimumSavingsPercent = 90
+                        .CompressionRatioThreshold = 0.1
                     }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
@@ -359,7 +359,7 @@ Namespace Tests
 
                         Cs.Write(0, Data)
 
-                        Cs.Options.CompressionMinimumSavingsPercent = 20
+                        Cs.Options.CompressionRatioThreshold = 0.8
 
                         Dim Result =
                             Cs.ApplyOptions(
@@ -399,61 +399,36 @@ Namespace Tests
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
-                        .CompressionMinimumSavingsPercent = 75
+                        .CompressionRatioThreshold = 0.7
                     }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Cs.Write(0 * ChunkedStream.ChunkSize,
+                        Dim Chunks = 6
+                        For i = 0 To (Chunks - 1)
+                            Cs.Write(i * ChunkedStream.ChunkSize,
                                  Helpers.MakeCompressableData(
-                                     0.1,
+                                     i / (Chunks - 1),
                                      ChunkedStream.ChunkSize,
                                      1))
+                        Next
 
-                        Cs.Write(1 * ChunkedStream.ChunkSize,
-                                 Helpers.MakeCompressableData(
-                                     0.3,
-                                     ChunkedStream.ChunkSize,
-                                     2))
+                        Dim Before = Cs.GetStructure()
+                        AssertEqual(Chunks, Before.ChunkCount, "Unexpected chunk count.")
 
-                        Cs.Write(2 * ChunkedStream.ChunkSize,
-                                 Helpers.MakeCompressableData(
-                                     0.5,
-                                     ChunkedStream.ChunkSize,
-                                     3))
+                        Dim ExpectedCompressedInitial = Before.Chunks.Where(Function(x) x.CompressionEvaluatedRatio <= Cs.Options.CompressionRatioThreshold).Count
+                        AssertEqual(Before.Chunks.Where(Function(x) x.IsCompressed).Count, ExpectedCompressedInitial, $"Expected {ExpectedCompressedInitial} chunks to be initially compressed.")
 
-                        Cs.Write(3 * ChunkedStream.ChunkSize,
-                                 Helpers.MakeCompressableData(
-                                     0.7,
-                                     ChunkedStream.ChunkSize,
-                                     4))
+                        Cs.Options.CompressionRatioThreshold = 0.3
+                        Dim Result = Cs.ApplyOptions(ChunkedStream.ApplyOptionTypes.Compression)
+                        AssertTrue(Result.RewrittenChunks <> 0, "This test should require chunks to be rewritten")
+                        Dim After = Cs.GetStructure()
 
-                        Cs.Write(4 * ChunkedStream.ChunkSize,
-                                 Helpers.MakeCompressableData(
-                                     0.9,
-                                     ChunkedStream.ChunkSize,
-                                     5))
+                        Dim ExpectedCompressedUltimately = Cs.GetStructure.Chunks.Where(Function(x) x.CompressionEvaluatedRatio <= Cs.Options.CompressionRatioThreshold).Count
+                        Dim ExpectedRewrittenChunks = Math.Abs(ExpectedCompressedInitial - ExpectedCompressedUltimately)
+                        AssertTrue(Result.RewrittenChunks = ExpectedRewrittenChunks, $"Expected {ExpectedRewrittenChunks} chunks to change compression state.")
 
-                        Dim Before =
-                            Cs.GetStructure().
-                                Chunks.
-                                Select(Function(c) c.CompressionSavingsPercent).
-                                ToArray()
-
-                        Cs.Options.CompressionMinimumSavingsPercent = 40
-
-                        Dim Result =
-                            Cs.ApplyOptions(
-                                ChunkedStream.ApplyOptionTypes.Compression)
-
-                        AssertTrue(
-                            Result.RewrittenChunks > 0,
-                            "Expected some chunks to change compression state.")
-
-                        AssertEqual(
-                            5,
-                            Cs.GetStructure().ChunkCount,
-                            "Unexpected chunk count.")
+                        AssertEqual(After.Chunks.Where(Function(x) x.IsCompressed).Count, ExpectedCompressedUltimately, $"Expected {ExpectedCompressedUltimately} chunks to be ultimately compressed.")
 
                     End Using
 

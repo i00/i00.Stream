@@ -70,7 +70,7 @@ Namespace Streams
             Public PhysicalLength As Integer
             Public CompressionMethod As ChunkedStreamOptions.CompressionMethods
             Public CompressionEvaluatedMethod As ChunkedStreamOptions.CompressionMethods
-            Public CompressionSavingsPercent As Integer
+            Public CompressionEvaluatedPercent As Integer
             Public EncryptionMethod As ChunkEncryptionMethods
             Public PayloadLength As Integer
             Public ChunkFlags As ChunkFlags
@@ -79,7 +79,7 @@ Namespace Streams
         Private Structure ChunkHeaderSnapshot
             Public CompressionMethod As ChunkedStreamOptions.CompressionMethods
             Public CompressionEvaluatedMethod As ChunkedStreamOptions.CompressionMethods
-            Public CompressionSavingsPercent As Integer
+            Public CompressionEvaluatedPercent As Integer
             Public EncryptionMethod As ChunkEncryptionMethods
             Public PlainLength As Integer
             Public PayloadLength As Integer
@@ -144,7 +144,7 @@ Namespace Streams
                             .PhysicalLength = Entry.RecordLength,
                             .CompressionMethod = Header.CompressionMethod,
                             .CompressionEvaluatedMethod = Header.CompressionEvaluatedMethod,
-                            .CompressionSavingsPercent = Header.CompressionSavingsPercent,
+                            .CompressionEvaluatedPercent = Header.CompressionEvaluatedPercent,
                             .EncryptionMethod = Header.EncryptionMethod,
                             .PayloadLength = Header.PayloadLength,
                             .ChunkFlags = Header.ChunkFlags
@@ -164,7 +164,7 @@ Namespace Streams
                             .PhysicalLength = 0,
                             .CompressionMethod = ChunkedStreamOptions.CompressionMethods.None,
                             .CompressionEvaluatedMethod = ChunkedStreamOptions.CompressionMethods.None,
-                            .CompressionSavingsPercent = 0,
+                            .CompressionEvaluatedPercent = 100,
                             .EncryptionMethod = ChunkEncryptionMethods.None,
                             .PayloadLength = 0,
                             .ChunkFlags = ChunkFlags.PlaintextAllZero
@@ -270,7 +270,7 @@ Namespace Streams
                         PhysicalOrder:=PhysicalOrder,
                         CompressionMethod:=BuildInfo.CompressionMethod,
                         CompressionEvaluatedMethod:=BuildInfo.CompressionEvaluatedMethod,
-                        CompressionSavingsPercent:=BuildInfo.CompressionSavingsPercent,
+                        CompressionEvaluatedPercent:=BuildInfo.CompressionEvaluatedPercent,
                         EncryptionMethod:=BuildInfo.EncryptionMethod,
                         PayloadLength:=BuildInfo.PayloadLength,
                         ChunkFlags:=BuildInfo.ChunkFlags,
@@ -333,7 +333,7 @@ Namespace Streams
                     IsFileMasterKeyUserWrapped:=WrapMode = MasterKeyWrapModes.UserWrap,
                     IsEncryptionEnabledForNewWrites:=_CurrentWriteEncryptionEnabled,
                     CurrentCompressionMethod:=Options.CompressionMethod,
-                    CurrentCompressionMinimumSavingsPercent:=Options.CompressionMinimumSavingsPercent,
+                    CurrentCompressionRatioThreshold:=Options.CompressionRatioThreshold,
                     CurrentStoreSparseChunks:=Options.StoreSparseChunks,
                     HeaderSequence:=_HeaderSequence,
                     ActiveHeaderCopy:=_ActiveHeaderCopy,
@@ -396,8 +396,8 @@ Namespace Streams
                 CType(BitConverter.ToInt32(Header, ChunkCompressionEvaluatedMethodOffset),
                       ChunkedStreamOptions.CompressionMethods)
 
-            Dim CompressionSavingsPercent =
-                CInt(Header(ChunkCompressionSavingsPercentOffset))
+            Dim CompressionEvaluatedPercent =
+                CInt(Header(ChunkCompressionEvaluatedPercentOffset))
 
             Dim EncryptionMethod =
                 CType(BitConverter.ToInt32(Header, ChunkEncryptionMethodOffset),
@@ -426,17 +426,17 @@ Namespace Streams
                 Throw New InvalidDataException($"Unsupported chunk flags for chunk {ExpectedChunkIndex}: {CInt(Flags)}.")
             End If
 
-            If CompressionSavingsPercent < MinimumCompressionSavingsPercent OrElse
-               CompressionSavingsPercent > MaximumCompressionSavingsPercent Then
+            If CompressionEvaluatedPercent < MinimumCompressionEvaluatedPercent OrElse
+               CompressionEvaluatedPercent > MaximumCompressionEvaluatedPercent Then
 
-                Throw New InvalidDataException(
-                    $"Invalid compression savings percent for chunk {ExpectedChunkIndex}: {CompressionSavingsPercent}.")
+                Throw New InvalidDataException($"Invalid compression evaluated percent for chunk {ExpectedChunkIndex}: {CompressionEvaluatedPercent}.")
+
             End If
 
             Return New ChunkHeaderSnapshot With {
                 .CompressionMethod = CompressionMethod,
                 .CompressionEvaluatedMethod = CompressionEvaluatedMethod,
-                .CompressionSavingsPercent = CompressionSavingsPercent,
+                .CompressionEvaluatedPercent = CompressionEvaluatedPercent,
                 .EncryptionMethod = EncryptionMethod,
                 .PlainLength = PlainLength,
                 .PayloadLength = PayloadLength,
@@ -587,7 +587,7 @@ Namespace Streams
                        IsFileMasterKeyUserWrapped As Boolean,
                        IsEncryptionEnabledForNewWrites As Boolean,
                        CurrentCompressionMethod As ChunkedStream.ChunkedStreamOptions.CompressionMethods,
-                       CurrentCompressionMinimumSavingsPercent As Integer,
+                       CurrentCompressionRatioThreshold As Double,
                        CurrentStoreSparseChunks As Boolean,
                        HeaderSequence As Long,
                        ActiveHeaderCopy As Integer,
@@ -629,7 +629,7 @@ Namespace Streams
             Me.IsFileMasterKeyUserWrapped = IsFileMasterKeyUserWrapped
             Me.IsEncryptionEnabledForNewWrites = IsEncryptionEnabledForNewWrites
             Me.CurrentCompressionMethod = CurrentCompressionMethod
-            Me.CurrentCompressionMinimumSavingsPercent = CurrentCompressionMinimumSavingsPercent
+            Me.CurrentCompressionRatioThreshold = CurrentCompressionRatioThreshold
             Me.CurrentStoreSparseChunks = CurrentStoreSparseChunks
             Me.HeaderSequence = HeaderSequence
             Me.ActiveHeaderCopy = ActiveHeaderCopy
@@ -795,9 +795,9 @@ Namespace Streams
         Public ReadOnly Property CurrentCompressionMethod As ChunkedStream.ChunkedStreamOptions.CompressionMethods
 
         ''' <summary>
-        ''' Minimum saving percentage currently required before storing a newly written chunk compressed.
+        ''' Maximum compressed-size ratio currently allowed before storing a newly written chunk compressed.
         ''' </summary>
-        Public ReadOnly Property CurrentCompressionMinimumSavingsPercent As Integer
+        Public ReadOnly Property CurrentCompressionRatioThreshold As Double
 
         ''' <summary>
         ''' True when newly written all-zero chunks are stored physically instead of being sparse.
@@ -1036,7 +1036,7 @@ Namespace Streams
                            PhysicalOrder As Integer?,
                            CompressionMethod As ChunkedStream.ChunkedStreamOptions.CompressionMethods,
                            CompressionEvaluatedMethod As ChunkedStream.ChunkedStreamOptions.CompressionMethods,
-                           CompressionSavingsPercent As Integer,
+                           CompressionEvaluatedPercent As Integer,
                            EncryptionMethod As ChunkedStream.ChunkEncryptionMethods,
                            PayloadLength As Integer,
                            ChunkFlags As ChunkedStream.ChunkFlags,
@@ -1058,7 +1058,7 @@ Namespace Streams
                 Me.PhysicalOrder = PhysicalOrder
                 Me.CompressionMethod = CompressionMethod
                 Me.CompressionEvaluatedMethod = CompressionEvaluatedMethod
-                Me.CompressionSavingsPercent = CompressionSavingsPercent
+                Me.CompressionEvaluatedPercent = CompressionEvaluatedPercent
                 Me.EncryptionMethod = EncryptionMethod
                 Me.PayloadLength = PayloadLength
                 Me.ChunkFlags = ChunkFlags
@@ -1131,22 +1131,20 @@ Namespace Streams
             Public ReadOnly Property CompressionEvaluatedMethod As ChunkedStream.ChunkedStreamOptions.CompressionMethods
 
             ''' <summary>
-            ''' Compression saving percentage produced when the evaluated compression method was tested.
-            ''' Stored as 0-100.
+            ''' Evaluated compressed size as a percentage of the original plaintext size.
+            ''' Stored as 0-100. Lower values indicate better compression.
             ''' </summary>
-            Public ReadOnly Property CompressionSavingsPercent As Integer
+            Public ReadOnly Property CompressionEvaluatedPercent As Integer
 
             ''' <summary>
-            ''' Compression saving ratio from the evaluated compression method.
+            ''' Evaluated compressed size as a ratio of the original plaintext size.
+            ''' Lower values indicate better compression.
             ''' </summary>
-            Public ReadOnly Property CompressionSavingsRatio As Double
+            Public ReadOnly Property CompressionEvaluatedRatio As Double
                 Get
-
-                    If CompressionSavingsPercent <= 0 Then Return 0
-                    If CompressionSavingsPercent >= 100 Then Return 1
-
-                    Return CompressionSavingsPercent / 100.0R
-
+                    If CompressionEvaluatedPercent <= 0 Then Return 0
+                    If CompressionEvaluatedPercent >= 100 Then Return 1
+                    Return CompressionEvaluatedPercent / 100.0R
                 End Get
             End Property
 
@@ -1284,7 +1282,7 @@ Namespace Streams
 
                 Dim EvaluatedCompressionText =
                     If(CompressionEvaluatedMethod <> ChunkedStream.ChunkedStreamOptions.CompressionMethods.None,
-                       $", evaluated {CompressionEvaluatedMethod} {CompressionSavingsRatio:P2}",
+                       $", evaluated {CompressionEvaluatedMethod} {CompressionEvaluatedRatio:P2}",
                        "")
                 Dim ZeroText = If(IsPlaintextAllZero, ", zero", "")
 

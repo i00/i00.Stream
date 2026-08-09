@@ -362,157 +362,112 @@ Namespace Streams
             End If
 
             Dim CompressionMethod =
-        CType(BitConverter.ToInt32(Record, ChunkCompressionMethodOffset),
-              ChunkedStreamOptions.CompressionMethods)
+                CType(BitConverter.ToInt32(Record, ChunkCompressionMethodOffset),
+                      ChunkedStreamOptions.CompressionMethods)
 
             Dim EncryptionMethod =
-        CType(BitConverter.ToInt32(Record, ChunkEncryptionMethodOffset),
-              ChunkEncryptionMethods)
+                CType(BitConverter.ToInt32(Record, ChunkEncryptionMethodOffset),
+                      ChunkEncryptionMethods)
 
             Dim PlainLength = BitConverter.ToInt32(Record, ChunkPlainLengthOffset)
             Dim PayloadLength = BitConverter.ToInt32(Record, ChunkPayloadLengthOffset)
 
             Dim Flags =
-        CType(BitConverter.ToInt32(Record, ChunkFlagsOffset),
-              ChunkFlags)
+                CType(BitConverter.ToInt32(Record, ChunkFlagsOffset),
+                      ChunkFlags)
 
             Dim CompressionEvaluatedMethod =
-        CType(BitConverter.ToInt32(Record, ChunkCompressionEvaluatedMethodOffset),
-              ChunkedStreamOptions.CompressionMethods)
+                CType(BitConverter.ToInt32(Record, ChunkCompressionEvaluatedMethodOffset),
+                      ChunkedStreamOptions.CompressionMethods)
 
-            Dim CompressionSavingsPercent =
-        CInt(Record(ChunkCompressionSavingsPercentOffset))
+            Dim CompressionEvaluatedPercent =
+                CInt(Record(ChunkCompressionEvaluatedPercentOffset))
 
             If PlainLength < 0 OrElse PlainLength > ChunkSize Then
                 Throw New InvalidDataException("Invalid chunk plain length.")
             End If
 
-            If PayloadLength < 0 OrElse
-       ChunkRecordDataOffset + PayloadLength + MacSize <> Record.Length Then
-
+            If PayloadLength < 0 OrElse ChunkRecordDataOffset + PayloadLength + MacSize <> Record.Length Then
                 Throw New InvalidDataException("Invalid chunk payload length.")
-
             End If
 
             If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then
                 Throw New InvalidDataException($"Unsupported chunk flags: {CInt(Flags)}.")
             End If
 
-            If CompressionSavingsPercent < MinimumCompressionSavingsPercent OrElse
-       CompressionSavingsPercent > MaximumCompressionSavingsPercent Then
+            If CompressionEvaluatedPercent < MinimumCompressionEvaluatedPercent OrElse
+               CompressionEvaluatedPercent > MaximumCompressionEvaluatedPercent Then
 
-                Throw New InvalidDataException(
-            $"Invalid compression savings percent: {CompressionSavingsPercent}.")
+                Throw New InvalidDataException($"Invalid compression evaluated percent: {CompressionEvaluatedPercent}.")
 
             End If
 
             Select Case CompressionEvaluatedMethod
 
                 Case ChunkedStreamOptions.CompressionMethods.None,
-             ChunkedStreamOptions.CompressionMethods.Lz4,
-             ChunkedStreamOptions.CompressionMethods.Deflate,
-             ChunkedStreamOptions.CompressionMethods.GZip
+                     ChunkedStreamOptions.CompressionMethods.Lz4,
+                     ChunkedStreamOptions.CompressionMethods.Deflate,
+                     ChunkedStreamOptions.CompressionMethods.GZip
 
                     ' Valid.
 
                 Case Else
 
-                    Throw New InvalidDataException(
-                $"Unsupported evaluated compression method: {CInt(CompressionEvaluatedMethod)}.")
+                    Throw New InvalidDataException($"Unsupported evaluated compression method: {CInt(CompressionEvaluatedMethod)}.")
 
             End Select
 
             Dim RecordMacKey =
-        If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey,
-           _ChunkMacKey,
-           PublicIntegrityKey)
+                If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey,
+                   _ChunkMacKey,
+                   PublicIntegrityKey)
 
             If RecordMacKey Is Nothing Then
-                Throw New EncryptionMismatchException(
-            "Encrypted chunk exists but no file master key is available.")
+                Throw New EncryptionMismatchException("Encrypted chunk exists but no file master key is available.")
             End If
 
             Using Hmac As New HMACSHA256(RecordMacKey)
 
-                Dim ExpectedMac =
-            Hmac.ComputeHash(
-                Record,
-                0,
-                ChunkRecordDataOffset + PayloadLength)
+                Dim ExpectedMac = Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
 
-                If Not FixedTimeEquals(
-            ExpectedMac,
-            0,
-            Record,
-            ChunkRecordDataOffset + PayloadLength,
-            MacSize) Then
-
+                If Not FixedTimeEquals(ExpectedMac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize) Then
                     Throw New CryptographicException("Chunk MAC invalid.")
-
                 End If
 
             End Using
 
             Dim Payload =
-        If(PayloadLength = 0,
-           New Byte() {},
-           New Byte(PayloadLength - 1) {})
+                If(PayloadLength = 0,
+                   New Byte() {},
+                   New Byte(PayloadLength - 1) {})
 
             Select Case EncryptionMethod
 
                 Case ChunkEncryptionMethods.None
 
                     If PayloadLength > 0 Then
-
-                        System.Buffer.BlockCopy(
-                    Record,
-                    ChunkRecordDataOffset,
-                    Payload,
-                    0,
-                    PayloadLength)
-
+                        System.Buffer.BlockCopy(Record, ChunkRecordDataOffset, Payload, 0, PayloadLength)
                     End If
 
                 Case ChunkEncryptionMethods.AesCtrFileMasterKey
 
                     If _ChunkEncryptionKey Is Nothing Then
-
-                        Throw New EncryptionMismatchException(
-                    "Encrypted chunk exists but no file master key is available.")
-
+                        Throw New EncryptionMismatchException("Encrypted chunk exists but no file master key is available.")
                     End If
 
-                    System.Buffer.BlockCopy(
-                Record,
-                ChunkRecordIvOffset,
-                _Counter,
-                0,
-                IvSize)
-
-                    CryptPayload(
-                Record,
-                ChunkRecordDataOffset,
-                PayloadLength,
-                Payload,
-                0,
-                _ChunkEncryptionKey)
+                    System.Buffer.BlockCopy(Record, ChunkRecordIvOffset, _Counter, 0, IvSize)
+                    CryptPayload(Record, ChunkRecordDataOffset, PayloadLength, Payload, 0, _ChunkEncryptionKey)
 
                 Case Else
 
-                    Throw New InvalidDataException(
-                $"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
+                    Throw New InvalidDataException($"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
 
             End Select
 
-            Dim Restored =
-        DecompressPayload(
-            CompressionMethod,
-            Payload,
-            PlainLength)
+            Dim Restored = DecompressPayload(CompressionMethod, Payload, PlainLength)
 
             If Restored.Length <> PlainLength Then
-                Throw New InvalidDataException(
-            "Chunk decompressed/plain length mismatch.")
+                Throw New InvalidDataException("Chunk decompressed/plain length mismatch.")
             End If
 
             If PlainLength > 0 Then

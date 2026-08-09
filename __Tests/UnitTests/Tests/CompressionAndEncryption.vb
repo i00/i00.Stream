@@ -17,7 +17,7 @@ Namespace Tests
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .StoreSparseChunks = True,
                         .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
-                        .CompressionMinimumSavingsPercent = 1,
+                        .CompressionRatioThreshold = 0.99,
                         .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(77))
                     }
 
@@ -52,7 +52,7 @@ Namespace Tests
 
                         Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                                 .CompressionMethod = CompressionMethod,
-                                .CompressionMinimumSavingsPercent = 1
+                                .CompressionRatioThreshold = 0.99
                             }
 
                         Using Cs = ChunkedStream.Open(Ms, Options)
@@ -145,7 +145,7 @@ Namespace Tests
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                             .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
-                            .CompressionMinimumSavingsPercent = 1
+                            .CompressionRatioThreshold = 0.99
                         }
 
                     Dim Data = MakeRepeatingPattern(250000, 5)
@@ -308,7 +308,7 @@ Namespace Tests
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                             .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.GZip,
-                            .CompressionMinimumSavingsPercent = 1,
+                            .CompressionRatioThreshold = 0.99,
                             .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(7))
                         }
 

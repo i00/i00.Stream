@@ -113,7 +113,7 @@
 '   20      4       Payload Length
 '   24      4       Chunk Flags
 '   28      4       Compression Evaluated Method
-'   32      1       Compression Evaluated Savings Percent
+'   32      1       Compression Evaluated Percent
 '   33      15      Reserved
 '
 '   48      16      IV / Counter Start
@@ -255,7 +255,7 @@ Namespace Streams
         Private Const ChunkFlagsOffset As Integer = 24
 
         Private Const ChunkCompressionEvaluatedMethodOffset As Integer = 28
-        Private Const ChunkCompressionSavingsPercentOffset As Integer = 32
+        Private Const ChunkCompressionEvaluatedPercentOffset As Integer = 32
 
         Private Const ChunkReservedOffset As Integer = 33
         Private Const ChunkReservedSize As Integer = 15
@@ -348,9 +348,12 @@ Namespace Streams
         End Enum
 
         Private Const SupportedChunkFlags As ChunkFlags = ChunkFlags.PlaintextAllZero
-        Private Const MinimumCompressionSavingsPercent As Integer = 0
-        Private Const MaximumCompressionSavingsPercent As Integer = 100
 
+        'TODO: get rid of these?
+        Private Const MinimumCompressionEvaluatedPercent As Integer = 0
+        Private Const MaximumCompressionEvaluatedPercent As Integer = 100
+        Private Const MinimumCompressionRatioThreshold As Double = 0.0R
+        Private Const MaximumCompressionRatioThreshold As Double = 1.0R
         ''' <summary>
         ''' Gets the logical plaintext length of the stream.
         ''' </summary>
@@ -383,8 +386,8 @@ Namespace Streams
             _HeaderFlags = HeaderFlags
             Me.Options = If(Options, New ChunkedStreamOptions())
 
-            If Me.Options.CompressionMinimumSavingsPercent < 0 Then Me.Options.CompressionMinimumSavingsPercent = 0
-            If Me.Options.CompressionMinimumSavingsPercent > 100 Then Me.Options.CompressionMinimumSavingsPercent = 100
+            If Me.Options.CompressionRatioThreshold < MinimumCompressionRatioThreshold Then Me.Options.CompressionRatioThreshold = MinimumCompressionRatioThreshold
+            If Me.Options.CompressionRatioThreshold > MaximumCompressionRatioThreshold Then Me.Options.CompressionRatioThreshold = MaximumCompressionRatioThreshold
 
             _ChunkPlain = New Byte(ChunkSize - 1) {}
             _Counter = New Byte(IvSize - 1) {}

@@ -16,7 +16,7 @@ Public Class Autoexec
         Using Ms As New MemoryStream()
             Dim Options = New ChunkedStream.ChunkedStreamOptions With {
                 .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
-                .CompressionMinimumSavingsPercent = 50
+                .CompressionRatioThreshold = 50
             }
             Using Cs = ChunkedStream.Open(Ms, Options)
                 'make a payload that will be able to be compressable to about 75%
