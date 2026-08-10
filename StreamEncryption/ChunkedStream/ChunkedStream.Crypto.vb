@@ -1,4 +1,28 @@
-﻿Imports System.IO
+﻿' ================================================================================
+' ChunkedStream Crypto
+' ================================================================================
+'
+' Purpose
+'   - Encryption, key derivation, key wrapping and chunk cryptography.
+'
+' Design
+'   - A file master key protects encrypted chunk data.
+'   - Chunk encryption and MAC keys are derived from the file master key.
+'   - AES-CTR is used for chunk encryption.
+'   - HMAC-SHA256 authenticates encrypted chunk records.
+'
+' File Master Key
+'   - May be publicly wrapped.
+'   - May be wrapped using user-supplied encryption information.
+'   - Can be removed automatically when no encrypted chunks remain.
+'
+' Notes
+'   - Compression occurs before encryption.
+'   - Decryption occurs before decompression.
+'
+' ================================================================================
+
+Imports System.IO
 Imports System.Security.Cryptography
 Imports System.Text
 

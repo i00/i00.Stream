@@ -1,4 +1,31 @@
-﻿Imports System.IO
+﻿' ================================================================================
+' ChunkedStream Defragmentation
+' ================================================================================
+'
+' Purpose
+'   - Physical storage optimisation and chunk-layout maintenance.
+'
+' Supported Modes
+'   - Move
+'       Moves live chunk records into suitable gaps.
+'
+'   - Sequence
+'       Reorders live chunk records into logical order.
+'
+'   - Rebuild
+'       Rewrites all chunks using the current options.
+'
+' Design
+'   - Defragmentation operates directly on live chunk records.
+'   - Chunk moves are journalled for crash recovery.
+'   - Rebuild uses checkpoint-style recovery and publishes changes atomically.
+'
+' Notes
+'   - Defragmentation is not permitted while a checkpoint is active.
+'
+' ================================================================================
+
+Imports System.IO
 Imports System.Security.Cryptography
 
 Namespace Streams

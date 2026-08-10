@@ -5,6 +5,8 @@
 ' Compatibility
 '   - Designed for .NET Framework 4.8+.
 '   - Uses only APIs available in .NET Framework 4.8.
+'   - Inherits Stream and supports standard stream operations such as Read, Write,
+'     Seek, Position, Length, SetLength and Flush.
 '   - The underlying stream remains owned by the caller.
 '     i.e. Disposing ChunkedStream does not dispose the underlying stream.
 '
@@ -15,7 +17,31 @@
 '   - Sparse chunk support.
 '   - Append-on-write chunk updates.
 '   - Defragmentation and recovery support.
-'   - Data-only checkpoints with automatic rollback if not committed.
+'   - Data-only checkpoints with automatic rollback to the current checkpoint
+'     baseline when disposed.
+'   - Configurable fixed logical chunk size per stream.
+'   - Optional most-recently-read plaintext chunk cache.
+'
+' Stream Model
+'   - The standard Stream API reads and writes at Position.
+'   - The random-access Read(LogicalOffset, Output) and Write(LogicalOffset, Input)
+'     overloads do not use or modify Position.
+'   - The stream is readable, writable and seekable.
+'
+' Chunk Size Model
+'   - New streams use Options.ChunkSize.
+'   - Existing streams load the stored chunk size from the header and update
+'     Options.ChunkSize to match.
+'   - Changing Options.ChunkSize does not immediately affect existing chunks.
+'   - Defragment(DefragTypes.Rebuild) rewrites all chunks using the current
+'     Options.ChunkSize.
+'   - Incomplete chunk-size rebuilds are rolled back on the next open.
+'
+' Read Cache Model
+'   - The most recently loaded plaintext chunk may be cached.
+'   - The cache is controlled by Options.UseChunkReadCache.
+'   - Cache contents are invalidated when data, structure or checkpoint state changes.
+'   - The cache is an optimisation only and is never required for correctness.
 '
 ' Integrity Model
 '   - Every header, index table and chunk record is authenticated.
@@ -30,22 +56,53 @@
 '   - The file master key is wrapped in the header.
 '   - Changing the user encryption key only rewraps the file master key.
 '   - Existing encrypted chunks do not need to be rewritten when the user key changes.
-'   - If EncryptionInfo is set to Nothing, the file master key is publicly wrapped.
-'     Existing encrypted chunks remain encrypted on disk, but can be read without a secret.
+'   - If EncryptionInfo is set to Nothing, the file master key is publicly wrapped
+'     while encrypted chunks still exist.
+'   - If encryption is disabled and ApplyOptions(ApplyOptionTypes.Encryption) rewrites
+'     all chunks as unencrypted, the unused file master key will be removed.
 '   - New chunks are encrypted only when Options.EncryptionInfo is not Nothing.
+'
+' Compression Model
+'   - Compression is evaluated per chunk.
+'   - Each physical chunk record stores the compression method actually used.
+'   - Each physical chunk record also stores the compression method last evaluated
+'     and the evaluated compressed-size percentage.
+'   - Compression Evaluated Percent is the compressed payload size as a percentage of
+'     the original plaintext size. Lower values indicate better compression.
+'   - Options.CompressionRatioThreshold controls whether evaluated compression is
+'     stored. For example, 0.95 means the compressed payload must be no larger than
+'     95% of the original plaintext size.
+'
+' Sparse Chunk Model
+'   - All-zero logical chunks may be represented as sparse index entries.
+'   - When sparse chunks are physically stored, the PlaintextAllZero chunk flag records
+'     that the plaintext represented by the chunk is entirely zero bytes.
+'   - Sparse chunks are treated as plaintext-all-zero by structure diagnostics.
 '
 ' Checkpoint Model
 '   - CreateCheckpoint() creates a data-only checkpoint.
 '   - Writes and length changes inside a checkpoint are visible immediately to reads.
-'   - If Commit() is called, changes are retained.
-'   - If Commit() is not called before disposal, the checkpoint rolls back.
-'   - Checkpoints may be nested, but must be committed or rolled back in LIFO order.
-'   - Committing an inner checkpoint only merges it into its parent checkpoint.
-'   - Only the outermost checkpoint writes the committed index/header.
-'   - Rolling back an outer checkpoint also rolls back committed inner checkpoints.
+'   - Commit() updates the checkpoint baseline to the current stream data state and
+'     keeps the checkpoint active.
+'   - Rollback() restores the current checkpoint baseline and keeps the checkpoint active.
+'   - Dispose restores the current checkpoint baseline and closes the checkpoint.
+'   - Checkpoints may be nested, but must be committed, rolled back or disposed in
+'     LIFO order.
+'   - Committing an inner checkpoint only updates that inner checkpoint's baseline.
+'   - A committed inner checkpoint is still part of its parent checkpoint and will be
+'     rolled back if the parent checkpoint is rolled back or disposed.
+'   - Only the outermost checkpoint owns header recovery state.
 '   - Checkpoints roll back stream data only. Options, encryption settings and key
 '     wrapping changes are not rolled back.
 '   - Defragmentation is not allowed while a checkpoint is active.
+'
+' Recovery Model
+'   - Recovery state is stored in the header recovery area.
+'   - Recovery is processed automatically during Open().
+'   - Chunk move recovery validates copied records before publishing recovered state.
+'   - Checkpoint recovery restores the checkpoint baseline.
+'   - Chunk-size rebuild recovery truncates incomplete rebuild output and reopens the
+'     previously committed stream state.
 '
 ' File Layout
 '
@@ -132,6 +189,22 @@
 ' Encryption Methods
 '   0 = None
 '   1 = AES-CTR using file master key
+'
+' Chunk Flags
+'   0 = None
+'   1 = PlaintextAllZero
+'
+' Master Key Wrap Modes
+'   0 = None
+'   1 = PublicWrap
+'   2 = UserWrap
+'
+' Recovery States
+'   0   = None
+'   1   = CopyingChunk
+'   2   = ChunkCopied
+'   100 = CheckpointActive
+'   200 = ChunkSizeRebuildActive
 '
 ' ================================================================================
 

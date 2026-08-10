@@ -346,12 +346,12 @@ Public Class Form1
 
                     Dim LastUpdate As Date
 
-                    Dim Before = Enc.GetStructure
-                    Enc.Options.EncryptionInfo = Nothing
-                    Enc.Options.CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.None
-                    Enc.Defragment(Streams.ChunkedStream.DefragTypes.Rebuild)
-                    Dim After = Enc.GetStructure
-                    Enc.Defragment(Streams.ChunkedStream.DefragTypes.Rebuild)
+                    'Dim Before = Enc.GetStructure
+                    'Enc.Options.EncryptionInfo = Nothing
+                    'Enc.Options.CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.None
+                    'Enc.Defragment(Streams.ChunkedStream.DefragTypes.Move)
+                    'Dim After = Enc.GetStructure
+                    'Enc.Defragment(Streams.ChunkedStream.DefragTypes.Move)
 
                     Dim ReclaimedBytes = Enc.Defragment(Streams.ChunkedStream.DefragTypes.Move,
                                                         Sub(ProcessedUnits, TotalUnits, UnitType, CancellationToken)

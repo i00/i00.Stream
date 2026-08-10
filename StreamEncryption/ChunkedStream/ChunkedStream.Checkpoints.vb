@@ -1,4 +1,29 @@
-﻿Namespace Streams
+﻿' ================================================================================
+' ChunkedStream Checkpoints
+' ================================================================================
+'
+' Purpose
+'   - Implements data-only checkpoint support.
+'
+' Design
+'   - Checkpoints capture logical length, index state, physical length and
+'     header flags.
+'   - Nested checkpoints are supported using a stack.
+'   - Commit advances the checkpoint baseline.
+'   - Rollback restores the checkpoint baseline.
+'   - Dispose restores the baseline and closes the checkpoint.
+'
+' Recovery
+'   - The outermost checkpoint owns recovery state.
+'   - Recovery information is written to the header recovery area.
+'
+' Notes
+'   - Checkpoints do not protect option changes.
+'   - Checkpoints do not protect encryption configuration changes.
+'
+' ================================================================================
+
+Namespace Streams
 
     Partial Class ChunkedStream
 

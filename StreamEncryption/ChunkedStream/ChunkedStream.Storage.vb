@@ -1,4 +1,26 @@
-﻿Imports System.IO
+﻿' ================================================================================
+' ChunkedStream Storage
+' ================================================================================
+'
+' Purpose
+'   - Chunk record storage, loading and index maintenance.
+'
+' Design
+'   - Logical chunks are represented by chunk records.
+'   - Sparse chunks are represented using empty index entries.
+'   - Chunk records are appended when rewritten.
+'
+' Read Cache
+'   - The most recently loaded plaintext chunk may be cached.
+'   - Cache usage is controlled by ChunkedStreamOptions.UseChunkReadCache.
+'   - Cache contents are invalidated when data or structure changes.
+'
+' Notes
+'   - This partial owns low-level chunk loading and writing operations.
+'
+' ================================================================================
+
+Imports System.IO
 Imports System.Security.Cryptography
 
 Namespace Streams

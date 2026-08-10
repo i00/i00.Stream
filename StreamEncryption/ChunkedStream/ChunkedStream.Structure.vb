@@ -1,62 +1,32 @@
-﻿Imports System.Collections.ObjectModel
+﻿' ================================================================================
+' ChunkedStream Structure Snapshot API
+' ================================================================================
+'
+' Purpose
+'   - Immutable diagnostic view of a ChunkedStream.
+'
+' Design
+'   - Produces a read-only snapshot of logical and physical structure.
+'   - Reads chunk record headers only.
+'   - Does not read plaintext chunk payloads.
+'   - Does not decrypt or decompress chunk contents.
+'
+' Features
+'   - Chunk metadata inspection.
+'   - Physical-region inspection.
+'   - Compression and encryption statistics.
+'   - Fragmentation analysis.
+'
+' Notes
+'   - Intended for diagnostics, reporting, visualisation and debugging.
+'   - Returned objects are immutable snapshots.
+'
+' ================================================================================
+
+Imports System.Collections.ObjectModel
 Imports System.IO
 
 Namespace Streams
-
-    ' ================================================================================
-    ' ChunkedStream Structure Snapshot API
-    ' ================================================================================
-    '
-    ' Compatibility
-    '   - Designed for .NET Framework 4.8+.
-    '   - Uses only APIs available in .NET Framework 4.8.
-    '   - Compatible with Option Strict On.
-    '   - Does not change the on-disk format.
-    '   - Does not alter ChunkedStream read/write/defrag behaviour.
-    '
-    ' Purpose
-    '   - Provides a read-only, immutable snapshot of the current ChunkedStream layout.
-    '   - Intended for diagnostics, custom visualisation, reporting, debugging and UI
-    '     inspection.
-    '   - Exposes typed metadata derived from existing headers, index entries and chunk
-    '     record headers.
-    '
-    ' Design
-    '   - The storage engine continues to use raw byte offsets and compact structures for
-    '     performance.
-    '   - This API is intentionally separate from the internal data path.
-    '   - GetStructure() reads only chunk record headers, not full chunk payloads.
-    '   - GetStructure() does not decrypt, decompress or validate full chunk data.
-    '   - Returned objects are snapshots. They do not update if the stream changes later.
-    '
-    ' Ratio Convention
-    '   - All properties ending in Ratio return values as 0.0 -> 1.0 unless explicitly
-    '     documented otherwise.
-    '   - UI code should normally display ratio values using ToString("P2").
-    '   - No ratio property returns a 0 -> 100 percentage value.
-    '   - LogicalToPhysicalRatio is intentionally not limited to 0.0 -> 1.0 because it
-    '     represents an efficiency multiplier.
-    '
-    ' Naming Convention
-    '   - Properties ending in Bytes represent raw byte counts.
-    '   - Properties ending in Count represent counts.
-    '   - Properties ending in Ratio represent ratios.
-    '
-    ' Region Model
-    '   - Header represents Header A or Header B.
-    '   - Chunk represents live chunk records referenced by the current index.
-    '   - Hole represents unreferenced physical space inside the data area.
-    '   - Index represents the current chunk index table.
-    '   - Unused represents bytes beyond the current index table, if any.
-    '
-    ' Notes
-    '   - Sparse chunks have no physical record.
-    '   - Sparse chunks expose CompressionMethod = None and EncryptionMethod = None.
-    '   - Physical offsets, physical sizes and physical-order properties are nullable for
-    '     sparse chunks because no physical record exists.
-    '   - Byte values are suitable for display with FormatFileSizeFromBytes().
-    '
-    ' ================================================================================
 
     Partial Class ChunkedStream
 

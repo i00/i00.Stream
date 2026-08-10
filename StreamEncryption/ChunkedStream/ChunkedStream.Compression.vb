@@ -1,4 +1,31 @@
-﻿Imports System.IO
+﻿' ================================================================================
+' ChunkedStream Compression
+' ================================================================================
+'
+' Purpose
+'   - Compression helpers and compression decision logic.
+'
+' Supported Methods
+'   - None
+'   - LZ4
+'   - Deflate
+'   - GZip
+'
+' Design
+'   - Compression is evaluated per chunk.
+'   - Compression decisions are based on CompressionRatioThreshold.
+'   - Each chunk stores:
+'       Compression Method
+'       Compression Evaluated Method
+'       Compression Evaluated Percent
+'
+' Notes
+'   - Compression settings affect newly written chunks only.
+'   - Existing chunks retain their compression state until rewritten.
+'
+' ================================================================================
+
+Imports System.IO
 Imports System.IO.Compression
 
 Namespace Streams

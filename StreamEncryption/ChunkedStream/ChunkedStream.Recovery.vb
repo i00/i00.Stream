@@ -1,4 +1,27 @@
-﻿Imports System.IO
+﻿' ================================================================================
+' ChunkedStream Recovery
+' ================================================================================
+'
+' Purpose
+'   - Crash recovery and recovery-state management.
+'
+' Protected Operations
+'   - Checkpoint recovery.
+'   - Chunk move recovery.
+'   - Chunk-size rebuild recovery.
+'
+' Design
+'   - Recovery state is stored in the header recovery area.
+'   - Recovery executes automatically during Open().
+'   - Recovery state is durable before protected operations begin.
+'
+' Notes
+'   - Chunk-size rebuild recovery rolls back incomplete rebuilds.
+'   - Chunk move recovery validates old and new records before recovery completes.
+'
+' ================================================================================
+
+Imports System.IO
 Imports System.Security.Cryptography
 
 Namespace Streams

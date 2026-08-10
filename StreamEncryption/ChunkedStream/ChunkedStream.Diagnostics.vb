@@ -1,4 +1,22 @@
-﻿Imports System.IO
+﻿' ================================================================================
+' ChunkedStream Diagnostics
+' ================================================================================
+'
+' Purpose
+'   - Validation and diagnostic helpers.
+'
+' Features
+'   - Fragmentation calculation.
+'   - Full chunk-record validation.
+'   - Progress reporting for long-running validation.
+'
+' Design
+'   - Validation authenticates and verifies all live chunk records.
+'   - Diagnostic methods do not modify stream state.
+'
+' ================================================================================
+
+Imports System.IO
 Imports System.Security.Cryptography
 
 Namespace Streams

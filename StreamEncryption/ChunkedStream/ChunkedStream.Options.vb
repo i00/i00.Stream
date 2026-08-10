@@ -1,4 +1,30 @@
-﻿Namespace Streams
+﻿' ================================================================================
+' ChunkedStream Options
+' ================================================================================
+'
+' Purpose
+'   - Runtime configuration and option-application support.
+'
+' Features
+'   - Compression configuration.
+'   - Compression ratio thresholds.
+'   - Sparse chunk policy.
+'   - Encryption configuration.
+'   - Chunk read-cache configuration.
+'   - Chunk size configuration.
+'
+' Design
+'   - Options affect newly written chunks.
+'   - Existing chunks retain their original representation until rewritten.
+'
+' Chunk Size
+'   - Stored in the file header.
+'   - Existing streams automatically load their stored chunk size.
+'   - Changing ChunkSize affects future rebuild operations only.
+'
+' ================================================================================
+
+Namespace Streams
 
     Partial Class ChunkedStream
 
