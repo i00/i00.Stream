@@ -385,6 +385,9 @@ Namespace Streams
 
         Private _ChunkPlain As Byte()
 
+        Private _CachedChunkIndex As Long = -1
+        Private _CachedChunkPlain As Byte()
+
         Private ReadOnly _Counter As Byte()
         Private ReadOnly _KeyStream As Byte()
 
@@ -480,6 +483,7 @@ Namespace Streams
 
             _ChunkSize = Me.Options.ChunkSize
             _ChunkPlain = New Byte(_ChunkSize - 1) {}
+            _CachedChunkPlain = New Byte(_ChunkSize - 1) {}
             _Counter = New Byte(IvSize - 1) {}
             _KeyStream = New Byte(15) {}
 
@@ -488,6 +492,12 @@ Namespace Streams
             _AesProvider.Padding = PaddingMode.None
 
             _Rng = RandomNumberGenerator.Create()
+
+        End Sub
+
+        Private Sub InvalidateChunkCache()
+
+            _CachedChunkIndex = -1
 
         End Sub
 
@@ -928,6 +938,8 @@ Namespace Streams
                 ThrowIfDisposed()
 
                 If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
+
+                InvalidateChunkCache()
 
                 _Length = Length
 

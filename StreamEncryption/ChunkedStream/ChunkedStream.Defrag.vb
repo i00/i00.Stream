@@ -56,6 +56,8 @@ Namespace Streams
                         "Defragmentation cannot be performed while a checkpoint is active.")
                 End If
 
+                InvalidateChunkCache()
+
                 Dim OriginalLength = _Fs.Length
 
                 Dim CancellationToken As New CancellationToken()
@@ -383,36 +385,61 @@ Namespace Streams
             WriteChunkSizeRebuildRecoveryState(OriginalPhysicalLength)
 
             Dim TargetChunkSize = Options.ChunkSize
-            Dim TargetChunkCount = If(_Length <= 0,
-                                      0,
-                                      CInt(((_Length - 1) \ TargetChunkSize) + 1))
+
+            Dim TargetChunkCount =
+                If(_Length <= 0,
+                   0,
+                   CInt(((_Length - 1) \ TargetChunkSize) + 1))
 
             Dim NewIndex As New List(Of ChunkIndexEntry)(TargetChunkCount)
+
             Dim TargetBuffer(TargetChunkSize - 1) As Byte
-            Dim PhysicalOffset = Math.Max(_Fs.Length, GetDataEndFromIndex())
+
+            Dim PhysicalOffset =
+                Math.Max(_Fs.Length,
+                         GetDataEndFromIndex())
 
             Dim ProcessedBytes As Long = 0
             Dim TotalBytes = Math.Max(1L, _Length)
 
             For TargetChunkIndex = 0 To TargetChunkCount - 1
 
-                If CancellationToken.Cancel Then Return
+                If CancellationToken.Cancel Then
+
+                    _ChunkSize = OriginalChunkSize
+                    _ChunkPlain = OriginalChunkPlain
+
+                    Return
+
+                End If
 
                 Array.Clear(TargetBuffer, 0, TargetBuffer.Length)
 
                 Dim LogicalOffset = CLng(TargetChunkIndex) * TargetChunkSize
-                Dim PlainLength = CInt(Math.Min(CLng(TargetChunkSize), _Length - LogicalOffset))
+
+                Dim PlainLength =
+                    CInt(Math.Min(CLng(TargetChunkSize),
+                                  _Length - LogicalOffset))
 
                 If PlainLength > 0 Then
+
                     Dim ReadBuffer(PlainLength - 1) As Byte
+
                     Read(LogicalOffset, ReadBuffer)
-                    System.Buffer.BlockCopy(ReadBuffer, 0, TargetBuffer, 0, PlainLength)
+
+                    Buffer.BlockCopy(ReadBuffer,
+                                     0,
+                                     TargetBuffer,
+                                     0,
+                                     PlainLength)
+
                 End If
 
-                Dim Entry = WriteChunkRecordForRebuild(TargetChunkIndex,
-                                                       TargetBuffer,
-                                                       PlainLength,
-                                                       PhysicalOffset)
+                Dim Entry =
+                    WriteChunkRecordForRebuild(TargetChunkIndex,
+                                               TargetBuffer,
+                                               PlainLength,
+                                               PhysicalOffset)
 
                 NewIndex.Add(Entry)
 
@@ -431,16 +458,23 @@ Namespace Streams
             Next
 
             If CancellationToken.Cancel Then
+
                 _ChunkSize = OriginalChunkSize
                 _ChunkPlain = OriginalChunkPlain
+
                 Return
+
             End If
 
             _Index.Clear()
             _Index.AddRange(NewIndex)
 
             _ChunkSize = TargetChunkSize
+
             _ChunkPlain = New Byte(_ChunkSize - 1) {}
+            _CachedChunkPlain = New Byte(_ChunkSize - 1) {}
+
+            InvalidateChunkCache()
 
             ClearRecoveryAreaInMemory()
 

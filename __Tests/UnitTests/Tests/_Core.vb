@@ -9,6 +9,156 @@ Namespace Tests
         Public NotInheritable Class Core
 
             ''' <summary>
+            ''' Verifies that repeatedly reading the same chunk returns consistent data.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ChunkCacheRepeatedReads()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Dim Expected = Helpers.MakeRandomData(Cs.ChunkSize, 1)
+
+                        Cs.Write(0, Expected)
+
+                        For i = 1 To 1000
+
+                            Dim Actual(Expected.Length - 1) As Byte
+
+                            Cs.Read(0, Actual)
+
+                            AssertBytesEqual(Expected,
+                                             Actual,
+                                             $"Read {i} mismatch.")
+
+                        Next
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that writing to a cached chunk invalidates the cache.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ChunkCacheInvalidatedByWrite()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Dim Data = Helpers.MakeRandomData(Cs.ChunkSize, 1)
+
+                        Cs.Write(0, Data)
+
+                        Dim Temp(Data.Length - 1) As Byte
+
+                        ' Populate cache.
+                        Cs.Read(0, Temp)
+
+                        Data(0) = CByte(Data(0) Xor 255)
+
+                        Cs.Write(0, Data)
+
+                        Array.Clear(Temp, 0, Temp.Length)
+
+                        Cs.Read(0, Temp)
+
+                        AssertBytesEqual(Data,
+                                         Temp,
+                                         "Cache was not invalidated by write.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that checkpoint rollback invalidates the cache.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ChunkCacheInvalidatedByCheckpointRollback()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Dim Original = Helpers.MakeRandomData(Cs.ChunkSize, 1)
+
+                        Cs.Write(0, Original)
+
+                        Dim Temp(Original.Length - 1) As Byte
+
+                        ' Populate cache.
+                        Cs.Read(0, Temp)
+
+                        Using Cp = Cs.CreateCheckpoint()
+
+                            Dim Modified = DirectCast(Original.Clone(), Byte())
+
+                            Modified(0) = CByte(Modified(0) Xor 255)
+
+                            Cs.Write(0, Modified)
+
+                            ' Rollback on dispose.
+
+                        End Using
+
+                        Array.Clear(Temp, 0, Temp.Length)
+
+                        Cs.Read(0, Temp)
+
+                        AssertBytesEqual(Original,
+                                         Temp,
+                                         "Checkpoint rollback did not invalidate cache.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that disabling the chunk read cache does not alter behaviour.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ChunkCacheCanBeDisabled()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .UseChunkReadCache = False
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Expected = Helpers.MakeRandomData(Cs.ChunkSize * 3, 1)
+
+                        Cs.Write(0, Expected)
+
+                        For i = 1 To 100
+
+                            Dim Actual(Expected.Length - 1) As Byte
+
+                            Cs.Read(0, Actual)
+
+                            AssertBytesEqual(Expected,
+                                             Actual,
+                                             $"Read {i} mismatch with cache disabled.")
+
+                        Next
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
             ''' Verifies that an encrypted ChunkedStream can round-trip a ZipArchive using only the standard .Net Stream.
             ''' </summary>
             <UnitTester.SimpleTest()>

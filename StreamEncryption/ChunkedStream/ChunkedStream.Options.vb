@@ -89,6 +89,14 @@
             Public Property StoreSparseChunks As Boolean = False
 
             ''' <summary>
+            ''' Enables caching of the most recently read plaintext chunk.
+            ''' </summary>
+            ''' <remarks>
+            ''' Disabling this avoids the extra cache copy on chunk reads, but repeated reads of the same chunk may require repeated stream reads, MAC validation, decompression and decryption.
+            ''' </remarks>
+            Public Property UseChunkReadCache As Boolean = True
+
+            ''' <summary>
             ''' Encryption information used for newly written chunks.
             ''' Setting this to Nothing disables encryption for newly written chunks.
             ''' Existing encrypted chunks remain readable if the file master key is available.
@@ -248,6 +256,7 @@
             SyncLock _SyncRoot
 
                 ThrowIfDisposed()
+                InvalidateChunkCache()
 
                 Dim Result As New ApplyOptionsResult With {
                     .PhysicalLengthBefore = _Fs.Length,
@@ -325,7 +334,7 @@
                     End If
 
                     If AppliesCompression AndAlso chunk.IsAllocated AndAlso Not WillBeSparse Then
-                        NeedsCompressionChange = NeedsCompressionRewrite(chunk, CompressionPolicy, PlainLoaded)
+                        NeedsCompressionChange = NeedsCompressionRewrite(chunk, CompressionPolicy)
                     End If
 
                     Dim NeedsRewrite =
@@ -404,29 +413,6 @@
 
         End Function
 
-        Private Function RemoveUnusedFileMasterKeyIfPossible() As Boolean
-
-            If _CurrentWriteEncryptionEnabled Then Return False
-            If _FileMasterKey Is Nothing Then Return False
-
-            ' If a checkpoint is active, a rollback may restore encrypted chunks.
-            ' Defer key removal until the outermost checkpoint is closed.
-            If HasOpenCheckpoint Then Return False
-
-            Dim Struct = GetStructure()
-
-            If Struct.EncryptedChunkCount <> 0 Then Return False
-
-            _FileMasterKey = Nothing
-            _ChunkEncryptionKey = Nothing
-            _ChunkMacKey = Nothing
-
-            Array.Clear(_Header, MasterKeyWrapAreaOffset, MasterKeyWrapAreaLength)
-
-            Return True
-
-        End Function
-
         Private Function GetApplyOptionsStoreSparsePolicy(chunk As ChunkedStreamStructure.Chunk,
                                                           AppliesSparseness As Boolean) As Boolean
 
@@ -480,8 +466,7 @@
         End Function
 
         Private Function NeedsCompressionRewrite(chunk As ChunkedStreamStructure.Chunk,
-                                                 DesiredCompressionMethod As ChunkedStreamOptions.CompressionMethods,
-                                                 ByRef PlainLoaded As Boolean) As Boolean
+                                                 DesiredCompressionMethod As ChunkedStreamOptions.CompressionMethods) As Boolean
 
             If DesiredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None Then
                 Return chunk.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None

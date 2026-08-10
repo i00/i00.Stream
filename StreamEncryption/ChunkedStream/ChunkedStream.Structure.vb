@@ -410,7 +410,7 @@ Namespace Streams
                 CType(BitConverter.ToInt32(Header, ChunkFlagsOffset),
                       ChunkFlags)
 
-            If PlainLength < 0 OrElse PlainLength > ChunkSize Then
+            If PlainLength < 0 OrElse PlainLength > _ChunkSize Then
                 Throw New InvalidDataException($"Invalid plain length for chunk {ExpectedChunkIndex}.")
             End If
 

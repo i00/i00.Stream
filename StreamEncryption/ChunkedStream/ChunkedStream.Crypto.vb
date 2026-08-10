@@ -351,6 +351,62 @@ Namespace Streams
 
         End Sub
 
+        Private Function RemoveUnusedFileMasterKeyIfPossible() As Boolean
+
+            If _CurrentWriteEncryptionEnabled Then Return False
+            If _FileMasterKey Is Nothing Then Return False
+
+            ' If a checkpoint is active, a rollback may restore encrypted chunks.
+            ' Defer key removal until the outermost checkpoint is closed.
+            If HasOpenCheckpoint Then Return False
+
+            If HasEncryptedChunks() Then Return False
+
+            _FileMasterKey = Nothing
+            _ChunkEncryptionKey = Nothing
+            _ChunkMacKey = Nothing
+
+            Array.Clear(_Header, MasterKeyWrapAreaOffset, MasterKeyWrapAreaLength)
+
+            Return True
+
+        End Function
+
+        Private Function HasEncryptedChunks() As Boolean
+
+            For ChunkIndex = 0 To _Index.Count - 1
+
+                Dim Entry = _Index(ChunkIndex)
+
+                If Entry.Offset = 0 OrElse Entry.RecordLength = 0 Then Continue For
+
+                If Entry.Offset < DataStartOffset OrElse Entry.RecordLength < MinChunkRecordSize Then
+                    Throw New InvalidDataException($"Invalid chunk index entry for chunk {ChunkIndex}.")
+                End If
+
+                If Entry.Offset + Entry.RecordLength > _IndexOffset Then
+                    Throw New InvalidDataException($"Chunk {ChunkIndex} record extends beyond data area.")
+                End If
+
+                Dim Header(ChunkRecordHeaderSize - 1) As Byte
+
+                _Fs.Position = Entry.Offset
+                ReadExactly(_Fs, Header, 0, Header.Length)
+
+                Dim EncryptionMethod =
+            CType(BitConverter.ToInt32(Header, ChunkEncryptionMethodOffset),
+                  ChunkEncryptionMethods)
+
+                If EncryptionMethod <> ChunkEncryptionMethods.None Then
+                    Return True
+                End If
+
+            Next
+
+            Return False
+
+        End Function
+
         Private Sub DecryptChunkRecord(ExpectedChunkIndex As Long, Record As Byte(), Plain As Byte())
 
             If Record.Length < MinChunkRecordSize Then Throw New InvalidDataException("Chunk record is too small.")

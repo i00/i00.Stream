@@ -8,11 +8,40 @@ Namespace Streams
         Private Sub LoadChunk(ChunkIndex As Long, Plain As Byte())
 
             If ChunkIndex < 0 OrElse ChunkIndex > Integer.MaxValue Then Throw New ArgumentOutOfRangeException(NameOf(ChunkIndex))
-            If ChunkIndex >= _Index.Count Then Return
+            If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
+            If Plain.Length < _ChunkSize Then Throw New ArgumentException("Chunk buffer is too small.", NameOf(Plain))
+
+            If Options.UseChunkReadCache AndAlso _CachedChunkIndex = ChunkIndex Then
+                System.Buffer.BlockCopy(_CachedChunkPlain, 0, Plain, 0, _ChunkSize)
+                Return
+            End If
+
+            Array.Clear(Plain, 0, Plain.Length)
+
+            If ChunkIndex >= _Index.Count Then
+
+                If Options.UseChunkReadCache Then
+                    Array.Clear(_CachedChunkPlain, 0, _CachedChunkPlain.Length)
+                    _CachedChunkIndex = ChunkIndex
+                End If
+
+                Return
+
+            End If
 
             Dim Entry = _Index(CInt(ChunkIndex))
 
-            If Entry.Offset = 0 OrElse Entry.RecordLength = 0 Then Return
+            If Entry.Offset = 0 OrElse Entry.RecordLength = 0 Then
+
+                If Options.UseChunkReadCache Then
+                    Array.Clear(_CachedChunkPlain, 0, _CachedChunkPlain.Length)
+                    _CachedChunkIndex = ChunkIndex
+                End If
+
+                Return
+
+            End If
+
             If Entry.Offset < DataStartOffset OrElse Entry.RecordLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid chunk index entry for chunk {ChunkIndex}.")
             If Entry.Offset + Entry.RecordLength > _IndexOffset Then Throw New InvalidDataException($"Chunk {ChunkIndex} record extends beyond data area.")
 
@@ -23,9 +52,16 @@ Namespace Streams
 
             DecryptChunkRecord(ChunkIndex, Record, Plain)
 
+            If Options.UseChunkReadCache Then
+                System.Buffer.BlockCopy(Plain, 0, _CachedChunkPlain, 0, _ChunkSize)
+                _CachedChunkIndex = ChunkIndex
+            End If
+
         End Sub
 
         Private Sub WriteChunkRecord(ChunkIndex As Long, Plain As Byte(), PlainLength As Integer)
+
+            InvalidateChunkCache()
 
             Dim EncryptionMethod =
                 If(_CurrentWriteEncryptionEnabled,

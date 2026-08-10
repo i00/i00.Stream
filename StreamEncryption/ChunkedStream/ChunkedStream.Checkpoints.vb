@@ -318,6 +318,8 @@
 
             If State Is Nothing Then Throw New ArgumentNullException(NameOf(State))
 
+            InvalidateChunkCache()
+
             _Length = State.LogicalLength
             _IndexOffset = State.IndexOffset
             _HeaderFlags = State.HeaderFlags
