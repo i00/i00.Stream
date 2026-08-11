@@ -1,13 +1,27 @@
 ﻿Public NotInheritable Class SimpleTest
     Inherits TestRunner
+
+    <Flags>
+    Public Enum TestTypes
+        None = 0
+
+        Test = 1 << 0
+        Benchmark = 1 << 1
+
+        All = Test Or Benchmark
+    End Enum
+
+    Public Shared Property TestTypesToRun As TestTypes = TestTypes.Test
+
     Protected Overrides Sub GetTestsInternal(Tests As TestCreator)
         Dim TestMethods = GetAllTestMethods().Select(Function(x) New With {.Method = x,
-                                                                         .UnitTests = x.GetCustomAttributes(False).OfType(Of SimpleTestAttribute)}).
+                                                                           .UnitTests = x.GetCustomAttributes(False).OfType(Of SimpleTestAttribute)}).
                                             Where(Function(x) x.UnitTests.Any()).
                                             Select(Function(x) New With {x.Method,
-                                                                         x.UnitTests,
+                                                                         .UnitTests = x.UnitTests.Where(Function(y) TestTypesToRun.HasFlag(y.TestType)).ToArray(),
                                                                          .TypeNames = x.Method.DeclaringType.Recurse(Function(y) {y.DeclaringType}, True).Select(Function(y) y.Name).Reverse().ToArray(),
                                                                          .TypeName = Join(.TypeNames, ".")}).
+                                            Where(Function(x) x.UnitTests.Any()).
                                             OrderBy(Function(x) x.TypeName).
                                             ThenBy(Function(x) x.Method.Name).
                                             ToArray()
@@ -31,6 +45,7 @@
                                  Result.Add(ResultTypes.Failure, , "Cannot run on a method that contains generic parameters")
                              Else
                                  For Each test In testMethod.UnitTests
+
                                      FunctionText = ""
                                      If test.InputParameters IsNot Nothing Then
                                          FunctionText = $"({Join(test.InputParameters.Select(Function(x) Misc.ConvertToDotNetEntryData(x)).ToArray, ", ")})"
@@ -56,15 +71,25 @@
                                                      ConvertedTypeParameters.Add(Misc.MultiCast(param.TestParameter, param.MethodParameter.ParameterType))
                                                  Next
                                              End If
+
+                                             Dim sw = Stopwatch.StartNew()
                                              Dim TestResult = testMethod.Method.Invoke(Nothing, ConvertedTypeParameters?.ToArray())
+                                             sw.Stop()
+                                             Dim IsBenchmark = test.TestType.HasFlag(TestTypes.Benchmark)
+                                             Dim BenchmarkResult = TryCast(TestResult, BenchmarkResult)
+                                             Dim SuccessMessage As String = BenchmarkResult?.Message
+                                             If IsBenchmark AndAlso SuccessMessage Is Nothing Then
+                                                 SuccessMessage = $"{sw.Elapsed}"
+                                             End If
+
                                              If test.ExpectedValueSet Then
                                                  If Object.Equals(TestResult, ExpectedResult) Then
-                                                     Result.Add(ResultTypes.OK, FunctionText)
+                                                     Result.Add(ResultTypes.OK, FunctionText, SuccessMessage)
                                                  Else
                                                      Result.Add(ResultTypes.Failure, FunctionText, $"Return was not expected: {Misc.ConvertToDotNetEntryData(TestResult)}")
                                                  End If
                                              Else
-                                                 Result.Add(ResultTypes.OK, FunctionText)
+                                                 Result.Add(ResultTypes.OK, FunctionText, SuccessMessage)
                                              End If
                                          Catch ex As System.Reflection.TargetInvocationException
                                              If TypeOf ex.InnerException Is WarningException Then
@@ -86,6 +111,13 @@
         Next
     End Sub
 
+    Public Class BenchmarkResult
+        Public ReadOnly Property Message As String
+        Public Sub New(Message As String)
+            Me.Message = Message
+        End Sub
+    End Class
+
     Public Class WarningException
         Inherits Exception
         Public Sub New(Message As String)
@@ -98,6 +130,8 @@ End Class
 <AttributeUsage(AttributeTargets.Method, AllowMultiple:=True, Inherited:=True)>
 Public Class SimpleTestAttribute
     Inherits Attribute
+
+    Public Property TestType As SimpleTest.TestTypes = SimpleTest.TestTypes.Test
 
     ''' <summary>
     ''' Indicates that this method is for unit testing; a failure will occur if an unhandled Exception is thrown

@@ -75,12 +75,8 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Autoexec.vb" />
-    <Compile Include="Tests\ChangingOptions.vb" />
-    <Compile Include="Tests\Checkpoints.vb" />
-    <Compile Include="Tests\CompressionAndEncryption.vb" />
+    <Compile Include="Benchmarks\_Core.vb" />
     <Compile Include="Helpers.vb" />
-    <Compile Include="Tests\Recovery.vb" />
-    <Compile Include="Tests\_Core.vb" />
     <Compile Include="My Project\AssemblyInfo.vb" />
     <Compile Include="My Project\Application.Designer.vb">
       <AutoGen>True</AutoGen>
@@ -97,6 +93,11 @@
       <DependentUpon>Settings.settings</DependentUpon>
       <DesignTimeSharedInput>True</DesignTimeSharedInput>
     </Compile>
+    <Compile Include="Tests\ChangingOptions.vb" />
+    <Compile Include="Tests\Checkpoints.vb" />
+    <Compile Include="Tests\CompressionAndEncryption.vb" />
+    <Compile Include="Tests\Recovery.vb" />
+    <Compile Include="Tests\_Core.vb" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="My Project\Resources.resx">
@@ -128,5 +129,6 @@
       <Name>UnitTester</Name>
     </ProjectReference>
   </ItemGroup>
+  <ItemGroup />
   <Import Project="$(MSBuildToolsPath)\Microsoft.VisualBasic.targets" />
 </Project>

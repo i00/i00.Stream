@@ -49,6 +49,7 @@
             End Sub
         End Class
     End Class
+
     Public NotInheritable Class TestCreator
         Private ReadOnly Property TestList As List(Of Test)
         Public Sub Add(CategoryPath As String(), Action As Action(Of Test.ResultCreator))

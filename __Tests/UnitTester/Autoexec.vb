@@ -88,7 +88,7 @@
                                 Write(iResult.Name, iCat + BaseIndent + ExtraIndent)
                                 ExtraIndent += 1
                             End If
-                            Write($"{iResult.Result}{If(iResult.Message = "", "", ": " & iResult.Message)}", iCat + BaseIndent + ExtraIndent, Color)
+                            Write($"{iResult.Result}{If(iResult.Message = "", "", ": " & iResult.Message.Indent(New String(" "c, Len($"{iResult.Result}: ")), True))}", iCat + BaseIndent + ExtraIndent, Color)
                         Next
 
                         LastCategory = ThisCategory

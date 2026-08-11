@@ -6,7 +6,7 @@ Public Class Autoexec
     Public Shared Function Main() As Integer
         'Test()
         'Tests.StreamChunked.Checkpoints.CheckpointLifoEnforced()
-
+        UnitTester.SimpleTest.TestTypesToRun = UnitTester.SimpleTest.TestTypes.All
 
         Return UnitTester.Autoexec.Main()
     End Function
