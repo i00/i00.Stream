@@ -53,10 +53,6 @@
     <OptionInfer>On</OptionInfer>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="i00CodeLib, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\..\..\GEKCo\i00CodeLib\bin\Debug\i00CodeLib.dll</HintPath>
-    </Reference>
     <Reference Include="System" />
     <Reference Include="System.Data" />
     <Reference Include="System.Deployment" />
@@ -82,6 +78,7 @@
   <ItemGroup>
     <Compile Include="AppDomainObject.vb" />
     <Compile Include="Autoexec.vb" />
+    <Compile Include="Extensions.vb" />
     <Compile Include="Misc.vb" />
     <Compile Include="My Project\AssemblyInfo.vb" />
     <Compile Include="My Project\Application.Designer.vb">
@@ -99,8 +96,10 @@
       <DependentUpon>Settings.settings</DependentUpon>
       <DesignTimeSharedInput>True</DesignTimeSharedInput>
     </Compile>
+    <Compile Include="PluginManager.vb" />
     <Compile Include="Repack.vb" />
     <Compile Include="Tests\SimpleTest.vb" />
+    <Compile Include="TestRunner.vb" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="My Project\Resources.resx">

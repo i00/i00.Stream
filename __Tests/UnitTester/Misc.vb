@@ -1,10 +1,102 @@
-﻿Imports i00CodeLib
+﻿Imports System.Text.RegularExpressions
 
 Friend NotInheritable Class Misc
 
     Private Sub New()
 
     End Sub
+
+    Public Shared Function getValueFromString(ByVal theString As String, ByVal theField As String, Optional ByVal DelimiterMajor As String = ";", Optional ByVal DelimiterMinor As String = ":") As String
+        Dim escDelimiterMinor = Regex.Escape(DelimiterMinor)
+        Dim escDelimiterMajor = Regex.Escape(DelimiterMajor)
+
+        Dim mc = Regex.Match(theString, $"(?<={escDelimiterMajor}{theField}(?={escDelimiterMinor})).*?(?={escDelimiterMajor}|$)", RegexOptions.IgnoreCase)
+
+        If mc.Success = False Then
+            getValueFromString = Nothing
+        Else
+            getValueFromString = mc.Value
+
+            If getValueFromString <> "" AndAlso getValueFromString.StartsWith(DelimiterMinor) Then
+                getValueFromString = getValueFromString.Substring(Len(DelimiterMinor))
+            End If
+        End If
+    End Function
+
+    Public Shared Function getValuesFromString(ByVal theString As String, ByVal theField As String, Optional ByVal DelimiterMajor As String = ";", Optional ByVal DelimiterMinor As String = ":") As String()
+        Dim escDelimiterMinor = Regex.Escape(DelimiterMinor)
+        Dim escDelimiterMajor = Regex.Escape(DelimiterMajor)
+
+        Dim Pattern = $"(?<={escDelimiterMajor}{theField}{escDelimiterMinor}).*?(?={escDelimiterMajor}|$)"
+        Dim mc = Regex.Matches(theString, Pattern, RegexOptions.IgnoreCase).OfType(Of Match)
+        Return mc.Select(Function(x) x.Value).ToArray
+    End Function
+
+    Public Shared Function setValueInString(ByVal theString As String, ByVal theField As String, Value As String, Optional ByVal DelimiterMajor As String = ";", Optional ByVal DelimiterMinor As String = ":") As String
+        Dim escDelimiterMajor = Regex.Escape(DelimiterMajor)
+
+        Dim Replacements As Boolean
+        setValueInString = Regex.Replace(theString, $"(?<={escDelimiterMajor}{theField}).*?(?={escDelimiterMajor}|$)", Function(m)
+                                                                                                                           Replacements = True
+                                                                                                                           Return If(Value = "", "", DelimiterMinor & Value)
+                                                                                                                       End Function, RegexOptions.IgnoreCase)
+        If Replacements = False Then
+            'replacements were not made ... lets add it to the end...
+            setValueInString = setValueInString & DelimiterMajor & theField & If(Value = "", "", DelimiterMinor & Value)
+        End If
+    End Function
+
+    Public Shared Function getValueFromStringExists(ByVal theString As String, ByVal theField As String, Optional ByVal DelimiterMajor As String = ";", Optional ByVal DelimiterMinor As String = ":") As Boolean
+        theString = DelimiterMajor & theString & DelimiterMajor
+
+        DelimiterMinor = Regex.Escape(DelimiterMinor)
+        DelimiterMajor = Regex.Escape(DelimiterMajor)
+
+        Dim Pattern = $"{DelimiterMajor}{theField}({DelimiterMajor}|{DelimiterMinor}|$)"
+        Return Regex.IsMatch(theString, Pattern, RegexOptions.IgnoreCase)
+    End Function
+
+    Public NotInheritable Class NestedObjectEqualityComparer
+
+        Private Sub New()
+
+        End Sub
+
+        Public Shared Function Create(Of T, TOut)(ObjectGetterForCompare As Func(Of T, TOut)) As NestedObjectEqualityComparer(Of T, TOut)
+            Return New NestedObjectEqualityComparer(Of T, TOut)(ObjectGetterForCompare)
+        End Function
+    End Class
+
+    Public NotInheritable Class NestedObjectEqualityComparer(Of T, TOut)
+        Implements IEqualityComparer(Of T)
+
+        Public Property ObjectGetterForCompare As Func(Of T, TOut)
+        Friend Sub New(ObjectGetterForCompare As Func(Of T, TOut))
+            Me.ObjectGetterForCompare = ObjectGetterForCompare
+        End Sub
+        Public Function IEqualityComparer_Equals(x As T, y As T) As Boolean Implements IEqualityComparer(Of T).Equals
+            Return Object.Equals(ObjectGetterForCompare(x), ObjectGetterForCompare(y))
+        End Function
+
+        Public Function IEqualityComparer_GetHashCode(obj As T) As Integer Implements IEqualityComparer(Of T).GetHashCode
+            Return (ObjectGetterForCompare(obj)?.GetHashCode()).GetValueOrDefault(0)
+        End Function
+    End Class
+
+    Public Class IEnumerableContentComparer(Of T As IEnumerable(Of IComparable))
+        Implements IComparer(Of T)
+
+        Public Function Compare(x As T, y As T) As Integer Implements IComparer(Of T).Compare
+            For Each item In IndexPositionJoin(x, y, Function(xx, yy) New With {.x = xx, .y = yy})
+                Dim Result = If(item.x IsNot Nothing, item.x.CompareTo(item.y), item.y.CompareTo(item.x) * -1)
+                If Result <> 0 Then
+                    Return Result
+                End If
+            Next
+            Return 0
+        End Function
+    End Class
+
 
     Friend Shared Function ConvertToDotNetEntryData(DataObject As Object) As String
         'TODO: make this code format the data ... so string is enclosed in "" etc
@@ -164,6 +256,15 @@ Friend NotInheritable Class Misc
             End If
         Next
         Return Returner
+    End Function
+
+    Public Shared Function MakePathAbsolute(File As String, Optional Path As String = "") As String
+        If Path = "" Then
+            'use application path
+            Path = IO.Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly.Location)
+        End If
+
+        Return IO.Path.GetFullPath(IO.Path.Combine(Path, File))
     End Function
 
 End Class

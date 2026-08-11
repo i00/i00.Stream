@@ -81,386 +81,386 @@ Public Class Form1
 
     Public Sub Test(FileName As String, Optional RandomWrite As Boolean = False)
 
-        Using frmProgress As New i00CodeLib.frmProgress(
-        Sub(Parameter, ProgressReport)
+        'Using frmProgress As New i00CodeLib.frmProgress(
+        'Sub(Parameter, ProgressReport)
 
-            Dim OriginalMD5 As String
+        '    Dim OriginalMD5 As String
 
-            ' -----------------------------------------------------------------
-            ' MD5 original file
-            ' -----------------------------------------------------------------
+        '    ' -----------------------------------------------------------------
+        '    ' MD5 original file
+        '    ' -----------------------------------------------------------------
 
-            Using Fs As New FileStream(FileName,
-                                       FileMode.Open,
-                                       FileAccess.Read,
-                                       FileShare.Read)
+        '    Using Fs As New FileStream(FileName,
+        '                               FileMode.Open,
+        '                               FileAccess.Read,
+        '                               FileShare.Read)
 
-                Using Md5 = System.Security.Cryptography.MD5.Create()
-                    ProgressReport.SetText("Generating file MD5...")
-                    OriginalMD5 = BitConverter.ToString(Md5.ComputeHash(Fs)).Replace("-", "")
-                End Using
+        '        Using Md5 = System.Security.Cryptography.MD5.Create()
+        '            ProgressReport.SetText("Generating file MD5...")
+        '            OriginalMD5 = BitConverter.ToString(Md5.ComputeHash(Fs)).Replace("-", "")
+        '        End Using
 
-            End Using
+        '    End Using
 
-            ProgressReport.SetText("Encrypting file...")
+        '    ProgressReport.SetText("Encrypting file...")
 
-            Dim DecryptedMD5 As String
+        '    Dim DecryptedMD5 As String
 
-            Using EncStorage As New MemoryStream()
+        '    Using EncStorage As New MemoryStream()
 
-                Dim InputMBps = 0.0
-                Dim OutputMBps = 0.0
+        '        Dim InputMBps = 0.0
+        '        Dim OutputMBps = 0.0
 
-                Using InputFs As New FileStream(FileName,
-                                               FileMode.Open,
-                                               FileAccess.Read,
-                                               FileShare.Read)
+        '        Using InputFs As New FileStream(FileName,
+        '                                       FileMode.Open,
+        '                                       FileAccess.Read,
+        '                                       FileShare.Read)
 
-                    Dim StartTime = DateTime.UtcNow
-                    Dim FileLength = InputFs.Length
+        '            Dim StartTime = DateTime.UtcNow
+        '            Dim FileLength = InputFs.Length
 
-                    Using Enc = Streams.ChunkedStream.Open(EncStorage, Options)
+        '            Using Enc = Streams.ChunkedStream.Open(EncStorage, Options)
 
-                        If RandomWrite Then
+        '                If RandomWrite Then
 
-                            ProgressReport.SetText("Building random write segments...")
+        '                    ProgressReport.SetText("Building random write segments...")
 
-                            Dim Randomizer As New Random(12345)
+        '                    Dim Randomizer As New Random(12345)
 
-                            Dim Segments As New List(Of Tuple(Of Long, Byte()))
+        '                    Dim Segments As New List(Of Tuple(Of Long, Byte()))
 
-                            While True
+        '                    While True
 
-                                Dim Remaining = FileLength - InputFs.Position
+        '                        Dim Remaining = FileLength - InputFs.Position
 
-                                If Remaining <= 0 Then Exit While
+        '                        If Remaining <= 0 Then Exit While
 
-                                Dim BlockSize = Randomizer.Next(1024,
-                                                                512 * 1024)
+        '                        Dim BlockSize = Randomizer.Next(1024,
+        '                                                        512 * 1024)
 
-                                BlockSize = CInt(Math.Min(BlockSize,
-                                                          Remaining))
+        '                        BlockSize = CInt(Math.Min(BlockSize,
+        '                                                  Remaining))
 
-                                Dim Buffer(BlockSize - 1) As Byte
+        '                        Dim Buffer(BlockSize - 1) As Byte
 
-                                Dim BytesRead = InputFs.Read(Buffer,
-                                                             0,
-                                                             Buffer.Length)
+        '                        Dim BytesRead = InputFs.Read(Buffer,
+        '                                                     0,
+        '                                                     Buffer.Length)
 
-                                If BytesRead = 0 Then Exit While
+        '                        If BytesRead = 0 Then Exit While
 
-                                If BytesRead <> Buffer.Length Then
-                                    ReDim Preserve Buffer(BytesRead - 1)
-                                End If
+        '                        If BytesRead <> Buffer.Length Then
+        '                            ReDim Preserve Buffer(BytesRead - 1)
+        '                        End If
 
-                                Segments.Add(
-                                    Tuple.Create(
-                                        InputFs.Position - BytesRead,
-                                        Buffer))
+        '                        Segments.Add(
+        '                            Tuple.Create(
+        '                                InputFs.Position - BytesRead,
+        '                                Buffer))
 
-                            End While
+        '                    End While
 
-                            Segments = Segments.
-                                OrderBy(Function(x) Randomizer.Next()).
-                                ToList()
+        '                    Segments = Segments.
+        '                        OrderBy(Function(x) Randomizer.Next()).
+        '                        ToList()
 
-                            Dim ProcessedBytes As Long = 0
+        '                    Dim ProcessedBytes As Long = 0
 
-                            For Each Segment In Segments
+        '                    For Each Segment In Segments
 
-                                Enc.Write(Segment.Item1,
-                                          Segment.Item2)
+        '                        Enc.Write(Segment.Item1,
+        '                                  Segment.Item2)
 
-                                ProcessedBytes += Segment.Item2.Length
+        '                        ProcessedBytes += Segment.Item2.Length
 
-                                Dim Progress = CDbl(ProcessedBytes) / FileLength
+        '                        Dim Progress = CDbl(ProcessedBytes) / FileLength
 
-                                InputMBps =
-                                    (ProcessedBytes / 1024.0 / 1024.0) /
-                                    Math.Max(0.001,
-                                             (DateTime.UtcNow - StartTime).TotalSeconds)
+        '                        InputMBps =
+        '                            (ProcessedBytes / 1024.0 / 1024.0) /
+        '                            Math.Max(0.001,
+        '                                     (DateTime.UtcNow - StartTime).TotalSeconds)
 
-                                ProgressReport.SetText(
-                                    $"Random writing ({InputMBps:0} MB/s)...")
+        '                        ProgressReport.SetText(
+        '                            $"Random writing ({InputMBps:0} MB/s)...")
 
-                                ProgressReport.SetProgress(
-                                    CLng(Progress * 100),
-                                    100)
+        '                        ProgressReport.SetProgress(
+        '                            CLng(Progress * 100),
+        '                            100)
 
-                            Next
+        '                    Next
 
-                        Else
+        '                Else
 
-                            Dim Buffer(1024 * 1024 - 1) As Byte
-                            Dim Offset As Long = 0
+        '                    Dim Buffer(1024 * 1024 - 1) As Byte
+        '                    Dim Offset As Long = 0
 
-                            While True
+        '                    While True
 
-                                Dim BytesRead = InputFs.Read(Buffer,
-                                                             0,
-                                                             Buffer.Length)
+        '                        Dim BytesRead = InputFs.Read(Buffer,
+        '                                                     0,
+        '                                                     Buffer.Length)
 
-                                If BytesRead = 0 Then Exit While
+        '                        If BytesRead = 0 Then Exit While
 
-                                If BytesRead = Buffer.Length Then
+        '                        If BytesRead = Buffer.Length Then
 
-                                    Enc.Write(Offset,
-                                              Buffer)
+        '                            Enc.Write(Offset,
+        '                                      Buffer)
 
-                                Else
+        '                        Else
 
-                                    Dim FinalBlock(BytesRead - 1) As Byte
+        '                            Dim FinalBlock(BytesRead - 1) As Byte
 
-                                    System.Buffer.BlockCopy(Buffer,
-                                                     0,
-                                                     FinalBlock,
-                                                     0,
-                                                     BytesRead)
+        '                            System.Buffer.BlockCopy(Buffer,
+        '                                             0,
+        '                                             FinalBlock,
+        '                                             0,
+        '                                             BytesRead)
 
-                                    Enc.Write(Offset,
-                                              FinalBlock)
+        '                            Enc.Write(Offset,
+        '                                      FinalBlock)
 
-                                End If
+        '                        End If
 
-                                Offset += BytesRead
+        '                        Offset += BytesRead
 
-                                Dim Progress = CDbl(Offset) / FileLength
+        '                        Dim Progress = CDbl(Offset) / FileLength
 
-                                InputMBps =
-                                    (Offset / 1024.0 / 1024.0) /
-                                    Math.Max(0.001,
-                                             (DateTime.UtcNow - StartTime).TotalSeconds)
+        '                        InputMBps =
+        '                            (Offset / 1024.0 / 1024.0) /
+        '                            Math.Max(0.001,
+        '                                     (DateTime.UtcNow - StartTime).TotalSeconds)
 
-                                ProgressReport.SetText(
-                                    $"Encrypting file ({InputMBps:0} MB/s)...")
+        '                        ProgressReport.SetText(
+        '                            $"Encrypting file ({InputMBps:0} MB/s)...")
 
-                                ProgressReport.SetProgress(
-                                    CLng(Progress * 100),
-                                    100)
+        '                        ProgressReport.SetProgress(
+        '                            CLng(Progress * 100),
+        '                            100)
 
-                            End While
+        '                    End While
 
-                        End If
+        '                End If
 
-                    End Using
+        '            End Using
 
-                End Using
+        '        End Using
 
-                EncStorage.Position = 0
+        '        EncStorage.Position = 0
 
-                ' -----------------------------------------------------------------
-                ' Read encrypted stream back and MD5 decrypted stream
-                ' -----------------------------------------------------------------
+        '        ' -----------------------------------------------------------------
+        '        ' Read encrypted stream back and MD5 decrypted stream
+        '        ' -----------------------------------------------------------------
 
-                ProgressReport.SetText("Decrypting stream...")
+        '        ProgressReport.SetText("Decrypting stream...")
 
-                Dim DecryptStartTime = DateTime.UtcNow
+        '        Dim DecryptStartTime = DateTime.UtcNow
 
-                Using Enc = Streams.ChunkedStream.Open(EncStorage, Options)
+        '        Using Enc = Streams.ChunkedStream.Open(EncStorage, Options)
 
-                    Using Md5 = System.Security.Cryptography.MD5.Create()
+        '            Using Md5 = System.Security.Cryptography.MD5.Create()
 
-                        Dim Offset As Long = 0
-                        Dim Buffer(1024 * 1024 - 1) As Byte
+        '                Dim Offset As Long = 0
+        '                Dim Buffer(1024 * 1024 - 1) As Byte
 
-                        While Offset < Enc.Length
+        '                While Offset < Enc.Length
 
-                            Dim Remaining = Enc.Length - Offset
+        '                    Dim Remaining = Enc.Length - Offset
 
-                            Dim ReadSize =
-                                CInt(Math.Min(Buffer.Length,
-                                              Remaining))
+        '                    Dim ReadSize =
+        '                        CInt(Math.Min(Buffer.Length,
+        '                                      Remaining))
 
-                            Dim ReadBuffer(ReadSize - 1) As Byte
+        '                    Dim ReadBuffer(ReadSize - 1) As Byte
 
-                            Dim BytesRead =
-                                Enc.Read(Offset,
-                                         ReadBuffer)
+        '                    Dim BytesRead =
+        '                        Enc.Read(Offset,
+        '                                 ReadBuffer)
 
-                            If BytesRead = 0 Then Exit While
+        '                    If BytesRead = 0 Then Exit While
 
-                            Md5.TransformBlock(ReadBuffer,
-                                               0,
-                                               BytesRead,
-                                               Nothing,
-                                               0)
+        '                    Md5.TransformBlock(ReadBuffer,
+        '                                       0,
+        '                                       BytesRead,
+        '                                       Nothing,
+        '                                       0)
 
-                            Offset += BytesRead
+        '                    Offset += BytesRead
 
-                            Dim Progress = CDbl(Offset) / Enc.Length
+        '                    Dim Progress = CDbl(Offset) / Enc.Length
 
-                            OutputMBps =
-                                (Offset / 1024.0 / 1024.0) /
-                                Math.Max(0.001,
-                                         (DateTime.UtcNow - DecryptStartTime).TotalSeconds)
+        '                    OutputMBps =
+        '                        (Offset / 1024.0 / 1024.0) /
+        '                        Math.Max(0.001,
+        '                                 (DateTime.UtcNow - DecryptStartTime).TotalSeconds)
 
-                            ProgressReport.SetText(
-                                $"Decrypting stream ({OutputMBps:0} MB/s)...")
+        '                    ProgressReport.SetText(
+        '                        $"Decrypting stream ({OutputMBps:0} MB/s)...")
 
-                            ProgressReport.SetProgress(
-                                CLng(Progress * 100),
-                                100)
+        '                    ProgressReport.SetProgress(
+        '                        CLng(Progress * 100),
+        '                        100)
 
-                        End While
+        '                End While
 
-                        Md5.TransformFinalBlock(New Byte() {},
-                                                0,
-                                                0)
+        '                Md5.TransformFinalBlock(New Byte() {},
+        '                                        0,
+        '                                        0)
 
-                        DecryptedMD5 =
-                            BitConverter.ToString(Md5.Hash).
-                            Replace("-", "")
+        '                DecryptedMD5 =
+        '                    BitConverter.ToString(Md5.Hash).
+        '                    Replace("-", "")
 
-                    End Using
+        '            End Using
 
 
-                    ' -----------------------------------------------------------------
-                    ' Defrag
-                    ' -----------------------------------------------------------------
+        '            ' -----------------------------------------------------------------
+        '            ' Defrag
+        '            ' -----------------------------------------------------------------
 
-                    ProgressReport.SetText("Defragmenting...")
+        '            ProgressReport.SetText("Defragmenting...")
 
-                    Dim EncryptedFragmentation = Enc.GetFragmentation
+        '            Dim EncryptedFragmentation = Enc.GetFragmentation
 
-                    Dim FragmentationDrawOptions = New FragmentationDrawOptions 'With
-                    '    {
-                    '        .BackgroundColor = Color.Red,
-                    '        .FragmentedChunkColor = Color.Transparent,
-                    '        .UnusedColor = Color.Transparent,
-                    '        .HoleColor = Color.Transparent
-                    '    }
-                    Panel1.BackgroundImageLayout = ImageLayout.Stretch
-                    Panel1.BackgroundImage = Enc.GetStructure().GenerateFragmentationBitmap(Panel1.ClientSize.Width, 1)
-                    'Panel1.BackgroundImage = Enc.GetStructure().GenerateFragmentationBitmap(Panel1.ClientSize, FragmentationDrawOptions)
+        '            Dim FragmentationDrawOptions = New FragmentationDrawOptions 'With
+        '            '    {
+        '            '        .BackgroundColor = Color.Red,
+        '            '        .FragmentedChunkColor = Color.Transparent,
+        '            '        .UnusedColor = Color.Transparent,
+        '            '        .HoleColor = Color.Transparent
+        '            '    }
+        '            Panel1.BackgroundImageLayout = ImageLayout.Stretch
+        '            Panel1.BackgroundImage = Enc.GetStructure().GenerateFragmentationBitmap(Panel1.ClientSize.Width, 1)
+        '            'Panel1.BackgroundImage = Enc.GetStructure().GenerateFragmentationBitmap(Panel1.ClientSize, FragmentationDrawOptions)
 
-                    Dim pnlDefrag As Panel = Nothing
-                    ProgressReport.frmProgress.Invoke(
-                        Sub()
-                            pnlDefrag = New Panel
-                            pnlDefrag.Bounds = New Rectangle(ProgressReport.frmProgress.nbProgress.Left,
-                                                       ProgressReport.frmProgress.nbProgress.Bottom,
-                                                       ProgressReport.frmProgress.nbProgress.Width,
-                                                       ProgressReport.frmProgress.nbProgress.Height)
-                            ProgressReport.frmProgress.Controls.Add(pnlDefrag)
-                        End Sub)
+        '            Dim pnlDefrag As Panel = Nothing
+        '            ProgressReport.frmProgress.Invoke(
+        '                Sub()
+        '                    pnlDefrag = New Panel
+        '                    pnlDefrag.Bounds = New Rectangle(ProgressReport.frmProgress.nbProgress.Left,
+        '                                               ProgressReport.frmProgress.nbProgress.Bottom,
+        '                                               ProgressReport.frmProgress.nbProgress.Width,
+        '                                               ProgressReport.frmProgress.nbProgress.Height)
+        '                    ProgressReport.frmProgress.Controls.Add(pnlDefrag)
+        '                End Sub)
 
-                    Dim LastUpdate As Date
+        '            Dim LastUpdate As Date
 
-                    'Dim Before = Enc.GetStructure
-                    'Enc.Options.EncryptionInfo = Nothing
-                    'Enc.Options.CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.None
-                    'Enc.Defragment(Streams.ChunkedStream.DefragTypes.Move)
-                    'Dim After = Enc.GetStructure
-                    'Enc.Defragment(Streams.ChunkedStream.DefragTypes.Move)
+        '            'Dim Before = Enc.GetStructure
+        '            'Enc.Options.EncryptionInfo = Nothing
+        '            'Enc.Options.CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.None
+        '            'Enc.Defragment(Streams.ChunkedStream.DefragTypes.Move)
+        '            'Dim After = Enc.GetStructure
+        '            'Enc.Defragment(Streams.ChunkedStream.DefragTypes.Move)
 
-                    Dim ReclaimedBytes = Enc.Defragment(Streams.ChunkedStream.DefragTypes.Move,
-                                                        Sub(ProcessedUnits, TotalUnits, UnitType, CancellationToken)
-                                                            Dim Progress = If(TotalUnits = 0, 1.0R, ProcessedUnits / CDbl(TotalUnits))
-                                                            ProgressReport.SetText($"Defragmenting ({Progress:P0})...")
-                                                            ProgressReport.SetProgress(CLng(Progress * 100), 100)
+        '            Dim ReclaimedBytes = Enc.Defragment(Streams.ChunkedStream.DefragTypes.Move,
+        '                                                Sub(ProcessedUnits, TotalUnits, UnitType, CancellationToken)
+        '                                                    Dim Progress = If(TotalUnits = 0, 1.0R, ProcessedUnits / CDbl(TotalUnits))
+        '                                                    ProgressReport.SetText($"Defragmenting ({Progress:P0})...")
+        '                                                    ProgressReport.SetProgress(CLng(Progress * 100), 100)
 
-                                                            Dim CurrentTime = Now()
-                                                            Dim Done = ProcessedUnits = TotalUnits
-                                                            If CurrentTime.Subtract(LastUpdate).TotalMilliseconds >= 250 OrElse Done Then
-                                                                LastUpdate = CurrentTime
-                                                                pnlDefrag.BackgroundImage = Enc.GetStructure().GenerateFragmentationBitmap(pnlDefrag.ClientSize.Width, 1)
-                                                                'pnlDefrag.BackgroundImage = Enc.GenerateFragmentationBitmap(pnlDefrag.ClientSize.Width, 1)
-                                                            End If
-                                                            'pnlDefrag.BackgroundImage = Enc.GenerateFragmentationBitmap(pnlDefrag.ClientSize.Width, 1)
-                                                            'System.Threading.Thread.Sleep(10)
-                                                            'ProgressReport.frmProgress.
-                                                        End Sub)
+        '                                                    Dim CurrentTime = Now()
+        '                                                    Dim Done = ProcessedUnits = TotalUnits
+        '                                                    If CurrentTime.Subtract(LastUpdate).TotalMilliseconds >= 250 OrElse Done Then
+        '                                                        LastUpdate = CurrentTime
+        '                                                        pnlDefrag.BackgroundImage = Enc.GetStructure().GenerateFragmentationBitmap(pnlDefrag.ClientSize.Width, 1)
+        '                                                        'pnlDefrag.BackgroundImage = Enc.GenerateFragmentationBitmap(pnlDefrag.ClientSize.Width, 1)
+        '                                                    End If
+        '                                                    'pnlDefrag.BackgroundImage = Enc.GenerateFragmentationBitmap(pnlDefrag.ClientSize.Width, 1)
+        '                                                    'System.Threading.Thread.Sleep(10)
+        '                                                    'ProgressReport.frmProgress.
+        '                                                End Sub)
 
-                    Panel2.BackgroundImageLayout = ImageLayout.Stretch
-                    'Panel2.BackgroundImage = Enc.GetStructure().GenerateFragmentationBitmap(Panel2.ClientSize, FragmentationDrawOptions)
-                    Panel2.BackgroundImage = Enc.GetStructure().GenerateFragmentationBitmap(Panel2.ClientSize.Width, 1)
+        '            Panel2.BackgroundImageLayout = ImageLayout.Stretch
+        '            'Panel2.BackgroundImage = Enc.GetStructure().GenerateFragmentationBitmap(Panel2.ClientSize, FragmentationDrawOptions)
+        '            Panel2.BackgroundImage = Enc.GetStructure().GenerateFragmentationBitmap(Panel2.ClientSize.Width, 1)
 
-                    Dim DefragMD5 As String
+        '            Dim DefragMD5 As String
 
-                    Using Md5 = System.Security.Cryptography.MD5.Create()
+        '            Using Md5 = System.Security.Cryptography.MD5.Create()
 
-                        ProgressReport.SetText("Generating post defrag decrypted MD5...")
+        '                ProgressReport.SetText("Generating post defrag decrypted MD5...")
 
-                        Dim Offset As Long = 0
-                        Dim Buffer(1024 * 1024 - 1) As Byte
+        '                Dim Offset As Long = 0
+        '                Dim Buffer(1024 * 1024 - 1) As Byte
 
-                        While Offset < Enc.Length
+        '                While Offset < Enc.Length
 
-                            Dim Remaining = Enc.Length - Offset
-                            Dim ReadSize = CInt(Math.Min(Buffer.Length, Remaining))
+        '                    Dim Remaining = Enc.Length - Offset
+        '                    Dim ReadSize = CInt(Math.Min(Buffer.Length, Remaining))
 
-                            Dim ReadBuffer(ReadSize - 1) As Byte
+        '                    Dim ReadBuffer(ReadSize - 1) As Byte
 
-                            Dim BytesRead = Enc.Read(Offset, ReadBuffer)
+        '                    Dim BytesRead = Enc.Read(Offset, ReadBuffer)
 
-                            If BytesRead = 0 Then Exit While
+        '                    If BytesRead = 0 Then Exit While
 
-                            Md5.TransformBlock(ReadBuffer,
-                           0,
-                           BytesRead,
-                           Nothing,
-                           0)
+        '                    Md5.TransformBlock(ReadBuffer,
+        '                   0,
+        '                   BytesRead,
+        '                   Nothing,
+        '                   0)
 
-                            Offset += BytesRead
+        '                    Offset += BytesRead
 
-                            Dim Progress = If(Enc.Length = 0, 1.0R, CDbl(Offset) / Enc.Length)
+        '                    Dim Progress = If(Enc.Length = 0, 1.0R, CDbl(Offset) / Enc.Length)
 
-                            ProgressReport.SetText($"Generating post defrag decrypted MD5 ({Progress:P0})...")
-                            ProgressReport.SetProgress(CLng(Progress * 100), 100)
+        '                    ProgressReport.SetText($"Generating post defrag decrypted MD5 ({Progress:P0})...")
+        '                    ProgressReport.SetProgress(CLng(Progress * 100), 100)
 
-                        End While
+        '                End While
 
-                        Md5.TransformFinalBlock(New Byte() {}, 0, 0)
+        '                Md5.TransformFinalBlock(New Byte() {}, 0, 0)
 
-                        DefragMD5 = BitConverter.ToString(Md5.Hash).Replace("-", "")
+        '                DefragMD5 = BitConverter.ToString(Md5.Hash).Replace("-", "")
 
-                    End Using
+        '            End Using
 
-                    Dim DefraggedFragmentation = Enc.GetFragmentation
+        '            Dim DefraggedFragmentation = Enc.GetFragmentation
 
 
-                    Dim Dictionary As New Dictionary(Of String, String) From {
-                          {"Mode", If(RandomWrite,
-                                      "Random Fragmented Write",
-                                      "Sequential Write")},
-                          {"Original MD5", OriginalMD5},
-                          {"Decrypted MD5", DecryptedMD5},
-                          {"Defragged MD5", DefragMD5},
-                          {"Match", If(OriginalMD5 = DecryptedMD5 AndAlso DecryptedMD5 = DefragMD5,
-                                       "Yes",
-                                       "NO")},
-                          {"File Size", FileIO.FileSystem.GetFileInfo(FileName).Length.FormatFileSizeFromBytes},
-                          {"Encrypted Size", EncStorage.Length.FormatFileSizeFromBytes},
-                          {"Encryption Speed", $"{InputMBps:0.00} MB/s"},
-                          {"Decryption Speed", $"{OutputMBps:0.00} MB/s"},
-                          {"Encrypted Fragmentation", $"{EncryptedFragmentation:P0}"},
-                          {"Defragged Fragmentation", $"{DefraggedFragmentation:P0}"},
-                          {"Defragged Saved", $"{ReclaimedBytes.FormatFileSizeFromBytes}"}
-                      }
+        '            Dim Dictionary As New Dictionary(Of String, String) From {
+        '                  {"Mode", If(RandomWrite,
+        '                              "Random Fragmented Write",
+        '                              "Sequential Write")},
+        '                  {"Original MD5", OriginalMD5},
+        '                  {"Decrypted MD5", DecryptedMD5},
+        '                  {"Defragged MD5", DefragMD5},
+        '                  {"Match", If(OriginalMD5 = DecryptedMD5 AndAlso DecryptedMD5 = DefragMD5,
+        '                               "Yes",
+        '                               "NO")},
+        '                  {"File Size", FileIO.FileSystem.GetFileInfo(FileName).Length.FormatFileSizeFromBytes},
+        '                  {"Encrypted Size", EncStorage.Length.FormatFileSizeFromBytes},
+        '                  {"Encryption Speed", $"{InputMBps:0.00} MB/s"},
+        '                  {"Decryption Speed", $"{OutputMBps:0.00} MB/s"},
+        '                  {"Encrypted Fragmentation", $"{EncryptedFragmentation:P0}"},
+        '                  {"Defragged Fragmentation", $"{DefraggedFragmentation:P0}"},
+        '                  {"Defragged Saved", $"{ReclaimedBytes.FormatFileSizeFromBytes}"}
+        '              }
 
-                    i00CodeLib.MsgBox(
-                                ProgressReport.frmProgress,
-                                Join(Dictionary.
-                                     Select(Function(x) $"{x.Key}: {x.Value}").
-                                     ToArray(),
-                                     vbCrLf))
+        '            i00CodeLib.MsgBox(
+        '                        ProgressReport.frmProgress,
+        '                        Join(Dictionary.
+        '                             Select(Function(x) $"{x.Key}: {x.Value}").
+        '                             ToArray(),
+        '                             vbCrLf))
 
-                End Using
+        '        End Using
 
 
-            End Using
+        '    End Using
 
-        End Sub,
-        Nothing)
+        'End Sub,
+        'Nothing)
 
-            frmProgress.ShowInTaskbar = True
-            frmProgress.Text = If(RandomWrite,
-                              "Testing (Random Write)",
-                              "Testing (Sequential Write)")
+        '    frmProgress.ShowInTaskbar = True
+        '    frmProgress.Text = If(RandomWrite,
+        '                      "Testing (Random Write)",
+        '                      "Testing (Sequential Write)")
 
-            frmProgress.ShowDialog(Nothing)
+        '    frmProgress.ShowDialog(Nothing)
 
-        End Using
+        'End Using
 
     End Sub
 

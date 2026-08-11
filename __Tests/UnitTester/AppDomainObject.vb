@@ -36,7 +36,6 @@ Public Class AppDomainObject
         End Sub
     End Class
 
-
     Private Shared Function CreateDomainAndObject(AssemblyFullName As String, TypeFullName As String, TrustLevels As System.Security.SecurityZone) As AppDomainAndObject
 
         Dim hostEvidence As New System.Security.Policy.Evidence()
@@ -45,7 +44,7 @@ Public Class AppDomainObject
         Dim pset = System.Security.SecurityManager.GetStandardSandbox(hostEvidence)
 
         Dim ads As New AppDomainSetup()
-        ads.ApplicationBase = i00CodeLib.FileSystem.MakePathAbsolute("")
+        ads.ApplicationBase = Misc.MakePathAbsolute("")
 
         Dim ad = AppDomain.CreateDomain("Sandbox", hostEvidence, ads, pset, Nothing)
 

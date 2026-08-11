@@ -49,9 +49,6 @@
     <OptionInfer>On</OptionInfer>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="i00CodeLib">
-      <HintPath>..\..\GEKCo\i00CodeLib\bin\Debug\i00CodeLib.dll</HintPath>
-    </Reference>
     <Reference Include="System" />
     <Reference Include="System.Data" />
     <Reference Include="System.Deployment" />

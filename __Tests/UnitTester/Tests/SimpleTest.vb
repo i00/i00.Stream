@@ -1,7 +1,5 @@
-﻿Imports i00CodeLib
-
-Public NotInheritable Class SimpleTest
-    Inherits i00CodeLib.i00Debug.TestRunner
+﻿Public NotInheritable Class SimpleTest
+    Inherits TestRunner
     Protected Overrides Sub GetTestsInternal(Tests As TestCreator)
         Dim TestMethods = GetAllTestMethods().Select(Function(x) New With {.Method = x,
                                                                          .UnitTests = x.GetCustomAttributes(False).OfType(Of SimpleTestAttribute)}).
