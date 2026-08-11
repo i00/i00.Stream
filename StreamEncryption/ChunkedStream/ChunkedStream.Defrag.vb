@@ -503,13 +503,22 @@ Namespace Streams
             _Index.Clear()
             _Index.AddRange(NewIndex)
 
+            _IndexPageDescriptors.Clear()
+            _ChunkIndexDirectoryPageDescriptors.Clear()
+            _HoleDirectoryPageDescriptors.Clear()
+            _DirtyIndexPages.Clear()
+
             _ChunkSize = TargetChunkSize
+            _IndexPageEntryCount = Options.IndexPageEntryCount
+            _IndexDirectoryEntryCount = Options.IndexDirectoryEntryCount
+
             _ChunkPlain = New Byte(_ChunkSize - 1) {}
             _CachedChunkPlain = New Byte(_ChunkSize - 1) {}
 
             InvalidateChunkCache()
             ClearFreeSpaceMaps()
             ClearRecoveryAreaInMemory()
+            MarkAllIndexPagesDirty()
 
             PersistIndexAndHeader(PhysicalOffset, True)
 

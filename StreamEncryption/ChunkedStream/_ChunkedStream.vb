@@ -421,6 +421,55 @@ Namespace Streams
         Private Const ChunkReservedOffset As Integer = 33
         Private Const ChunkReservedSize As Integer = 15
 
+        Private Const MetadataRootOffsetOffset As Integer = 248
+        Private Const MetadataRootLengthOffset As Integer = 256
+        Private Const IndexPageEntryCountOffset As Integer = 260
+        Private Const IndexDirectoryEntryCountOffset As Integer = 264
+        Private Const MetadataReservedOffset As Integer = 268
+        Private Const MetadataReservedLength As Integer = 212
+
+        Private Const MetadataRootHeaderSize As Integer = 40
+        Private Const MetadataRootMagicSize As Integer = 8
+        Private Const MetadataDescriptorSize As Integer = 48
+
+        Private Const IndexPageHeaderSize As Integer = 32
+        Private Const IndexPageMagicSize As Integer = 8
+
+        Private Const DirectoryPageHeaderSize As Integer = 32
+        Private Const DirectoryPageMagicSize As Integer = 8
+
+        Private Const HoleDirectoryEntrySize As Integer = 24
+
+        Private Shared ReadOnly MetadataRootMagic As Byte() = Encoding.ASCII.GetBytes("MROOT001")
+        Private Shared ReadOnly IndexPageMagic As Byte() = Encoding.ASCII.GetBytes("IXPAGE01")
+        Private Shared ReadOnly DirectoryPageMagic As Byte() = Encoding.ASCII.GetBytes("DIRPAGE1")
+
+        Private Enum DirectoryTypes As Integer
+            None = 0
+            ChunkIndexPages = 1
+            Holes = 2
+        End Enum
+
+        Private Enum HoleSpaceTypes As Integer
+            None = 0
+            ChunkRecord = 1
+            IndexPage = 2
+            DirectoryPage = 3
+        End Enum
+
+        Private Structure MetadataPageDescriptor
+            Public PageNumber As Integer
+            Public Offset As Long
+            Public Length As Integer
+            Public Mac As Byte()
+        End Structure
+
+        Private Structure HoleDirectoryRecord
+            Public SpaceType As HoleSpaceTypes
+            Public Offset As Long
+            Public Length As Long
+        End Structure
+
         Private Shared ReadOnly HeaderMagic As Byte() = Encoding.ASCII.GetBytes("ESTRM001")
         Private Shared ReadOnly PublicIntegrityKey As Byte() = Encoding.UTF8.GetBytes("ChunkedStream Public Integrity Key v1")
 
@@ -495,6 +544,16 @@ Namespace Streams
         Private _ChunkSize As Integer
         Private _Disposed As Boolean
 
+        Private _IndexPageEntryCount As Integer
+        Private _IndexDirectoryEntryCount As Integer
+        Private _MetadataRootOffset As Long
+        Private _MetadataRootLength As Integer
+
+        Private ReadOnly _DirtyIndexPages As New HashSet(Of Integer)()
+        Private ReadOnly _IndexPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
+        Private ReadOnly _ChunkIndexDirectoryPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
+        Private ReadOnly _HoleDirectoryPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
+
         ''' <summary>
         ''' Flags stored in an individual physical chunk record.
         ''' </summary>
@@ -553,7 +612,11 @@ Namespace Streams
                         IndexOffset As Long,
                         Index As List(Of ChunkIndexEntry),
                         HeaderFlags As HeaderFlags,
-                        Options As ChunkedStreamOptions)
+                        Options As ChunkedStreamOptions,
+                        MetadataRootOffset As Long,
+                        MetadataRootLength As Integer,
+                        IndexPageEntryCount As Integer,
+                        IndexDirectoryEntryCount As Integer)
 
             _Fs = Fs
             _Header = Header
@@ -563,11 +626,26 @@ Namespace Streams
             _IndexOffset = IndexOffset
             _Index = Index
             _HeaderFlags = HeaderFlags
+
+            _MetadataRootOffset = MetadataRootOffset
+            _MetadataRootLength = MetadataRootLength
+
             Me.Options = If(Options, New ChunkedStreamOptions())
 
             If Me.Options.ChunkSize <= 0 Then Me.Options.ChunkSize = DefaultChunkSize
             If Me.Options.CompressionRatioThreshold < MinimumCompressionRatioThreshold Then Me.Options.CompressionRatioThreshold = MinimumCompressionRatioThreshold
             If Me.Options.CompressionRatioThreshold > MaximumCompressionRatioThreshold Then Me.Options.CompressionRatioThreshold = MaximumCompressionRatioThreshold
+
+            If IndexPageEntryCount <= 0 Then IndexPageEntryCount = Me.Options.IndexPageEntryCount
+            If IndexDirectoryEntryCount <= 0 Then IndexDirectoryEntryCount = Me.Options.IndexDirectoryEntryCount
+            If IndexPageEntryCount <= 0 Then IndexPageEntryCount = 256
+            If IndexDirectoryEntryCount <= 0 Then IndexDirectoryEntryCount = 256
+
+            _IndexPageEntryCount = IndexPageEntryCount
+            _IndexDirectoryEntryCount = IndexDirectoryEntryCount
+
+            Me.Options.IndexPageEntryCount = _IndexPageEntryCount
+            Me.Options.IndexDirectoryEntryCount = _IndexDirectoryEntryCount
 
             _ChunkSize = Me.Options.ChunkSize
             _ChunkPlain = New Byte(_ChunkSize - 1) {}
@@ -580,7 +658,6 @@ Namespace Streams
             _AesProvider.Padding = PaddingMode.None
 
             _Rng = RandomNumberGenerator.Create()
-
         End Sub
 
         Private Sub InvalidateChunkCache()
@@ -625,25 +702,27 @@ Namespace Streams
 
             Select Case WrapMode
                 Case MasterKeyWrapModes.None, MasterKeyWrapModes.PublicWrap
-
                     If EffectiveOptions.EncryptionInfo IsNot Nothing Then
                         Throw New EncryptionMismatchException("Encryption information was supplied for a stream that does not require it. Open the stream without encryption information, then set Options.EncryptionInfo to enable encryption for future writes.")
                     End If
 
                 Case MasterKeyWrapModes.UserWrap
-
                     If EffectiveOptions.EncryptionInfo Is Nothing Then
                         Throw New EncryptionMismatchException("Encryption information is required to open this stream.")
                     End If
 
                 Case Else
-
                     Throw New InvalidDataException($"Unsupported master key wrap mode: {CInt(WrapMode)}.")
             End Select
 
             Dim FlagsValue = BitConverter.ToInt64(Header, FlagsOffset)
             Dim Flags = CType(FlagsValue, HeaderFlags)
-            Dim SupportedFlags = HeaderFlags.VariableChunkIndex Or HeaderFlags.CompressionLz4 Or HeaderFlags.CompressionDeflate Or HeaderFlags.CompressionGZip Or HeaderFlags.SparseChunks
+
+            Dim SupportedFlags = HeaderFlags.VariableChunkIndex Or
+                                 HeaderFlags.CompressionLz4 Or
+                                 HeaderFlags.CompressionDeflate Or
+                                 HeaderFlags.CompressionGZip Or
+                                 HeaderFlags.SparseChunks
 
             If (FlagsValue And Not CLng(SupportedFlags)) <> 0 Then
                 Throw New InvalidDataException($"Unsupported chunked stream flags: {FlagsValue}.")
@@ -660,23 +739,81 @@ Namespace Streams
             End If
 
             EffectiveOptions.ChunkSize = StoredChunkSize
+
             Dim IndexOffset = BitConverter.ToInt64(Header, IndexOffsetOffset)
             Dim IndexCount = BitConverter.ToInt64(Header, IndexCountOffset)
             Dim FileLength = BitConverter.ToInt64(Header, LengthOffset)
+            Dim MetadataRootOffset = BitConverter.ToInt64(Header, MetadataRootOffsetOffset)
+            Dim MetadataRootLength = BitConverter.ToInt32(Header, MetadataRootLengthOffset)
+            Dim StoredIndexPageEntryCount = BitConverter.ToInt32(Header, IndexPageEntryCountOffset)
+            Dim StoredIndexDirectoryEntryCount = BitConverter.ToInt32(Header, IndexDirectoryEntryCountOffset)
 
             If FileLength < 0 Then Throw New InvalidDataException("Invalid chunked stream length.")
             If IndexOffset < DataStartOffset Then Throw New InvalidDataException("Invalid chunked stream index offset.")
             If IndexOffset > Fs.Length Then Throw New InvalidDataException("Chunked stream index offset is beyond end of stream.")
             If IndexCount < 0 OrElse IndexCount > Integer.MaxValue Then Throw New InvalidDataException("Invalid chunked stream index count.")
+            If StoredIndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid index page entry count.")
+            If StoredIndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid index directory entry count.")
 
-            Dim Index = ReadIndexTable(Fs, IndexOffset, CInt(IndexCount))
-            Dim IndexMac = ComputeIndexMac(Index, PublicIntegrityKey)
+            EffectiveOptions.IndexPageEntryCount = StoredIndexPageEntryCount
+            EffectiveOptions.IndexDirectoryEntryCount = StoredIndexDirectoryEntryCount
 
-            If Not FixedTimeEquals(IndexMac, 0, Header, IndexMacOffset, MacSize) Then
-                Throw New CryptographicException("Chunked stream index MAC invalid.")
+            Dim RootMac(MacSize - 1) As Byte
+            Buffer.BlockCopy(Header, IndexMacOffset, RootMac, 0, RootMac.Length)
+
+            Dim ChunkDirectoryDescriptors As Dictionary(Of Integer, MetadataPageDescriptor) = Nothing
+            Dim HoleDirectoryDescriptors As Dictionary(Of Integer, MetadataPageDescriptor) = Nothing
+            Dim IndexPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor) = Nothing
+            Dim HoleRecords As List(Of HoleDirectoryRecord) = Nothing
+
+            Dim EffectiveIndexPageEntryCount = StoredIndexPageEntryCount
+            Dim EffectiveIndexDirectoryEntryCount = StoredIndexDirectoryEntryCount
+
+            Dim Index =
+                ReadPagedIndexTable(Fs,
+                                    MetadataRootOffset,
+                                    MetadataRootLength,
+                                    RootMac,
+                                    EffectiveIndexPageEntryCount,
+                                    EffectiveIndexDirectoryEntryCount,
+                                    ChunkDirectoryDescriptors,
+                                    HoleDirectoryDescriptors,
+                                    IndexPageDescriptors,
+                                    HoleRecords)
+
+            If Index.Count <> CInt(IndexCount) Then
+                Throw New InvalidDataException("Loaded index count does not match header index count.")
             End If
 
-            Dim Result = New ChunkedStream(Fs, Header, Candidate.HeaderSequence, Candidate.HeaderCopyIndex, FileLength, IndexOffset, Index, Flags, EffectiveOptions)
+            Dim Result = New ChunkedStream(Fs,
+                                           Header,
+                                           Candidate.HeaderSequence,
+                                           Candidate.HeaderCopyIndex,
+                                           FileLength,
+                                           IndexOffset,
+                                           Index,
+                                           Flags,
+                                           EffectiveOptions,
+                                           MetadataRootOffset,
+                                           MetadataRootLength,
+                                           EffectiveIndexPageEntryCount,
+                                           EffectiveIndexDirectoryEntryCount)
+
+            For Each pair In ChunkDirectoryDescriptors
+                Result._ChunkIndexDirectoryPageDescriptors(pair.Key) = pair.Value
+            Next
+
+            For Each pair In HoleDirectoryDescriptors
+                Result._HoleDirectoryPageDescriptors(pair.Key) = pair.Value
+            Next
+
+            For Each pair In IndexPageDescriptors
+                Result._IndexPageDescriptors(pair.Key) = pair.Value
+            Next
+
+            If HoleRecords IsNot Nothing Then
+                Result.LoadKnownHoleRecords(HoleRecords)
+            End If
 
             If Not Result.TryUnwrapFileMasterKey(EffectiveOptions.EncryptionInfo) Then
                 Throw New EncryptionMismatchException("The supplied encryption information could not unwrap the file master key.")
@@ -688,11 +825,10 @@ Namespace Streams
 
         End Function
 
-        Private Shared Function CreateNew(Fs As Stream,
-                                          Options As ChunkedStreamOptions) As ChunkedStream
-
+        Private Shared Function CreateNew(Fs As Stream, Options As ChunkedStreamOptions) As ChunkedStream
             Dim Header(HeaderSize - 1) As Byte
             Dim EffectiveOptions = If(Options, New ChunkedStreamOptions())
+
             Dim Flags = HeaderFlags.VariableChunkIndex
 
             If Not EffectiveOptions.StoreSparseChunks Then
@@ -702,45 +838,67 @@ Namespace Streams
             Select Case EffectiveOptions.CompressionMethod
                 Case ChunkedStreamOptions.CompressionMethods.Lz4
                     Flags = Flags Or HeaderFlags.CompressionLz4
+
                 Case ChunkedStreamOptions.CompressionMethods.Deflate
                     Flags = Flags Or HeaderFlags.CompressionDeflate
+
                 Case ChunkedStreamOptions.CompressionMethods.GZip
                     Flags = Flags Or HeaderFlags.CompressionGZip
             End Select
 
             If EffectiveOptions.ChunkSize <= 0 Then EffectiveOptions.ChunkSize = DefaultChunkSize
+            If EffectiveOptions.IndexPageEntryCount <= 0 Then EffectiveOptions.IndexPageEntryCount = 256
+            If EffectiveOptions.IndexDirectoryEntryCount <= 0 Then EffectiveOptions.IndexDirectoryEntryCount = 256
 
-            System.Buffer.BlockCopy(HeaderMagic, 0, Header, MagicOffset, HeaderMagic.Length)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(1L), 0, Header, HeaderSequenceOffset, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(CLng(Flags)), 0, Header, FlagsOffset, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(0L), 0, Header, LengthOffset, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(EffectiveOptions.ChunkSize), 0, Header, ChunkSizeOffset, 4)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(CLng(DataStartOffset)), 0, Header, IndexOffsetOffset, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(0L), 0, Header, IndexCountOffset, 8)
+            Buffer.BlockCopy(HeaderMagic, 0, Header, MagicOffset, HeaderMagic.Length)
+            Buffer.BlockCopy(BitConverter.GetBytes(1L), 0, Header, HeaderSequenceOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(CLng(Flags)), 0, Header, FlagsOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(0L), 0, Header, LengthOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(EffectiveOptions.ChunkSize), 0, Header, ChunkSizeOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(CLng(DataStartOffset)), 0, Header, IndexOffsetOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(0L), 0, Header, IndexCountOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(0L), 0, Header, MetadataRootOffsetOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(0), 0, Header, MetadataRootLengthOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(EffectiveOptions.IndexPageEntryCount), 0, Header, IndexPageEntryCountOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(EffectiveOptions.IndexDirectoryEntryCount), 0, Header, IndexDirectoryEntryCountOffset, 4)
 
             RandomNumberGeneratorFill(Header, FileSaltOffset, FileSaltSize)
 
-            Dim Index As New List(Of ChunkIndexEntry)()
-            Dim IndexMac = ComputeIndexMac(Index, PublicIntegrityKey)
+            Array.Clear(Header, IndexMacOffset, MacSize)
 
-            System.Buffer.BlockCopy(IndexMac, 0, Header, IndexMacOffset, MacSize)
             WriteHeaderMac(Header, PublicIntegrityKey)
 
             Fs.Position = 0
             Fs.Write(Header, 0, Header.Length)
+
             Fs.Position = HeaderSize
             Fs.Write(Header, 0, Header.Length)
+
             Fs.SetLength(DataStartOffset)
+
             FlushDurable(Fs)
 
-            Dim Result = New ChunkedStream(Fs, Header, 1L, 0, 0L, DataStartOffset, Index, Flags, EffectiveOptions)
+            Dim Index As New List(Of ChunkIndexEntry)()
+
+            Dim Result = New ChunkedStream(Fs,
+                                           Header,
+                                           1L,
+                                           0,
+                                           0L,
+                                           DataStartOffset,
+                                           Index,
+                                           Flags,
+                                           EffectiveOptions,
+                                           0L,
+                                           0,
+                                           EffectiveOptions.IndexPageEntryCount,
+                                           EffectiveOptions.IndexDirectoryEntryCount)
 
             If EffectiveOptions.EncryptionInfo IsNot Nothing Then
                 Result.InitialiseEncryptionForNewStream(EffectiveOptions.EncryptionInfo)
             End If
 
             Return Result
-
         End Function
 
         Private Shared Function ReadBestHeader(Fs As Stream) As HeaderCandidate
@@ -1020,9 +1178,7 @@ Namespace Streams
         ''' Changes the logical plaintext length of the stream.
         ''' </summary>
         Public Overrides Sub SetLength(Length As Long)
-
             SyncLock _SyncRoot
-
                 ThrowIfDisposed()
 
                 If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
@@ -1036,18 +1192,17 @@ Namespace Streams
 
                 If _Index.Count > RequiredChunks Then
                     _Index.RemoveRange(RequiredChunks, _Index.Count - RequiredChunks)
+                    MarkAllIndexPagesDirty()
                 Else
                     EnsureIndexSize(RequiredChunks)
                 End If
 
                 If _Length > 0 AndAlso RequiredChunks > 0 Then
-
                     Dim LastChunkIndex = RequiredChunks - 1
                     Dim LastChunkStart = CLng(LastChunkIndex) * _ChunkSize
                     Dim LastChunkPlainLength = CInt(_Length - LastChunkStart)
 
                     If LastChunkPlainLength > 0 AndAlso LastChunkPlainLength < _ChunkSize Then
-
                         Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
 
                         LoadChunk(LastChunkIndex, _ChunkPlain)
@@ -1055,9 +1210,7 @@ Namespace Streams
                         Array.Clear(_ChunkPlain, LastChunkPlainLength, _ChunkSize - LastChunkPlainLength)
 
                         WriteChunkRecord(LastChunkIndex, _ChunkPlain, LastChunkPlainLength)
-
                     End If
-
                 End If
 
                 _IndexOffset = GetDataEndFromIndex()
@@ -1065,11 +1218,8 @@ Namespace Streams
                 If Not HasOpenCheckpoint Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
-
             End SyncLock
-
         End Sub
-
         ''' <summary>
         ''' Flushes pending changes to the backing stream.
         ''' </summary>
@@ -1145,57 +1295,41 @@ Namespace Streams
         Private Sub PersistIndexAndHeader(IndexOffset As Long,
                                           Optional Durable As Boolean = False)
 
-            If IndexOffset < DataStartOffset Then Throw New InvalidDataException("Invalid index offset.")
-
-            _IndexOffset = IndexOffset
-
-            Dim NewLength = _IndexOffset + CLng(_Index.Count) * IndexEntrySize
-
-            _Fs.Position = _IndexOffset
-
-            Dim EntryBuffer(IndexEntrySize - 1) As Byte
-
-            For Each Entry In _Index
-
-                Array.Clear(EntryBuffer, 0, EntryBuffer.Length)
-
-                System.Buffer.BlockCopy(BitConverter.GetBytes(Entry.Offset), 0, EntryBuffer, 0, 8)
-                System.Buffer.BlockCopy(BitConverter.GetBytes(Entry.RecordLength), 0, EntryBuffer, 8, 4)
-
-                _Fs.Write(EntryBuffer, 0, EntryBuffer.Length)
-
-            Next
-
-            If Durable Then FlushDurable(_Fs)
-
-            UpdateHeader(Durable)
-
-            _Fs.SetLength(NewLength)
-
-            If Durable Then FlushDurable(_Fs)
+            PersistPagedMetadata(IndexOffset, Durable)
 
         End Sub
 
         Private Sub UpdateHeader(Optional Durable As Boolean = False)
-
             _HeaderFlags = _HeaderFlags Or HeaderFlags.VariableChunkIndex
 
             If Not Options.StoreSparseChunks Then
                 _HeaderFlags = _HeaderFlags Or HeaderFlags.SparseChunks
             End If
 
-            System.Buffer.BlockCopy(BitConverter.GetBytes(CLng(_HeaderFlags)), 0, _Header, FlagsOffset, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(_Length), 0, _Header, LengthOffset, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(_ChunkSize), 0, _Header, ChunkSizeOffset, 4)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(_IndexOffset), 0, _Header, IndexOffsetOffset, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(CLng(_Index.Count)), 0, _Header, IndexCountOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(CLng(_HeaderFlags)), 0, _Header, FlagsOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(_Length), 0, _Header, LengthOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(_ChunkSize), 0, _Header, ChunkSizeOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(_IndexOffset), 0, _Header, IndexOffsetOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(CLng(_Index.Count)), 0, _Header, IndexCountOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(_MetadataRootOffset), 0, _Header, MetadataRootOffsetOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(_MetadataRootLength), 0, _Header, MetadataRootLengthOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(_IndexPageEntryCount), 0, _Header, IndexPageEntryCountOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(_IndexDirectoryEntryCount), 0, _Header, IndexDirectoryEntryCountOffset, 4)
 
-            Dim IndexMac = ComputeIndexMac(_Index, PublicIntegrityKey)
+            If _MetadataRootOffset > 0 AndAlso _MetadataRootLength > 0 Then
+                Dim Root(_MetadataRootLength - 1) As Byte
 
-            System.Buffer.BlockCopy(IndexMac, 0, _Header, IndexMacOffset, MacSize)
+                _Fs.Position = _MetadataRootOffset
+                ReadExactly(_Fs, Root, 0, Root.Length)
+
+                Dim RootMac = ComputeMac(Root, Root.Length - MacSize, PublicIntegrityKey)
+
+                Buffer.BlockCopy(RootMac, 0, _Header, IndexMacOffset, MacSize)
+            Else
+                Array.Clear(_Header, IndexMacOffset, MacSize)
+            End If
 
             WriteHeaderCopies(Durable)
-
         End Sub
 
         Private Sub WriteHeaderCopies(Durable As Boolean)
@@ -1215,71 +1349,6 @@ Namespace Streams
             If Durable Then FlushDurable(_Fs)
 
         End Sub
-
-        Private Shared Function ReadIndexTable(Fs As Stream,
-                                               IndexOffset As Long,
-                                               IndexCount As Integer) As List(Of ChunkIndexEntry)
-
-            Dim Index As New List(Of ChunkIndexEntry)(IndexCount)
-
-            If IndexCount = 0 Then Return Index
-
-            Dim IndexBytesLength = CLng(IndexCount) * IndexEntrySize
-
-            If IndexOffset + IndexBytesLength > Fs.Length Then
-                Throw New InvalidDataException("Chunked stream index table extends beyond end of stream.")
-            End If
-
-            Fs.Position = IndexOffset
-
-            Dim EntryBuffer(IndexEntrySize - 1) As Byte
-
-            For EntryIndex = 0 To IndexCount - 1
-
-                ReadExactly(Fs, EntryBuffer, 0, EntryBuffer.Length)
-
-                Dim Entry As New ChunkIndexEntry With {
-                    .Offset = BitConverter.ToInt64(EntryBuffer, 0),
-                    .RecordLength = BitConverter.ToInt32(EntryBuffer, 8)
-                }
-
-                If Entry.Offset <> 0 OrElse Entry.RecordLength <> 0 Then
-                    If Entry.Offset < DataStartOffset OrElse Entry.RecordLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid index entry {EntryIndex}.")
-                    If Entry.Offset + Entry.RecordLength > IndexOffset Then Throw New InvalidDataException($"Index entry {EntryIndex} points outside the chunked data area.")
-                End If
-
-                Index.Add(Entry)
-
-            Next
-
-            Return Index
-
-        End Function
-
-        Private Shared Function ComputeIndexMac(Index As List(Of ChunkIndexEntry), MacKey As Byte()) As Byte()
-
-            Using Hmac As New HMACSHA256(MacKey)
-
-                Dim EntryBuffer(IndexEntrySize - 1) As Byte
-
-                For Each Entry In Index
-
-                    Array.Clear(EntryBuffer, 0, EntryBuffer.Length)
-
-                    System.Buffer.BlockCopy(BitConverter.GetBytes(Entry.Offset), 0, EntryBuffer, 0, 8)
-                    System.Buffer.BlockCopy(BitConverter.GetBytes(Entry.RecordLength), 0, EntryBuffer, 8, 4)
-
-                    Hmac.TransformBlock(EntryBuffer, 0, EntryBuffer.Length, Nothing, 0)
-
-                Next
-
-                Hmac.TransformFinalBlock(New Byte() {}, 0, 0)
-
-                Return Hmac.Hash
-
-            End Using
-
-        End Function
 
         Private Sub ThrowIfDisposed()
 

@@ -31,9 +31,7 @@ Namespace Streams
 
             Private ReadOnly _SpacesByLength As New SortedDictionary(Of Long, Queue(Of Long))()
 
-            Public Sub Add(Offset As Long,
-                           Length As Long)
-
+            Public Sub Add(Offset As Long, Length As Long)
                 If Offset < DataStartOffset Then Return
                 If Length <= 0 Then Return
 
@@ -45,12 +43,9 @@ Namespace Streams
                 End If
 
                 Offsets.Enqueue(Offset)
-
             End Sub
 
-            Public Function TryAllocate(RequiredLength As Long,
-                                        ByRef Offset As Long) As Boolean
-
+            Public Function TryAllocate(RequiredLength As Long, ByRef Offset As Long) As Boolean
                 If RequiredLength <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(RequiredLength))
 
                 Dim SelectedLength As Long = -1
@@ -68,6 +63,7 @@ Namespace Streams
                 End If
 
                 Dim Offsets = _SpacesByLength(SelectedLength)
+
                 Offset = Offsets.Dequeue()
 
                 If Offsets.Count = 0 Then
@@ -81,13 +77,26 @@ Namespace Streams
                 End If
 
                 Return True
+            End Function
 
+            Public Function Snapshot(SpaceType As HoleSpaceTypes) As List(Of HoleDirectoryRecord)
+                Dim Result As New List(Of HoleDirectoryRecord)()
+
+                For Each pair In _SpacesByLength
+                    For Each offset In pair.Value
+                        Result.Add(New HoleDirectoryRecord With {
+                            .SpaceType = SpaceType,
+                            .Offset = offset,
+                            .Length = pair.Key
+                        })
+                    Next
+                Next
+
+                Return Result
             End Function
 
             Public Sub Clear()
-
                 _SpacesByLength.Clear()
-
             End Sub
 
         End Class
@@ -112,6 +121,47 @@ Namespace Streams
 
             _FreeChunkSpaces.Add(Offset, Length)
 
+        End Sub
+
+        Private Sub AddFreeIndexPageSpace(Offset As Long, Length As Long)
+            If Offset < DataStartOffset Then Return
+            If Length <= 0 Then Return
+
+            _FreeIndexPageSpaces.Add(Offset, Length)
+        End Sub
+
+        Private Sub AddFreeIndexDirectoryPageSpace(Offset As Long, Length As Long)
+            If Offset < DataStartOffset Then Return
+            If Length <= 0 Then Return
+
+            _FreeIndexDirectoryPageSpaces.Add(Offset, Length)
+        End Sub
+
+        Private Function GetKnownHoleRecords() As List(Of HoleDirectoryRecord)
+            Dim Result As New List(Of HoleDirectoryRecord)()
+
+            Result.AddRange(_FreeChunkSpaces.Snapshot(HoleSpaceTypes.ChunkRecord))
+            Result.AddRange(_FreeIndexPageSpaces.Snapshot(HoleSpaceTypes.IndexPage))
+            Result.AddRange(_FreeIndexDirectoryPageSpaces.Snapshot(HoleSpaceTypes.DirectoryPage))
+
+            Return Result
+        End Function
+
+        Private Sub LoadKnownHoleRecords(Records As IEnumerable(Of HoleDirectoryRecord))
+            If Records Is Nothing Then Return
+
+            For Each record In Records
+                Select Case record.SpaceType
+                    Case HoleSpaceTypes.ChunkRecord
+                        _FreeChunkSpaces.Add(record.Offset, record.Length)
+
+                    Case HoleSpaceTypes.IndexPage
+                        _FreeIndexPageSpaces.Add(record.Offset, record.Length)
+
+                    Case HoleSpaceTypes.DirectoryPage
+                        _FreeIndexDirectoryPageSpaces.Add(record.Offset, record.Length)
+                End Select
+            Next
         End Sub
 
         Private Sub LoadChunk(ChunkIndex As Long, Plain As Byte())
@@ -211,6 +261,7 @@ Namespace Streams
             If PlainLength = 0 OrElse (Not StoreSparseChunks AndAlso PlaintextAllZero) Then
 
                 _Index(CInt(ChunkIndex)) = New ChunkIndexEntry()
+                MarkIndexPageDirty(CInt(ChunkIndex))
                 _HeaderFlags = _HeaderFlags Or HeaderFlags.SparseChunks
 
                 If PreviousEntry.Offset > 0 AndAlso PreviousEntry.RecordLength > 0 Then
@@ -309,6 +360,7 @@ Namespace Streams
                     .Offset = NewRecordOffset,
                     .RecordLength = Record.Length
                 }
+            MarkIndexPageDirty(CInt(ChunkIndex))
 
             If PreviousEntry.Offset > 0 AndAlso PreviousEntry.RecordLength > 0 Then
                 AddFreeChunkSpace(PreviousEntry.Offset, PreviousEntry.RecordLength)
@@ -323,22 +375,17 @@ Namespace Streams
         End Sub
 
         Private Function GetNextChunkRecordWriteOffset(RecordLength As Integer) As Long
-
             If RecordLength < MinChunkRecordSize Then Throw New ArgumentOutOfRangeException(NameOf(RecordLength))
 
             If HasOpenCheckpoint Then
-
                 ' While a checkpoint is active, never overwrite the currently committed
-                ' index table or any existing committed record. Append tentative records
+                ' metadata or any existing committed record. Append tentative records
                 ' beyond the physical end so rollback can restore the previous state.
                 Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
-
             End If
 
             Select Case Options.NewChunkWriteLocationPolicy
-
                 Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles
-
                     Dim HoleOffset As Long
 
                     If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
@@ -346,7 +393,6 @@ Namespace Streams
                     End If
 
                 Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
-
                     Dim HoleOffset As Long
 
                     If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
@@ -358,11 +404,9 @@ Namespace Streams
                     If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
                         Return HoleOffset
                     End If
-
             End Select
 
-            Return _IndexOffset
-
+            Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
         End Function
 
         Private Sub BuildFreeChunkSpaceMap()
@@ -420,14 +464,49 @@ Namespace Streams
         End Function
 
         Private Sub EnsureIndexSize(RequiredCount As Integer)
-
             If RequiredCount < 0 Then Throw New ArgumentOutOfRangeException(NameOf(RequiredCount))
+
+            Dim OriginalCount = _Index.Count
 
             While _Index.Count < RequiredCount
                 _Index.Add(New ChunkIndexEntry())
             End While
 
+            If _Index.Count <> OriginalCount Then
+                For ChunkIndex = OriginalCount To _Index.Count - 1
+                    MarkIndexPageDirty(ChunkIndex)
+                Next
+            End If
         End Sub
+
+        Private Sub MarkIndexPageDirty(ChunkIndex As Integer)
+            If ChunkIndex < 0 Then Throw New ArgumentOutOfRangeException(NameOf(ChunkIndex))
+            If _IndexPageEntryCount <= 0 Then Return
+
+            Dim PageNumber = ChunkIndex \ _IndexPageEntryCount
+
+            _DirtyIndexPages.Add(PageNumber)
+        End Sub
+
+        Private Sub MarkAllIndexPagesDirty()
+            _DirtyIndexPages.Clear()
+
+            If _Index.Count = 0 Then Return
+            If _IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid index page entry count.")
+
+            Dim PageCount = GetIndexPageCount(_Index.Count, _IndexPageEntryCount)
+
+            For PageNumber = 0 To PageCount - 1
+                _DirtyIndexPages.Add(PageNumber)
+            Next
+        End Sub
+
+        Private Shared Function GetIndexPageCount(IndexCount As Integer, IndexPageEntryCount As Integer) As Integer
+            If IndexCount <= 0 Then Return 0
+            If IndexPageEntryCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(IndexPageEntryCount))
+
+            Return CInt(((CLng(IndexCount) - 1L) \ CLng(IndexPageEntryCount)) + 1L)
+        End Function
 
         Private Function GetRequiredChunkCount(Length As Long) As Integer
 

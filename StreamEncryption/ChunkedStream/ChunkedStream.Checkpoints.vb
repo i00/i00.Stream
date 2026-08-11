@@ -340,7 +340,6 @@ Namespace Streams
         End Sub
 
         Private Sub RestoreCheckpointState(State As CheckpointState)
-
             If State Is Nothing Then Throw New ArgumentNullException(NameOf(State))
 
             InvalidateChunkCache()
@@ -353,10 +352,15 @@ Namespace Streams
             _Index.Clear()
             _Index.AddRange(State.Index)
 
+            _IndexPageDescriptors.Clear()
+            _ChunkIndexDirectoryPageDescriptors.Clear()
+            _HoleDirectoryPageDescriptors.Clear()
+
+            MarkAllIndexPagesDirty()
+
             If _Fs.Length > State.PhysicalLength Then
                 _Fs.SetLength(State.PhysicalLength)
             End If
-
         End Sub
 
         Private Sub EnsureTopCheckpoint(Checkpoint As ChunkedStreamCheckpoint)

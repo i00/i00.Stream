@@ -273,9 +273,7 @@ Partial Module Extensions
     End Function
 
     Private Function GetSegmentType(Region As Streams.ChunkedStreamStructure.Region) As FragmentationDrawOptions.SegmentColorTypes
-
         Select Case Region.RegionType
-
             Case Streams.ChunkedStreamStructure.RegionTypes.Header
                 Return FragmentationDrawOptions.SegmentColorTypes.Header
 
@@ -285,7 +283,10 @@ Partial Module Extensions
             Case Streams.ChunkedStreamStructure.RegionTypes.Hole
                 Return FragmentationDrawOptions.SegmentColorTypes.Hole
 
-            Case Streams.ChunkedStreamStructure.RegionTypes.Index
+            Case Streams.ChunkedStreamStructure.RegionTypes.Index,
+                 Streams.ChunkedStreamStructure.RegionTypes.IndexPage,
+                 Streams.ChunkedStreamStructure.RegionTypes.DirectoryPage,
+                 Streams.ChunkedStreamStructure.RegionTypes.MetadataRoot
                 Return FragmentationDrawOptions.SegmentColorTypes.Index
 
             Case Streams.ChunkedStreamStructure.RegionTypes.Unused
@@ -293,9 +294,7 @@ Partial Module Extensions
 
             Case Else
                 Return FragmentationDrawOptions.SegmentColorTypes.Unknown
-
         End Select
-
     End Function
 
     Private Function GetRenderLength(ChunkedStreamStructure As Streams.ChunkedStreamStructure,
