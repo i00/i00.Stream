@@ -15,7 +15,8 @@
 '   - Encryption is optional.
 '   - Compression is optional and per chunk.
 '   - Sparse chunk support.
-'   - Append-on-write chunk updates.
+'   - Configurable chunk-record placement policies
+'     (Append-based storage with optional hole reuse for new chunk records).
 '   - Defragmentation and recovery support.
 '   - Data-only checkpoints with automatic rollback to the current checkpoint
 '     baseline when disposed.
@@ -36,6 +37,20 @@
 '   - Defragment(DefragTypes.Rebuild) rewrites all chunks using the current
 '     Options.ChunkSize.
 '   - Incomplete chunk-size rebuilds are rolled back on the next open.
+'
+' Write Location Model
+'   - Newly written physical chunk records are placed according to
+'     Options.NewChunkWriteLocationPolicy.
+'       - Append writes new chunk records at the current end of the chunk-data area.
+'       - FillHoles attempts to place new chunk records into existing unreferenced
+'         holes before extending the chunk-data area.
+'   - The selected policy affects newly written chunk records only.
+'   - Existing chunk layout is not reorganised automatically.
+'   - Defragmentation remains the preferred mechanism for compacting or
+'     reordering existing chunk records.
+'   - While a checkpoint is active, chunk records are always appended beyond the
+'     currently committed data area regardless of the selected policy.
+'     This preserves checkpoint rollback and crash-recovery behaviour.
 '
 ' Read Cache Model
 '   - The most recently loaded plaintext chunk may be cached.

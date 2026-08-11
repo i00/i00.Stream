@@ -12,10 +12,14 @@
 '   - Encryption configuration.
 '   - Chunk read-cache configuration.
 '   - Chunk size configuration.
+'   - New chunk write-location configuration.
 '
 ' Design
 '   - Options affect newly written chunks.
 '   - Existing chunks retain their original representation until rewritten.
+'   - Most option changes do not immediately rewrite existing chunk records.
+'   - ApplyOptions may be used to rewrite existing chunk records using the
+'     currently configured policies.
 '
 ' Chunk Size
 '   - Stored in the file header.
