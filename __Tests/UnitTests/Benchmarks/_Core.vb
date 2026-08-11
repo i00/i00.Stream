@@ -8,7 +8,10 @@ Namespace Tests
         ''' Benchmarks new chunk write-location policies.
         ''' </summary>
         <UnitTester.SimpleTest({128, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        <UnitTester.SimpleTest({256, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        <UnitTester.SimpleTest({512, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
         <UnitTester.SimpleTest({1024, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        <UnitTester.SimpleTest({2048, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
         Public Shared Function NewChunkWriteLocationPolicyBenchmark(LogicalChunkCount As Integer, DurationMs As Long) As UnitTester.SimpleTest.BenchmarkResult
 
             Dim Messages As New List(Of String)
@@ -26,8 +29,8 @@ Namespace Tests
                         ChunkIndex + 1)
             Next
 
-            For Each Policy As ChunkedStream.ChunkedStreamOptions.NewChunkWriteLocationPolicies In
-                [Enum].GetValues(GetType(ChunkedStream.ChunkedStreamOptions.NewChunkWriteLocationPolicies))
+            For Each Policy As ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies In
+                [Enum].GetValues(GetType(ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies))
 
                 Dim TotalBytesWritten As Long = 0
 

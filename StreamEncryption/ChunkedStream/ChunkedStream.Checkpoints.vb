@@ -344,6 +344,7 @@ Namespace Streams
             If State Is Nothing Then Throw New ArgumentNullException(NameOf(State))
 
             InvalidateChunkCache()
+            ClearFreeSpaceMaps()
 
             _Length = State.LogicalLength
             _IndexOffset = State.IndexOffset

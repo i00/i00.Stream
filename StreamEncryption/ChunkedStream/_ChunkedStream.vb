@@ -1028,6 +1028,7 @@ Namespace Streams
                 If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
 
                 InvalidateChunkCache()
+                ClearFreeSpaceMaps()
 
                 _Length = Length
 
@@ -1046,10 +1047,15 @@ Namespace Streams
                     Dim LastChunkPlainLength = CInt(_Length - LastChunkStart)
 
                     If LastChunkPlainLength > 0 AndAlso LastChunkPlainLength < _ChunkSize Then
+
                         Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
+
                         LoadChunk(LastChunkIndex, _ChunkPlain)
+
                         Array.Clear(_ChunkPlain, LastChunkPlainLength, _ChunkSize - LastChunkPlainLength)
+
                         WriteChunkRecord(LastChunkIndex, _ChunkPlain, LastChunkPlainLength)
+
                     End If
 
                 End If

@@ -74,7 +74,7 @@ Namespace Tests
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .NewChunkWriteLocationPolicy =
-                            ChunkedStream.ChunkedStreamOptions.NewChunkWriteLocationPolicies.Append
+                            ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.Append
                     }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
@@ -91,7 +91,7 @@ Namespace Tests
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .NewChunkWriteLocationPolicy =
-                            ChunkedStream.ChunkedStreamOptions.NewChunkWriteLocationPolicies.FillHoles
+                            ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles
                     }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)

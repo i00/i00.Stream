@@ -64,25 +64,36 @@ Namespace Streams
                 End Set
             End Property
 
+            Private _IndexPageEntryCount As Integer = 256
+            Private _IndexDirectoryEntryCount As Integer = 256
+
             ''' <summary>
-            ''' Controls where newly written physical chunk records are placed.
+            ''' Controls where newly written storage records are placed.
             ''' </summary>
-            Public Enum NewChunkWriteLocationPolicies
+            Public Enum NewWriteLocationPolicies
                 ''' <summary>
-                ''' Writes new chunk records at the current append position.
-                ''' This is the fastest policy for write-heavy workloads because it avoids scanning
-                ''' the existing physical layout for reusable holes. It may increase fragmentation
-                ''' and physical file size until defragmentation is performed.
+                ''' Always writes new records at the current append position.
+                ''' This avoids free-space lookup overhead, but may increase fragmentation
+                ''' and physical stream growth until defragmentation or rebuild is performed.
                 ''' </summary>
                 Append = 0
 
                 ''' <summary>
-                ''' Attempts to place new chunk records into existing unreferenced holes when a
-                ''' suitable hole is available. This can reduce physical file growth during repeated
-                ''' random overwrites, but adds layout-scanning overhead to writes and may perform
-                ''' worse for write-heavy workloads.
+                ''' Reuses known free spaces when a suitable space is already available in
+                ''' memory or has been loaded from a stored hole directory.
+                ''' This does not scan the existing physical stream layout to discover
+                ''' unknown holes.
                 ''' </summary>
                 FillHoles = 1
+
+                ''' <summary>
+                ''' Reuses known free spaces and, when no suitable known space exists,
+                ''' may rebuild the free-space map by scanning the active stream layout
+                ''' from the start.
+                ''' This can reclaim holes that were not already known, but may add
+                ''' extra write-time overhead when the scan is required.
+                ''' </summary>
+                FillHolesFromStart = 2
             End Enum
 
             ''' <summary>
@@ -96,7 +107,82 @@ Namespace Streams
             ''' When a checkpoint is active, ChunkedStream always uses append behaviour to preserve
             ''' checkpoint rollback and crash-recovery semantics.
             ''' </remarks>
-            Public Property NewChunkWriteLocationPolicy As NewChunkWriteLocationPolicies = NewChunkWriteLocationPolicies.Append
+            Public Property NewChunkWriteLocationPolicy As NewWriteLocationPolicies = NewWriteLocationPolicies.FillHoles
+
+            ''' <summary>
+            ''' Gets or sets the placement policy used for newly written index pages.
+            ''' </summary>
+            ''' <remarks>
+            ''' This option is reserved for the paged-index metadata layout. In the current flat-index
+            ''' layout it is stored as an option only and is not used by the existing index writer.
+            ''' </remarks>
+            Public Property NewIndexPageWriteLocationPolicy As NewWriteLocationPolicies = NewWriteLocationPolicies.FillHoles
+
+            ''' <summary>
+            ''' Gets or sets the placement policy used for newly written index-directory pages.
+            ''' </summary>
+            ''' <remarks>
+            ''' This option is reserved for the paged-index metadata layout. In the current flat-index
+            ''' layout it is stored as an option only and is not used by the existing index writer.
+            ''' </remarks>
+            Public Property NewIndexDirectoryPageWriteLocationPolicy As NewWriteLocationPolicies = NewWriteLocationPolicies.FillHoles
+
+            ''' <summary>
+            ''' Number of chunk index entries stored in each authenticated index page.
+            ''' </summary>
+            ''' <remarks>
+            ''' New streams use this value when creating their index layout.
+            ''' Existing streams should load the stored value from the stream header once the
+            ''' paged-index layout is implemented.
+            '''
+            ''' Changing this property does not immediately affect the current stream.
+            ''' To apply a new value to an existing stream, call Defragment(DefragTypes.Rebuild)
+            ''' once the paged-index layout is implemented.
+            ''' </remarks>
+            Public Property IndexPageEntryCount As Integer
+                Get
+                    Return _IndexPageEntryCount
+                End Get
+                Set
+                    If Value <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(IndexPageEntryCount))
+                    _IndexPageEntryCount = Value
+                End Set
+            End Property
+
+            ''' <summary>
+            ''' Number of directory entries stored in each authenticated index-directory page.
+            ''' </summary>
+            ''' <remarks>
+            ''' New streams use this value when creating their metadata directory layout.
+            ''' Existing streams should load the stored value from the stream header once the
+            ''' paged-index layout is implemented.
+            '''
+            ''' Changing this property does not immediately affect the current stream.
+            ''' To apply a new value to an existing stream, call Defragment(DefragTypes.Rebuild)
+            ''' once the paged-index layout is implemented.
+            ''' </remarks>
+            Public Property IndexDirectoryEntryCount As Integer
+                Get
+                    Return _IndexDirectoryEntryCount
+                End Get
+                Set
+                    If Value <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(IndexDirectoryEntryCount))
+                    _IndexDirectoryEntryCount = Value
+                End Set
+            End Property
+
+            ''' <summary>
+            ''' True when reusable free-space information should be persisted as metadata.
+            ''' </summary>
+            ''' <remarks>
+            ''' A stored hole directory is an acceleration structure only. Correctness must not
+            ''' depend on it. If the hole directory is missing, disabled or invalid, reusable
+            ''' free space can be discovered by scanning the active stream layout.
+            '''
+            ''' In the current flat-index layout this option is stored only. The in-memory free-space
+            ''' map is still maintained for holes created during the current open stream session.
+            ''' </remarks>
+            Public Property StoreHoleDirectory As Boolean = True
 
             ''' <summary>
             ''' Raised when EncryptionInfo changes.

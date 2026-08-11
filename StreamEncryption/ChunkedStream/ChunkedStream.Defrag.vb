@@ -84,31 +84,37 @@ Namespace Streams
                 End If
 
                 InvalidateChunkCache()
+                ClearFreeSpaceMaps()
 
                 Dim OriginalLength = _Fs.Length
-
                 Dim CancellationToken As New CancellationToken()
 
                 Select Case Type
 
                     Case DefragTypes.Move
+
                         DefragmentMove(ProgressCallback, CancellationToken)
 
                     Case DefragTypes.Sequence
+
                         DefragmentSequence(
                             DefragmentSequenceProgressModes.Normal,
                             ProgressCallback,
                             CancellationToken)
 
                     Case DefragTypes.Rebuild
+
                         DefragmentRebuild(
                             ProgressCallback,
                             CancellationToken)
 
                     Case Else
+
                         Throw New ArgumentOutOfRangeException(NameOf(Type))
 
                 End Select
+
+                ClearFreeSpaceMaps()
 
                 If CancellationToken.Cancel Then
                     Return -1
@@ -405,6 +411,14 @@ Namespace Streams
                 Throw New InvalidOperationException("Chunk size must be greater than zero.")
             End If
 
+            If Options.IndexPageEntryCount <= 0 Then
+                Throw New InvalidOperationException("Index page entry count must be greater than zero.")
+            End If
+
+            If Options.IndexDirectoryEntryCount <= 0 Then
+                Throw New InvalidOperationException("Index directory entry count must be greater than zero.")
+            End If
+
             Dim OriginalPhysicalLength = _Fs.Length
             Dim OriginalChunkSize = _ChunkSize
             Dim OriginalChunkPlain = _ChunkPlain
@@ -419,7 +433,6 @@ Namespace Streams
                    CInt(((_Length - 1) \ TargetChunkSize) + 1))
 
             Dim NewIndex As New List(Of ChunkIndexEntry)(TargetChunkCount)
-
             Dim TargetBuffer(TargetChunkSize - 1) As Byte
 
             Dim PhysicalOffset =
@@ -432,12 +445,9 @@ Namespace Streams
             For TargetChunkIndex = 0 To TargetChunkCount - 1
 
                 If CancellationToken.Cancel Then
-
                     _ChunkSize = OriginalChunkSize
                     _ChunkPlain = OriginalChunkPlain
-
                     Return
-
                 End If
 
                 Array.Clear(TargetBuffer, 0, TargetBuffer.Length)
@@ -485,24 +495,20 @@ Namespace Streams
             Next
 
             If CancellationToken.Cancel Then
-
                 _ChunkSize = OriginalChunkSize
                 _ChunkPlain = OriginalChunkPlain
-
                 Return
-
             End If
 
             _Index.Clear()
             _Index.AddRange(NewIndex)
 
             _ChunkSize = TargetChunkSize
-
             _ChunkPlain = New Byte(_ChunkSize - 1) {}
             _CachedChunkPlain = New Byte(_ChunkSize - 1) {}
 
             InvalidateChunkCache()
-
+            ClearFreeSpaceMaps()
             ClearRecoveryAreaInMemory()
 
             PersistIndexAndHeader(PhysicalOffset, True)
