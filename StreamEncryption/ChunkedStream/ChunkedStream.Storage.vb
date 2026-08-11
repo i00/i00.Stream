@@ -109,24 +109,19 @@ Namespace Streams
                                                CompressionRatioThreshold As Double,
                                                ForceCompression As Boolean,
                                                EncryptionMethod As ChunkEncryptionMethods)
-
             If ChunkIndex < 0 OrElse ChunkIndex > Integer.MaxValue Then Throw New ArgumentOutOfRangeException(NameOf(ChunkIndex))
             If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
             If PlainLength < 0 OrElse PlainLength > _ChunkSize Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
-
             If CompressionRatioThreshold < MinimumCompressionRatioThreshold Then CompressionRatioThreshold = MinimumCompressionRatioThreshold
             If CompressionRatioThreshold > MaximumCompressionRatioThreshold Then CompressionRatioThreshold = MaximumCompressionRatioThreshold
 
             Dim PlaintextAllZero = PlainLength = 0 OrElse IsAllZero(Plain, PlainLength)
 
             If PlainLength = 0 OrElse (Not StoreSparseChunks AndAlso PlaintextAllZero) Then
-
                 EnsureIndexSize(CInt(ChunkIndex + 1))
                 _Index(CInt(ChunkIndex)) = New ChunkIndexEntry()
                 _HeaderFlags = _HeaderFlags Or HeaderFlags.SparseChunks
-
                 Return
-
             End If
 
             Dim Payload As Byte() = Plain
@@ -136,9 +131,7 @@ Namespace Streams
             Dim CompressionEvaluatedPercent As Byte = 100
 
             If CompressionMethodToUse <> ChunkedStreamOptions.CompressionMethods.None AndAlso PlainLength > 0 Then
-
                 Dim Compressed = CompressPayload(CompressionMethodToUse, Plain, PlainLength)
-
                 CompressionEvaluatedMethod = CompressionMethodToUse
                 CompressionEvaluatedPercent = GetCompressionEvaluatedPercent(PlainLength, Compressed.Length)
 
@@ -148,11 +141,9 @@ Namespace Streams
                     StoredCompressionMethod = CompressionMethodToUse
                     MarkCompressionFlag(StoredCompressionMethod)
                 End If
-
             End If
 
             Dim Flags = ChunkFlags.None
-
             If PlaintextAllZero Then
                 Flags = Flags Or ChunkFlags.PlaintextAllZero
             End If
@@ -173,15 +164,12 @@ Namespace Streams
             System.Buffer.BlockCopy(_Counter, 0, Record, ChunkRecordIvOffset, IvSize)
 
             Select Case EncryptionMethod
-
                 Case ChunkEncryptionMethods.None
-
                     If PayloadLength > 0 Then
                         System.Buffer.BlockCopy(Payload, 0, Record, ChunkRecordDataOffset, PayloadLength)
                     End If
 
                 Case ChunkEncryptionMethods.AesCtrFileMasterKey
-
                     If _ChunkEncryptionKey Is Nothing Then
                         Throw New EncryptionMismatchException("Encryption is enabled but no file master key is available.")
                     End If
@@ -189,9 +177,7 @@ Namespace Streams
                     CryptPayload(Payload, 0, PayloadLength, Record, ChunkRecordDataOffset, _ChunkEncryptionKey)
 
                 Case Else
-
                     Throw New InvalidDataException($"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
-
             End Select
 
             Dim RecordMacKey =
@@ -204,34 +190,84 @@ Namespace Streams
                 System.Buffer.BlockCopy(Mac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize)
             End Using
 
-            Dim NewRecordOffset = GetNextChunkRecordWriteOffset()
+            Dim NewRecordOffset = GetNextChunkRecordWriteOffset(Record.Length)
 
             _Fs.Position = NewRecordOffset
             _Fs.Write(Record, 0, Record.Length)
 
             EnsureIndexSize(CInt(ChunkIndex + 1))
-
             _Index(CInt(ChunkIndex)) =
                 New ChunkIndexEntry With {
                     .Offset = NewRecordOffset,
                     .RecordLength = Record.Length
                 }
 
-            _IndexOffset = NewRecordOffset + Record.Length
-
+            Dim NewRecordEndOffset = NewRecordOffset + Record.Length
+            If NewRecordEndOffset > _IndexOffset Then
+                _IndexOffset = NewRecordEndOffset
+            End If
         End Sub
 
-        Private Function GetNextChunkRecordWriteOffset() As Long
+        Private Function GetNextChunkRecordWriteOffset(RecordLength As Integer) As Long
+            If RecordLength < MinChunkRecordSize Then Throw New ArgumentOutOfRangeException(NameOf(RecordLength))
 
-            If Not HasOpenCheckpoint Then
-                Return _IndexOffset
+            If HasOpenCheckpoint Then
+                ' While a checkpoint is active, never overwrite the currently committed
+                ' index table or any existing committed record. Append tentative records
+                ' beyond the physical end so rollback can restore the previous state.
+                Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
             End If
 
-            ' While a checkpoint is active, never overwrite the currently committed
-            ' index table. Append tentative records beyond the physical end so a crash
-            ' before Commit leaves the previous header/index pair valid and recoverable.
-            Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
+            If Options.NewChunkWriteLocationPolicy = ChunkedStreamOptions.NewChunkWriteLocationPolicies.FillHoles Then
+                Dim HoleOffset = FindFirstHoleThatFits(RecordLength)
+                If HoleOffset >= 0 Then Return HoleOffset
+            End If
 
+            Return _IndexOffset
+        End Function
+
+        Private Function FindFirstHoleThatFits(RecordLength As Integer) As Long
+            If RecordLength < MinChunkRecordSize Then Throw New ArgumentOutOfRangeException(NameOf(RecordLength))
+
+            Dim LiveRanges As New List(Of Tuple(Of Long, Long))()
+
+            For Each entry In _Index
+                If entry.Offset = 0 AndAlso entry.RecordLength = 0 Then Continue For
+
+                If entry.Offset < DataStartOffset Then Throw New InvalidDataException("Invalid chunk index entry offset.")
+                If entry.RecordLength < MinChunkRecordSize Then Throw New InvalidDataException("Invalid chunk index entry record length.")
+                If entry.Offset + entry.RecordLength > _IndexOffset Then Throw New InvalidDataException("Chunk record extends beyond data area.")
+
+                LiveRanges.Add(Tuple.Create(entry.Offset, entry.Offset + CLng(entry.RecordLength)))
+            Next
+
+            If LiveRanges.Count = 0 Then
+                If _IndexOffset - CLng(DataStartOffset) >= RecordLength Then
+                    Return DataStartOffset
+                End If
+
+                Return -1
+            End If
+
+            LiveRanges.Sort(Function(left, right) left.Item1.CompareTo(right.Item1))
+
+            Dim Cursor = CLng(DataStartOffset)
+
+            For Each liveRange In LiveRanges
+                If liveRange.Item1 > Cursor Then
+                    Dim HoleLength = liveRange.Item1 - Cursor
+                    If HoleLength >= RecordLength Then Return Cursor
+                End If
+
+                Cursor = Math.Max(Cursor, liveRange.Item2)
+            Next
+
+            If _IndexOffset > Cursor Then
+                Dim HoleLength = _IndexOffset - Cursor
+                If HoleLength >= RecordLength Then Return Cursor
+            End If
+
+            Return -1
         End Function
 
         Private Function GetDataEndFromIndex() As Long

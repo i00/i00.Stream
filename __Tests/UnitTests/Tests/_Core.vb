@@ -18,7 +18,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Expected = Helpers.MakeRandomData(Cs.ChunkSize, 1)
+                        Dim Expected = Helpers.GenerateRandomData(Cs.ChunkSize, 1)
 
                         Cs.Write(0, Expected)
 
@@ -50,7 +50,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Data = Helpers.MakeRandomData(Cs.ChunkSize, 1)
+                        Dim Data = Helpers.GenerateRandomData(Cs.ChunkSize, 1)
 
                         Cs.Write(0, Data)
 
@@ -87,7 +87,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Original = Helpers.MakeRandomData(Cs.ChunkSize, 1)
+                        Dim Original = Helpers.GenerateRandomData(Cs.ChunkSize, 1)
 
                         Cs.Write(0, Original)
 
@@ -136,7 +136,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Dim Expected = Helpers.MakeRandomData(Cs.ChunkSize * 3, 1)
+                        Dim Expected = Helpers.GenerateRandomData(Cs.ChunkSize * 3, 1)
 
                         Cs.Write(0, Expected)
 
@@ -165,7 +165,7 @@ Namespace Tests
             Public Shared Sub StreamCompatibility_ZipArchiveRoundTrip()
 
                 Dim SourceData =
-                    Helpers.MakeRandomData(
+                    Helpers.GenerateRandomData(
                         1024 * 1024,
                         123)
 
@@ -251,7 +251,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Dim Data = MakeBuffer(ChunkedStream.DefaultChunkSize)
+                        Dim Data = GenerateZeroedData(ChunkedStream.DefaultChunkSize)
 
                         Cs.Write(0, Data)
 
@@ -312,11 +312,11 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Data = MakePattern(Length, 17)
+                        Dim Data = GeneratePatternData(Length, 17)
 
                         Cs.Write(Offset, Data)
 
-                        Dim Result = MakeBuffer(Data.Length)
+                        Dim Result = GenerateZeroedData(Data.Length)
                         Dim BytesRead = Cs.Read(Offset, Result)
 
                         If BytesRead <> Data.Length Then
@@ -345,7 +345,7 @@ Namespace Tests
 
                         Cs.SetLength(CLng(ChunkedStream.DefaultChunkSize) * 10L)
 
-                        Dim Output = MakeBuffer(4096)
+                        Dim Output = GenerateZeroedData(4096)
                         Dim ReadOffset = CLng(ChunkedStream.DefaultChunkSize) * CLng(ChunkOffset)
 
                         Cs.Read(ReadOffset, Output)
@@ -374,7 +374,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Data = MakePattern(200000, 99)
+                        Dim Data = GeneratePatternData(200000, 99)
 
                         Cs.Write(0, Data)
 
@@ -404,7 +404,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Data = MakePattern(InitialLength, 41)
+                        Dim Data = GeneratePatternData(InitialLength, 41)
 
                         Cs.Write(0, Data)
                         Cs.SetLength(FinalLength)
@@ -413,7 +413,7 @@ Namespace Tests
                             Return False
                         End If
 
-                        Dim Result = MakeBuffer(FinalLength)
+                        Dim Result = GenerateZeroedData(FinalLength)
                         Dim BytesRead = Cs.Read(0, Result)
 
                         If BytesRead <> FinalLength Then
@@ -473,7 +473,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Result = MakeBuffer(Data.Length)
+                        Dim Result = GenerateZeroedData(Data.Length)
                         Dim BytesRead = Cs.Read(123, Result)
 
                         AssertEqual(Data.Length, BytesRead, "Unexpected byte count after reopen.")
@@ -495,12 +495,12 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Data = MakePattern(1000, 31)
+                        Dim Data = GeneratePatternData(1000, 31)
 
                         Cs.Write(0, Data)
                         Cs.SetLength(CLng(ChunkedStream.DefaultChunkSize) * 3L)
 
-                        Dim Output = MakeBuffer(4096)
+                        Dim Output = GenerateZeroedData(4096)
                         Cs.Read(ChunkedStream.DefaultChunkSize * 2L, Output)
 
                         For Each value In Output
@@ -525,8 +525,8 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Original = MakePattern(ChunkedStream.DefaultChunkSize * 2, 37)
-                        Dim Patch = MakePattern(1000, 43)
+                        Dim Original = GeneratePatternData(ChunkedStream.DefaultChunkSize * 2, 37)
+                        Dim Patch = GeneratePatternData(1000, 43)
                         Dim PatchOffset = ChunkedStream.DefaultChunkSize - 500
 
                         Cs.Write(0, Original)
@@ -535,7 +535,7 @@ Namespace Tests
                         Dim Expected = DirectCast(Original.Clone(), Byte())
                         Buffer.BlockCopy(Patch, 0, Expected, PatchOffset, Patch.Length)
 
-                        Dim Result = MakeBuffer(Expected.Length)
+                        Dim Result = GenerateZeroedData(Expected.Length)
                         Cs.Read(0, Result)
 
                         AssertBytesEqual(Expected, Result, "Partial overwrite corrupted unaffected bytes.")
@@ -556,7 +556,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Cs.Write(0, MakePattern(200000, 47))
+                        Cs.Write(0, GeneratePatternData(200000, 47))
                         Cs.Validate()
 
                     End Using
@@ -575,7 +575,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Cs.Write(0, MakePattern(100000, 53))
+                        Cs.Write(0, GeneratePatternData(100000, 53))
 
                         Dim Struct = Cs.GetStructure()
                         Dim FirstChunk = Struct.Chunks.First(Function(chunk) chunk.IsAllocated)
@@ -615,7 +615,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Cs.Write(0, MakePattern(ChunkedStream.DefaultChunkSize * 2, 59))
+                        Cs.Write(0, GeneratePatternData(ChunkedStream.DefaultChunkSize * 2, 59))
 
                         Dim Struct = Cs.GetStructure()
 
@@ -650,11 +650,11 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Expected = CreateFragmentedContent(Cs)
+                        Dim Expected = GenerateFragmentedData(Cs)
 
                         Cs.Defragment(Type)
 
-                        Dim Result = MakeBuffer(Expected.Length)
+                        Dim Result = GenerateZeroedData(Expected.Length)
                         Dim BytesRead = Cs.Read(0, Result)
 
                         AssertEqual(Expected.Length, BytesRead, $"Unexpected byte count after {Type}.")
@@ -678,7 +678,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Expected = CreateFragmentedContent(Cs)
+                        Dim Expected = GenerateFragmentedData(Cs)
                         Dim Before = Cs.GetFragmentation()
 
                         Cs.Defragment(ChunkedStream.DefragTypes.Move)
@@ -689,7 +689,7 @@ Namespace Tests
                             Throw New Exception($"Move defrag increased fragmentation. Before={Before}, After={After}.")
                         End If
 
-                        Dim Result = MakeBuffer(Expected.Length)
+                        Dim Result = GenerateZeroedData(Expected.Length)
                         Cs.Read(0, Result)
 
                         AssertBytesEqual(Expected, Result, "Move defrag corrupted data.")

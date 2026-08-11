@@ -4,14 +4,14 @@ Namespace Tests
 
     Public Module Helpers
 
-        Friend Function CreateFragmentedContent(Cs As ChunkedStream) As Byte()
+        Friend Function GenerateFragmentedData(Cs As ChunkedStream) As Byte()
 
             Dim TotalLength = ChunkedStream.DefaultChunkSize * 8
-            Dim Expected = MakeBuffer(TotalLength)
+            Dim Expected = GenerateZeroedData(TotalLength)
 
             For ChunkIndex = 0 To 7
 
-                Dim Data = MakePattern(ChunkedStream.DefaultChunkSize, 100 + ChunkIndex)
+                Dim Data = GeneratePatternData(ChunkedStream.DefaultChunkSize, 100 + ChunkIndex)
                 Dim Offset = ChunkIndex * ChunkedStream.DefaultChunkSize
 
                 Cs.Write(Offset, Data)
@@ -21,7 +21,7 @@ Namespace Tests
 
             For ChunkIndex = 0 To 7 Step 2
 
-                Dim Data = MakePattern(ChunkedStream.DefaultChunkSize, 200 + ChunkIndex)
+                Dim Data = GeneratePatternData(ChunkedStream.DefaultChunkSize, 200 + ChunkIndex)
                 Dim Offset = ChunkIndex * ChunkedStream.DefaultChunkSize
 
                 Cs.Write(Offset, Data)
@@ -31,7 +31,7 @@ Namespace Tests
 
             For ChunkIndex = 1 To 7 Step 2
 
-                Dim Data = MakePattern(ChunkedStream.DefaultChunkSize, 300 + ChunkIndex)
+                Dim Data = GeneratePatternData(ChunkedStream.DefaultChunkSize, 300 + ChunkIndex)
                 Dim Offset = ChunkIndex * ChunkedStream.DefaultChunkSize
 
                 Cs.Write(Offset, Data)
@@ -43,7 +43,7 @@ Namespace Tests
 
         End Function
 
-        Friend Function MakeBuffer(Length As Integer) As Byte()
+        Friend Function GenerateZeroedData(Length As Integer) As Byte()
 
             If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
             If Length = 0 Then Return New Byte() {}
@@ -52,10 +52,10 @@ Namespace Tests
 
         End Function
 
-        Friend Function MakePattern(Length As Integer,
-                                     Seed As Integer) As Byte()
+        Friend Function GeneratePatternData(Length As Integer,
+                                            Seed As Integer) As Byte()
 
-            Dim Result = MakeBuffer(Length)
+            Dim Result = GenerateZeroedData(Length)
 
             For Index = 0 To Result.Length - 1
                 Result(Index) = CByte(((Index * 31) + Seed + (Index \ 7)) And &HFF)
@@ -65,10 +65,10 @@ Namespace Tests
 
         End Function
 
-        Friend Function MakeRandomData(Length As Integer,
-                                       Seed As Integer) As Byte()
+        Friend Function GenerateRandomData(Length As Integer,
+                                           Seed As Integer) As Byte()
 
-            Dim Result = MakeBuffer(Length)
+            Dim Result = GenerateZeroedData(Length)
 
             Dim rng As New Random(Seed)
 
@@ -79,26 +79,26 @@ Namespace Tests
 
         End Function
 
-        Friend Function MakeCompressableData(CompressableRatio As Double,
-                                             Length As Integer,
-                                             Seed As Integer) As Byte()
+        Friend Function GenerateCompressableData(CompressableRatio As Double,
+                                                 Length As Integer,
+                                                 Seed As Integer) As Byte()
 
             Dim RandomDataPartLen = CInt(Length * CompressableRatio)
             Dim PatternPartLen = Length - RandomDataPartLen
-            Dim Result = MakeRandomData(RandomDataPartLen, Seed).Concat(
-                         MakeRepeatingPattern(PatternPartLen, Seed)).
+            Dim Result = GenerateRandomData(RandomDataPartLen, Seed).Concat(
+                         GenerateRepeatingPattern(PatternPartLen, Seed)).
                          ToArray()
 
             Return Result
 
         End Function
 
-        Friend Function MakeRepeatingPattern(Length As Integer,
-                                              Period As Integer) As Byte()
+        Friend Function GenerateRepeatingPattern(Length As Integer,
+                                                 Period As Integer) As Byte()
 
             If Period <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Period))
 
-            Dim Result = MakeBuffer(Length)
+            Dim Result = GenerateZeroedData(Length)
 
             For Index = 0 To Result.Length - 1
                 Result(Index) = CByte((Index Mod Period) + 65)
@@ -110,7 +110,7 @@ Namespace Tests
 
         Friend Function MakeKey(Seed As Integer) As Byte()
 
-            Dim Result = MakeBuffer(32)
+            Dim Result = GenerateZeroedData(32)
 
             For Index = 0 To Result.Length - 1
                 Result(Index) = CByte(((Seed * 17) + (Index * 13)) And &HFF)

@@ -16,17 +16,17 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Original = MakePattern(10000, 1)
+                        Dim Original = GeneratePatternData(10000, 1)
 
                         Cs.Write(0, Original)
 
                         Using Checkpoint = Cs.CreateCheckpoint()
 
-                            Cs.Write(0, MakePattern(10000, 2))
+                            Cs.Write(0, GeneratePatternData(10000, 2))
 
                         End Using
 
-                        Dim Result = MakeBuffer(Original.Length)
+                        Dim Result = GenerateZeroedData(Original.Length)
 
                         Cs.Read(0, Result)
 
@@ -51,8 +51,8 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Original = MakePattern(10000, 1)
-                        Dim Updated = MakePattern(10000, 2)
+                        Dim Original = GeneratePatternData(10000, 1)
+                        Dim Updated = GeneratePatternData(10000, 2)
 
                         Cs.Write(0, Original)
 
@@ -64,7 +64,7 @@ Namespace Tests
 
                         End Using
 
-                        Dim Result = MakeBuffer(Updated.Length)
+                        Dim Result = GenerateZeroedData(Updated.Length)
 
                         Cs.Read(0, Result)
 
@@ -89,19 +89,19 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Original = MakePattern(10000, 1)
+                        Dim Original = GeneratePatternData(10000, 1)
 
                         Cs.Write(0, Original)
 
                         Using Checkpoint = Cs.CreateCheckpoint()
 
-                            Cs.Write(0, MakePattern(10000, 2))
+                            Cs.Write(0, GeneratePatternData(10000, 2))
 
                             Checkpoint.Rollback()
 
                         End Using
 
-                        Dim Result = MakeBuffer(Original.Length)
+                        Dim Result = GenerateZeroedData(Original.Length)
 
                         Cs.Read(0, Result)
 
@@ -127,13 +127,13 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Updated = MakePattern(10000, 2)
+                        Dim Updated = GeneratePatternData(10000, 2)
 
                         Using Checkpoint = Cs.CreateCheckpoint()
 
                             Cs.Write(0, Updated)
 
-                            Dim Result = MakeBuffer(Updated.Length)
+                            Dim Result = GenerateZeroedData(Updated.Length)
 
                             Cs.Read(0, Result)
 
@@ -162,17 +162,17 @@ Namespace Tests
 
                         Using Outer = Cs.CreateCheckpoint()
 
-                            Dim OuterData = MakePattern(10000, 1)
+                            Dim OuterData = GeneratePatternData(10000, 1)
 
                             Cs.Write(0, OuterData)
 
                             Using Inner = Cs.CreateCheckpoint()
 
-                                Cs.Write(0, MakePattern(10000, 2))
+                                Cs.Write(0, GeneratePatternData(10000, 2))
 
                             End Using
 
-                            Dim Result = MakeBuffer(OuterData.Length)
+                            Dim Result = GenerateZeroedData(OuterData.Length)
 
                             Cs.Read(0, Result)
 
@@ -201,7 +201,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Updated = MakePattern(10000, 3)
+                        Dim Updated = GeneratePatternData(10000, 3)
 
                         Using Outer = Cs.CreateCheckpoint()
 
@@ -213,7 +213,7 @@ Namespace Tests
 
                             End Using
 
-                            Dim Result = MakeBuffer(Updated.Length)
+                            Dim Result = GenerateZeroedData(Updated.Length)
 
                             Cs.Read(0, Result)
 
@@ -242,7 +242,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Original = MakePattern(10000, 1)
+                        Dim Original = GeneratePatternData(10000, 1)
 
                         Cs.Write(0, Original)
 
@@ -250,7 +250,7 @@ Namespace Tests
 
                             Using Inner = Cs.CreateCheckpoint()
 
-                                Cs.Write(0, MakePattern(10000, 2))
+                                Cs.Write(0, GeneratePatternData(10000, 2))
 
                                 Inner.Commit()
 
@@ -258,7 +258,7 @@ Namespace Tests
 
                         End Using
 
-                        Dim Result = MakeBuffer(Original.Length)
+                        Dim Result = GenerateZeroedData(Original.Length)
 
                         Cs.Read(0, Result)
 
@@ -313,7 +313,7 @@ Namespace Tests
 
                         Using Checkpoint = Cs.CreateCheckpoint()
 
-                            Cs.Write(0, MakeRepeatingPattern(500000, 8))
+                            Cs.Write(0, GenerateRepeatingPattern(500000, 8))
 
                             AssertTrue(
                                 Ms.Length > InitialPhysicalLength,
@@ -340,7 +340,7 @@ Namespace Tests
 
                 Using Ms As New MemoryStream()
 
-                    Dim Data = MakePattern(100000, 123)
+                    Dim Data = GeneratePatternData(100000, 123)
 
                     Using Cs = ChunkedStream.Open(Ms)
 
@@ -356,7 +356,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Result = MakeBuffer(Data.Length)
+                        Dim Result = GenerateZeroedData(Data.Length)
 
                         Cs.Read(0, Result)
 

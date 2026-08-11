@@ -61,6 +61,40 @@ Namespace Streams
             End Property
 
             ''' <summary>
+            ''' Controls where newly written physical chunk records are placed.
+            ''' </summary>
+            Public Enum NewChunkWriteLocationPolicies
+                ''' <summary>
+                ''' Writes new chunk records at the current append position.
+                ''' This is the fastest policy for write-heavy workloads because it avoids scanning
+                ''' the existing physical layout for reusable holes. It may increase fragmentation
+                ''' and physical file size until defragmentation is performed.
+                ''' </summary>
+                Append = 0
+
+                ''' <summary>
+                ''' Attempts to place new chunk records into existing unreferenced holes when a
+                ''' suitable hole is available. This can reduce physical file growth during repeated
+                ''' random overwrites, but adds layout-scanning overhead to writes and may perform
+                ''' worse for write-heavy workloads.
+                ''' </summary>
+                FillHoles = 1
+            End Enum
+
+            ''' <summary>
+            ''' Gets or sets the placement policy used for newly written physical chunk records.
+            ''' </summary>
+            ''' <remarks>
+            ''' This setting affects newly written chunk records only. Existing layout is not
+            ''' reorganised by changing this value. Use Defragment to actively compact or reorder
+            ''' existing records.
+            '''
+            ''' When a checkpoint is active, ChunkedStream always uses append behaviour to preserve
+            ''' checkpoint rollback and crash-recovery semantics.
+            ''' </remarks>
+            Public Property NewChunkWriteLocationPolicy As NewChunkWriteLocationPolicies = NewChunkWriteLocationPolicies.Append
+
+            ''' <summary>
             ''' Raised when EncryptionInfo changes.
             ''' </summary>
             Friend Event EncryptionInfoChanged(OldValue As EncryptionInfo, NewValue As EncryptionInfo)

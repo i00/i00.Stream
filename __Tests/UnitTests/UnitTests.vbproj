@@ -79,6 +79,7 @@
     <Compile Include="Tests\Checkpoints.vb" />
     <Compile Include="Tests\CompressionAndEncryption.vb" />
     <Compile Include="Helpers.vb" />
+    <Compile Include="Tests\Recovery.vb" />
     <Compile Include="Tests\_Core.vb" />
     <Compile Include="My Project\AssemblyInfo.vb" />
     <Compile Include="My Project\Application.Designer.vb">

@@ -6,6 +6,151 @@ Namespace Tests
         Public NotInheritable Class ChangingOptions
 
             ''' <summary>
+            ''' Verifies that FillHoles reuses freed chunk-record space whereas Append always
+            ''' extends the physical chunk data area.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub NewChunkWriteLocationPolicy_FillHolesUsesFreedSpace()
+
+                Dim FillStream =
+                    Function(Cs As ChunkedStream) As FillStreamResult
+
+                        For ChunkIndex = 0 To 3
+
+                            Cs.Write(
+                                ChunkIndex * ChunkedStream.DefaultChunkSize,
+                                GeneratePatternData(
+                                    ChunkedStream.DefaultChunkSize,
+                                    100 + ChunkIndex))
+
+                        Next
+
+                        Dim OriginalChunk1Offset =
+                            Cs.GetStructure().
+                               Chunks.
+                               Single(Function(chunk) chunk.Index = 1).
+                               PhysicalOffset.Value
+
+                        '
+                        ' Rewrite chunk 1.
+                        '
+                        Cs.Write(
+                            ChunkedStream.DefaultChunkSize,
+                            GeneratePatternData(
+                                ChunkedStream.DefaultChunkSize,
+                                999))
+
+                        '
+                        ' Add a brand-new chunk.
+                        '
+                        Cs.Write(
+                            ChunkedStream.DefaultChunkSize * 4L,
+                            GeneratePatternData(
+                                ChunkedStream.DefaultChunkSize,
+                                1234))
+
+                        Dim Struct = Cs.GetStructure()
+
+                        Dim Chunk1 =
+                            Struct.Chunks.
+                                   Single(Function(chunk) chunk.Index = 1)
+
+                        Dim Chunk4 =
+                            Struct.Chunks.
+                                   Single(Function(chunk) chunk.Index = 4)
+
+                        Return New FillStreamResult With {
+                            .OriginalChunk1Offset = OriginalChunk1Offset,
+                            .Chunk1Offset = Chunk1.PhysicalOffset.Value,
+                            .Chunk4Offset = Chunk4.PhysicalOffset.Value,
+                            .LiveDataEndOffset = Struct.LiveDataEndOffset
+                        }
+
+                    End Function
+
+                Dim AppendResult As FillStreamResult
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .NewChunkWriteLocationPolicy =
+                            ChunkedStream.ChunkedStreamOptions.NewChunkWriteLocationPolicies.Append
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        AppendResult = FillStream(Cs)
+
+                    End Using
+
+                End Using
+
+                Dim FillHolesResult As FillStreamResult
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .NewChunkWriteLocationPolicy =
+                            ChunkedStream.ChunkedStreamOptions.NewChunkWriteLocationPolicies.FillHoles
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        FillHolesResult = FillStream(Cs)
+
+                    End Using
+
+                End Using
+
+                '
+                ' Rewrites should always move the chunk.
+                '
+                AssertTrue(
+                    AppendResult.Chunk1Offset <> AppendResult.OriginalChunk1Offset,
+                    "Append mode rewrite should move chunk 1 to a new physical location.")
+
+                AssertTrue(
+                    FillHolesResult.Chunk1Offset <> FillHolesResult.OriginalChunk1Offset,
+                    "FillHoles mode rewrite should move chunk 1 to a new physical location.")
+
+                '
+                ' Append must not reuse the original chunk 1 hole.
+                '
+                AssertTrue(
+                    AppendResult.Chunk4Offset <> AppendResult.OriginalChunk1Offset,
+                    "Append mode should not reuse the hole created by the original chunk 1.")
+
+                '
+                ' FillHoles should reuse the original chunk 1 hole.
+                '
+                AssertEqual(
+                    FillHolesResult.OriginalChunk1Offset,
+                    FillHolesResult.Chunk4Offset,
+                    "FillHoles mode should reuse the hole created by the original chunk 1.")
+
+                '
+                ' FillHoles should use less physical space.
+                '
+                AssertTrue(
+                    FillHolesResult.LiveDataEndOffset < AppendResult.LiveDataEndOffset,
+                    $"FillHoles should use less physical space. Append={AppendResult.LiveDataEndOffset}, FillHoles={FillHolesResult.LiveDataEndOffset}.")
+
+            End Sub
+
+            Private NotInheritable Class FillStreamResult
+
+                Public Property OriginalChunk1Offset As Long
+
+                Public Property Chunk1Offset As Long
+
+                Public Property Chunk4Offset As Long
+
+                Public Property LiveDataEndOffset As Long
+
+            End Class
+
+
+            ''' <summary>
             ''' Verifies that ApplyOptions can apply compression without corrupting data.
             ''' </summary>
             <UnitTester.SimpleTest()>
@@ -15,7 +160,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Data = MakeRepeatingPattern(200000, 8)
+                        Dim Data = GenerateRepeatingPattern(200000, 8)
 
                         Cs.Write(0, Data)
 
@@ -48,7 +193,7 @@ Namespace Tests
 
                 Using Ms As New MemoryStream()
 
-                    Dim Data = Helpers.MakePattern(ChunkedStream.DefaultChunkSize * 3, 42)
+                    Dim Data = Helpers.GeneratePatternData(ChunkedStream.DefaultChunkSize * 3, 42)
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .EncryptionInfo = New ChunkedStream.EncryptionInfo(Helpers.MakeKey(42))
@@ -109,7 +254,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Data = MakePattern(200000, 88)
+                        Dim Data = GeneratePatternData(200000, 88)
 
                         Cs.Write(0, Data)
 
@@ -145,7 +290,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Cs.Write(0, MakeBuffer(ChunkedStream.DefaultChunkSize))
+                        Cs.Write(0, GenerateZeroedData(ChunkedStream.DefaultChunkSize))
 
                         Dim Before = Cs.GetStructure()
 
@@ -219,7 +364,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Dim Data = MakeRepeatingPattern(200000, 8)
+                        Dim Data = GenerateRepeatingPattern(200000, 8)
 
                         Cs.Write(0, Data)
 
@@ -259,7 +404,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Data = MakePattern(100000, 44)
+                        Dim Data = GeneratePatternData(100000, 44)
 
                         Cs.Write(0, Data)
 
@@ -284,7 +429,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Data = MakeRepeatingPattern(200000, 8)
+                        Dim Data = GenerateRepeatingPattern(200000, 8)
 
                         Cs.Write(0, Data)
 
@@ -330,7 +475,7 @@ Namespace Tests
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
                         Dim Data =
-                            Helpers.MakeCompressableData(
+                            Helpers.GenerateCompressableData(
                                 0.5,
                                 ChunkedStream.DefaultChunkSize,
                                 8)
@@ -373,7 +518,7 @@ Namespace Tests
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
                         Dim Data =
-                            Helpers.MakeCompressableData(
+                            Helpers.GenerateCompressableData(
                                 0.5,
                                 ChunkedStream.DefaultChunkSize,
                                 8)
@@ -411,7 +556,7 @@ Namespace Tests
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
                         Dim Data =
-                            Helpers.MakeCompressableData(
+                            Helpers.GenerateCompressableData(
                                 0.5,
                                 ChunkedStream.DefaultChunkSize,
                                 8)
@@ -466,7 +611,7 @@ Namespace Tests
                         Dim Chunks = 6
                         For i = 0 To (Chunks - 1)
                             Cs.Write(i * ChunkedStream.DefaultChunkSize,
-                                 Helpers.MakeCompressableData(
+                                 Helpers.GenerateCompressableData(
                                      i / (Chunks - 1),
                                      ChunkedStream.DefaultChunkSize,
                                      1))
@@ -509,7 +654,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Dim Data = Helpers.MakeRandomData(300000, 123)
+                        Dim Data = Helpers.GenerateRandomData(300000, 123)
 
                         Cs.Write(0, Data)
 

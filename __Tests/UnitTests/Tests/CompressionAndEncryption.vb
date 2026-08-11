@@ -23,7 +23,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Cs.Write(0, MakeBuffer(ChunkedStream.DefaultChunkSize))
+                        Cs.Write(0, GenerateZeroedData(ChunkedStream.DefaultChunkSize))
 
                         Dim Struct = Cs.GetStructure()
                         Dim Chunk = Struct.Chunks.First()
@@ -57,11 +57,11 @@ Namespace Tests
 
                         Using Cs = ChunkedStream.Open(Ms, Options)
 
-                            Dim Data = MakeRepeatingPattern(200000, 8)
+                            Dim Data = GenerateRepeatingPattern(200000, 8)
 
                             Cs.Write(0, Data)
 
-                            Dim Result = MakeBuffer(Data.Length)
+                            Dim Result = GenerateZeroedData(Data.Length)
                             Dim BytesRead = Cs.Read(0, Result)
 
                             If BytesRead <> Data.Length Then
@@ -103,7 +103,7 @@ Namespace Tests
                             .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(1))
                         }
 
-                    Dim Data = MakePattern(Length, 29)
+                    Dim Data = GeneratePatternData(Length, 29)
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
                         Cs.Write(0, Data)
@@ -111,7 +111,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Dim Result = MakeBuffer(Data.Length)
+                        Dim Result = GenerateZeroedData(Data.Length)
                         Dim BytesRead = Cs.Read(0, Result)
 
                         If BytesRead <> Data.Length Then
@@ -148,7 +148,7 @@ Namespace Tests
                             .CompressionRatioThreshold = 0.99
                         }
 
-                    Dim Data = MakeRepeatingPattern(250000, 5)
+                    Dim Data = GenerateRepeatingPattern(250000, 5)
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
                         Cs.Write(0, Data)
@@ -156,7 +156,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Dim Result = MakeBuffer(Data.Length)
+                        Dim Result = GenerateZeroedData(Data.Length)
                         Dim BytesRead = Cs.Read(0, Result)
 
                         AssertEqual(Data.Length, BytesRead, "Unexpected byte count after compressed reopen.")
@@ -181,7 +181,7 @@ Namespace Tests
                         }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
-                        Cs.Write(0, MakePattern(10000, 7))
+                        Cs.Write(0, GeneratePatternData(10000, 7))
                     End Using
 
                     AssertThrows(Of StreamEncryption.Streams.ChunkedStream.EncryptionMismatchException)(
@@ -212,7 +212,7 @@ Namespace Tests
                         }
 
                     Using Cs = ChunkedStream.Open(Ms, CorrectOptions)
-                        Cs.Write(0, MakePattern(10000, 11))
+                        Cs.Write(0, GeneratePatternData(10000, 11))
                     End Using
 
                     AssertThrows(Of StreamEncryption.Streams.ChunkedStream.EncryptionMismatchException)(
@@ -238,7 +238,7 @@ Namespace Tests
                             .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(5))
                         }
 
-                    Dim Data = MakePattern(120000, 13)
+                    Dim Data = GeneratePatternData(120000, 13)
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
@@ -249,7 +249,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim Result = MakeBuffer(Data.Length)
+                        Dim Result = GenerateZeroedData(Data.Length)
                         Dim BytesRead = Cs.Read(0, Result)
 
                         AssertEqual(Data.Length, BytesRead, "Unexpected byte count after public reopen.")
@@ -269,8 +269,8 @@ Namespace Tests
 
                 Using Ms As New MemoryStream()
 
-                    Dim PlainData = MakePattern(ChunkedStream.DefaultChunkSize, 19)
-                    Dim EncryptedData = MakePattern(ChunkedStream.DefaultChunkSize, 23)
+                    Dim PlainData = GeneratePatternData(ChunkedStream.DefaultChunkSize, 19)
+                    Dim EncryptedData = GeneratePatternData(ChunkedStream.DefaultChunkSize, 23)
 
                     Using Cs = ChunkedStream.Open(Ms)
 
@@ -278,8 +278,8 @@ Namespace Tests
                         Cs.Options.EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(6))
                         Cs.Write(ChunkedStream.DefaultChunkSize, EncryptedData)
 
-                        Dim PlainResult = MakeBuffer(PlainData.Length)
-                        Dim EncryptedResult = MakeBuffer(EncryptedData.Length)
+                        Dim PlainResult = GenerateZeroedData(PlainData.Length)
+                        Dim EncryptedResult = GenerateZeroedData(EncryptedData.Length)
 
                         Cs.Read(0, PlainResult)
                         Cs.Read(ChunkedStream.DefaultChunkSize, EncryptedResult)
@@ -312,7 +312,7 @@ Namespace Tests
                             .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(7))
                         }
 
-                    Dim Data = MakeRepeatingPattern(300000, 12)
+                    Dim Data = GenerateRepeatingPattern(300000, 12)
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
                         Cs.Write(0, Data)
@@ -320,7 +320,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Dim Result = MakeBuffer(Data.Length)
+                        Dim Result = GenerateZeroedData(Data.Length)
                         Dim BytesRead = Cs.Read(0, Result)
 
                         AssertEqual(Data.Length, BytesRead, "Unexpected compressed/encrypted byte count.")
