@@ -52,8 +52,6 @@
                     Dim BaseIndent = 1
 
                     For Each iTest In iTestRunner.Tests
-                        iTest.Run()
-
                         'get the category difference...
                         Dim ThisCategory = iTest.CategoryPath.ToList
                         Dim JoinedCats = LastCategory.FullOuterJoin(ThisCategory, Function(x) LastCategory.IndexOf(x), Function(y) ThisCategory.IndexOf(y), Function(x, y) New With {.Last = x, .Current = y}).
@@ -69,6 +67,8 @@
                                 Write(Cat.Current & ":", iCat + BaseIndent)
                             End If
                         Next
+                        iTest.Run()
+
                         'now print any results
                         For Each iResult In iTest.Results
                             Dim Color = DefaultConsoleColor

@@ -1353,7 +1353,10 @@ Namespace Streams
                         CloseCheckpoint(_CheckpointStack(_CheckpointStack.Count - 1))
                     End While
 
-                    If _Fs.CanWrite Then _Fs.Flush()
+                    If Disposing AndAlso _Fs IsNot Nothing AndAlso _Fs.CanWrite Then
+                        PersistIndexAndHeader(_IndexOffset, True)
+                        _Fs.Flush()
+                    End If
 
                 Finally
 

@@ -1,54 +1,147 @@
-﻿Imports System.Runtime.CompilerServices
-Imports System.Runtime.InteropServices
+﻿Imports System.Collections.Generic
+Imports System.Drawing
+Imports System.Linq
+Imports System.Runtime.CompilerServices
 
 Partial Module Extensions
 
     Public Class FragmentationDrawOptions
 
-        Public Enum SegmentColorTypes
-            Header
-            Chunk
-            Hole
-            Index
-            Unused
-            Unknown
-        End Enum
-
         Public Enum RenderLengthModes
+
+            ''' <summary>
+            ''' Render using the physical end offset of the highest referenced live chunk record.
+            ''' </summary>
             LiveDataEndOffset
+
+            ''' <summary>
+            ''' Render using the physical end offset of the live data and metadata area.
+            ''' </summary>
             DataAreaEndOffset
-            IndexEndOffset
+
+            ''' <summary>
+            ''' Render using the physical end offset of the active metadata root.
+            ''' </summary>
+            MetadataRootEndOffset
+
+            ''' <summary>
+            ''' Render using the full physical backing-stream length.
+            ''' </summary>
             PhysicalLength
+
         End Enum
-
-        Public Property Colors As New Dictionary(Of SegmentColorTypes, Color) From
-        {
-            {SegmentColorTypes.Header, Color.DarkBlue},
-            {SegmentColorTypes.Chunk, Color.LimeGreen},
-            {SegmentColorTypes.Hole, Color.Red},
-            {SegmentColorTypes.Index, Color.DarkGreen},
-            {SegmentColorTypes.Unused, Color.LightGray},
-            {SegmentColorTypes.Unknown, Color.Transparent}
-        }
-
-        Public Property BackgroundColor As Color = Color.Black
-
-        Public Property BorderColor As Color = Color.Transparent
-
-        Public Property PixelPadding As Integer = 0
-
-        ''' <summary>
-        ''' Controls which stream length is used when mapping physical offsets to pixels.
-        ''' LiveDataEndOffset most closely matches the original in-stream renderer.
-        ''' </summary>
-        Public Property RenderLengthMode As RenderLengthModes = RenderLengthModes.LiveDataEndOffset
 
         Public Delegate Sub RegionPainterDelegate(Surface As Graphics,
                                                    Bounds As Rectangle,
                                                    SuggestedColor As Color,
-                                                   Region As Streams.ChunkedStreamStructure.Region)
+                                                   Regions As Streams.ChunkedStreamStructure.Region())
 
+        Public Delegate Function RegionColorSelectorDelegate(Regions As Streams.ChunkedStreamStructure.Region(),
+                                                             SuggestedColor As Color) As Color
+
+        Public Shared ReadOnly DefaultRegionPainter As RegionPainterDelegate =
+            Sub(Surface, Bounds, SuggestedColor, Regions)
+
+                If Surface Is Nothing Then Throw New ArgumentNullException(NameOf(Surface))
+                If Bounds.Width <= 0 OrElse Bounds.Height <= 0 Then Return
+                If SuggestedColor.A = 0 Then Return
+
+                Using Brush As New SolidBrush(SuggestedColor)
+                    Surface.FillRectangle(Brush, Bounds)
+                End Using
+
+            End Sub
+
+        Public Shared ReadOnly DefaultRegionColorSelector As RegionColorSelectorDelegate =
+            Function(Regions, SuggestedColor)
+                Return SuggestedColor
+            End Function
+
+        Private _RegionPainter As RegionPainterDelegate = DefaultRegionPainter
+        Private _RegionColorSelector As RegionColorSelectorDelegate = DefaultRegionColorSelector
+
+        ''' <summary>
+        ''' Colours used for each physical region type.
+        ''' </summary>
+        Public Property Colors As New Dictionary(Of Streams.ChunkedStreamStructure.RegionTypes, Color) From
+        {
+            {Streams.ChunkedStreamStructure.RegionTypes.Header, Color.DarkBlue},
+            {Streams.ChunkedStreamStructure.RegionTypes.Chunk, Color.LimeGreen},
+            {Streams.ChunkedStreamStructure.RegionTypes.Hole, Color.Red},
+            {Streams.ChunkedStreamStructure.RegionTypes.Index, Color.DarkGreen},
+            {Streams.ChunkedStreamStructure.RegionTypes.IndexPage, Color.DarkGreen},
+            {Streams.ChunkedStreamStructure.RegionTypes.ChunkIndexDirectoryPage, Color.ForestGreen},
+            {Streams.ChunkedStreamStructure.RegionTypes.HoleDirectoryPage, Color.Orange},
+            {Streams.ChunkedStreamStructure.RegionTypes.MetadataRoot, Color.Gold},
+            {Streams.ChunkedStreamStructure.RegionTypes.Unused, Color.LightGray},
+            {Streams.ChunkedStreamStructure.RegionTypes.Unknown, Color.Transparent}
+        }
+
+        ''' <summary>
+        ''' Background colour used before rendering structure blocks.
+        ''' </summary>
+        Public Property BackgroundColor As Color = Color.Black
+
+        ''' <summary>
+        ''' Optional border colour drawn around the output rectangle.
+        ''' </summary>
+        Public Property BorderColor As Color = Color.Transparent
+
+        ''' <summary>
+        ''' Padding applied inside each rendered block.
+        ''' </summary>
+        Public Property PixelPadding As Integer = 0
+
+        ''' <summary>
+        ''' Maximum number of horizontal blocks used when rendering.
+        ''' If Nothing, less than or equal to zero, or greater than the target width,
+        ''' the target width is used.
+        ''' </summary>
+        ''' <remarks>
+        ''' For example, a 400px wide bitmap with MaxBlockCount = 10 renders
+        ''' 10 horizontal blocks, each approximately 40px wide.
+        ''' If MaxBlockCount = 8000 for the same bitmap, 400 horizontal blocks are used.
+        ''' </remarks>
+        Public Property MaxBlockCount As Integer?
+
+        ''' <summary>
+        ''' Controls which stream length is used when mapping physical offsets to blocks.
+        ''' </summary>
+        Public Property RenderLengthMode As RenderLengthModes = RenderLengthModes.LiveDataEndOffset
+
+        ''' <summary>
+        ''' Selects the final colour used for a rendered block after the default
+        ''' dominant-region colour has been calculated.
+        ''' </summary>
+        Public Property RegionColorSelector As RegionColorSelectorDelegate
+            Get
+                Return _RegionColorSelector
+            End Get
+            Set
+                If Value Is Nothing Then
+                    _RegionColorSelector = DefaultRegionColorSelector
+                Else
+                    _RegionColorSelector = Value
+                End If
+            End Set
+        End Property
+
+        ''' <summary>
+        ''' Paints a rendered block.
+        ''' The regions array contains all physical regions that overlap the block.
+        ''' </summary>
         Public Property RegionPainter As RegionPainterDelegate
+            Get
+                Return _RegionPainter
+            End Get
+            Set
+                If Value Is Nothing Then
+                    _RegionPainter = DefaultRegionPainter
+                Else
+                    _RegionPainter = Value
+                End If
+            End Set
+        End Property
 
     End Class
 
@@ -58,9 +151,23 @@ Partial Module Extensions
 
         Public Property EndOffset As Long
 
-        Public Property Colour As Color
+        Public Property Color As Color
 
         Public Property Region As Streams.ChunkedStreamStructure.Region
+
+    End Class
+
+    Private NotInheritable Class RenderBlock
+
+        Public Property BlockIndex As Long
+
+        Public Property Offset As Long
+
+        Public Property EndOffset As Long
+
+        Public Property SuggestedColor As Color
+
+        Public Property Regions As Streams.ChunkedStreamStructure.Region()
 
     End Class
 
@@ -78,14 +185,7 @@ Partial Module Extensions
             Options = New FragmentationDrawOptions()
         End If
 
-        If Options.RegionPainter Is Nothing AndAlso Options.PixelPadding <= 0 Then
-            Using Bitmap As New Bitmap(Rect.Width, Rect.Height, Imaging.PixelFormat.Format24bppRgb)
-                RenderToBitmap(ChunkedStreamStructure, Bitmap, Options)
-                Surface.DrawImageUnscaled(Bitmap, Rect.Location)
-            End Using
-        Else
-            DrawFragmentationWithGraphics(ChunkedStreamStructure, Surface, Rect, Options)
-        End If
+        DrawFragmentationBlocks(ChunkedStreamStructure, Surface, Rect, Options)
 
         If Options.BorderColor.A > 0 Then
             Using BorderPen As New Pen(Options.BorderColor)
@@ -120,117 +220,50 @@ Partial Module Extensions
 
         Dim Bitmap As New Bitmap(Size.Width, Size.Height, Imaging.PixelFormat.Format24bppRgb)
 
-        If Options.RegionPainter Is Nothing AndAlso Options.PixelPadding <= 0 Then
-            RenderToBitmap(ChunkedStreamStructure, Bitmap, Options)
-        Else
-            Using Surface = Graphics.FromImage(Bitmap)
-                ChunkedStreamStructure.DrawFragmentation(Surface, New Rectangle(Point.Empty, Size), Options)
-            End Using
-        End If
+        Using Surface = Graphics.FromImage(Bitmap)
+            DrawFragmentationBlocks(ChunkedStreamStructure, Surface, New Rectangle(Point.Empty, Size), Options)
 
-        If Options.BorderColor.A > 0 Then
-            Using Surface = Graphics.FromImage(Bitmap)
+            If Options.BorderColor.A > 0 Then
                 Using BorderPen As New Pen(Options.BorderColor)
                     Surface.DrawRectangle(BorderPen, 0, 0, Bitmap.Width - 1, Bitmap.Height - 1)
                 End Using
-            End Using
-        End If
+            End If
+        End Using
 
         Return Bitmap
 
     End Function
 
-    Private Sub RenderToBitmap(ChunkedStreamStructure As Streams.ChunkedStreamStructure,
-                               Bitmap As Bitmap,
-                               Options As FragmentationDrawOptions)
-
-        Dim BitmapData = Bitmap.LockBits(New Rectangle(0, 0, Bitmap.Width, Bitmap.Height),
-                                         Imaging.ImageLockMode.WriteOnly,
-                                         Imaging.PixelFormat.Format24bppRgb)
-
-        Try
-            Dim Stride = BitmapData.Stride
-            Dim AbsStride = Math.Abs(Stride)
-            Dim Buffer(AbsStride * Bitmap.Height - 1) As Byte
-
-            FillBuffer(Buffer,
-                       AbsStride,
-                       Bitmap.Width,
-                       Bitmap.Height,
-                       Options.BackgroundColor)
-
-            Dim RenderSegments = BuildRenderSegments(ChunkedStreamStructure, Options)
-            Dim TotalPixels = CLng(Bitmap.Width) * CLng(Bitmap.Height)
-            Dim TotalBytes = GetRenderLength(ChunkedStreamStructure, Options)
-
-            For Each segment In RenderSegments
-
-                If segment.Colour.A = 0 Then Continue For
-
-                Dim StartPixel = CLng(Math.Floor((segment.Offset / CDbl(TotalBytes)) * TotalPixels))
-                Dim EndPixel = CLng(Math.Ceiling((segment.EndOffset / CDbl(TotalBytes)) * TotalPixels))
-
-                If EndPixel <= StartPixel Then
-                    EndPixel = StartPixel + 1
-                End If
-
-                If StartPixel < 0 Then StartPixel = 0
-                If EndPixel > TotalPixels Then EndPixel = TotalPixels
-                If StartPixel >= TotalPixels Then Continue For
-
-                PaintPixelRange(Buffer,
-                                AbsStride,
-                                Bitmap.Width,
-                                Bitmap.Height,
-                                StartPixel,
-                                EndPixel,
-                                segment.Colour)
-
-            Next
-
-            Marshal.Copy(Buffer, 0, BitmapData.Scan0, Buffer.Length)
-
-        Finally
-            Bitmap.UnlockBits(BitmapData)
-        End Try
-
-    End Sub
-
-    Private Sub DrawFragmentationWithGraphics(ChunkedStreamStructure As Streams.ChunkedStreamStructure,
-                                              Surface As Graphics,
-                                              Rect As Rectangle,
-                                              Options As FragmentationDrawOptions)
+    Private Sub DrawFragmentationBlocks(ChunkedStreamStructure As Streams.ChunkedStreamStructure,
+                                        Surface As Graphics,
+                                        Rect As Rectangle,
+                                        Options As FragmentationDrawOptions)
 
         Using BackgroundBrush As New SolidBrush(Options.BackgroundColor)
             Surface.FillRectangle(BackgroundBrush, Rect)
         End Using
 
-        Dim RenderSegments = BuildRenderSegments(ChunkedStreamStructure, Options)
-        Dim TotalPixels = CLng(Rect.Width) * CLng(Rect.Height)
-        Dim TotalBytes = GetRenderLength(ChunkedStreamStructure, Options)
+        Dim HorizontalBlockCount = GetHorizontalBlockCount(Rect.Width, Options)
+        Dim RenderBlocks = BuildRenderBlocks(ChunkedStreamStructure, HorizontalBlockCount, Rect.Height, Options)
 
-        For Each segment In RenderSegments
+        For Each Block In RenderBlocks
 
-            If segment.Colour.A = 0 Then Continue For
+            Dim Bounds = GetBlockBounds(Rect, HorizontalBlockCount, Block.BlockIndex)
 
-            Dim StartPixel = CLng(Math.Floor((segment.Offset / CDbl(TotalBytes)) * TotalPixels))
-            Dim EndPixel = CLng(Math.Ceiling((segment.EndOffset / CDbl(TotalBytes)) * TotalPixels))
+            If Bounds.Width <= 0 OrElse Bounds.Height <= 0 Then Continue For
 
-            If EndPixel <= StartPixel Then
-                EndPixel = StartPixel + 1
+            If Options.PixelPadding > 0 Then
+
+                Bounds.Inflate(-Options.PixelPadding, -Options.PixelPadding)
+
+                If Bounds.Width <= 0 OrElse Bounds.Height <= 0 Then Continue For
+
             End If
 
-            If StartPixel < 0 Then StartPixel = 0
-            If EndPixel > TotalPixels Then EndPixel = TotalPixels
-            If StartPixel >= TotalPixels Then Continue For
-
-            PaintPixelRangeWithGraphics(Surface,
-                                        Rect,
-                                        StartPixel,
-                                        EndPixel,
-                                        segment.Colour,
-                                        segment.Region,
-                                        Options)
+            Options.RegionPainter.Invoke(Surface,
+                                         Bounds,
+                                         Block.SuggestedColor,
+                                         Block.Regions)
 
         Next
 
@@ -241,18 +274,15 @@ Partial Module Extensions
 
         Dim RenderSegments As New List(Of RenderSegment)
 
-        For Each region In ChunkedStreamStructure.Regions
+        For Each Region In ChunkedStreamStructure.Regions
 
-            Dim SegmentType = GetSegmentType(region)
-            Dim SegmentColour = GetSegmentColor(SegmentType, Options)
-
-            If SegmentColour.A = 0 Then Continue For
+            Dim RegionColor = GetRegionColor(Region.RegionType, Options)
 
             RenderSegments.Add(New RenderSegment With {
-                .Offset = region.Offset,
-                .EndOffset = region.EndOffset,
-                .Colour = SegmentColour,
-                .Region = region
+                .Offset = Region.Offset,
+                .EndOffset = Region.EndOffset,
+                .Color = RegionColor,
+                .Region = Region
             })
 
         Next
@@ -272,29 +302,169 @@ Partial Module Extensions
 
     End Function
 
-    Private Function GetSegmentType(Region As Streams.ChunkedStreamStructure.Region) As FragmentationDrawOptions.SegmentColorTypes
-        Select Case Region.RegionType
-            Case Streams.ChunkedStreamStructure.RegionTypes.Header
-                Return FragmentationDrawOptions.SegmentColorTypes.Header
+    Private Function BuildRenderBlocks(ChunkedStreamStructure As Streams.ChunkedStreamStructure,
+                                       HorizontalBlockCount As Integer,
+                                       Height As Integer,
+                                       Options As FragmentationDrawOptions) As List(Of RenderBlock)
 
-            Case Streams.ChunkedStreamStructure.RegionTypes.Chunk
-                Return FragmentationDrawOptions.SegmentColorTypes.Chunk
+        If HorizontalBlockCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(HorizontalBlockCount))
+        If Height <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Height))
 
-            Case Streams.ChunkedStreamStructure.RegionTypes.Hole
-                Return FragmentationDrawOptions.SegmentColorTypes.Hole
+        Dim RenderSegments = BuildRenderSegments(ChunkedStreamStructure, Options)
+        Dim RenderBlocks As New List(Of RenderBlock)
 
-            Case Streams.ChunkedStreamStructure.RegionTypes.Index,
-                 Streams.ChunkedStreamStructure.RegionTypes.IndexPage,
-                 Streams.ChunkedStreamStructure.RegionTypes.DirectoryPage,
-                 Streams.ChunkedStreamStructure.RegionTypes.MetadataRoot
-                Return FragmentationDrawOptions.SegmentColorTypes.Index
+        Dim TotalBlocks = CLng(HorizontalBlockCount) * CLng(Height)
+        Dim TotalBytes = GetRenderLength(ChunkedStreamStructure, Options)
 
-            Case Streams.ChunkedStreamStructure.RegionTypes.Unused
-                Return FragmentationDrawOptions.SegmentColorTypes.Unused
+        If TotalBlocks <= 0 Then Return RenderBlocks
 
-            Case Else
-                Return FragmentationDrawOptions.SegmentColorTypes.Unknown
-        End Select
+        Dim SegmentStartIndex = 0
+
+        For BlockIndex = 0L To TotalBlocks - 1L
+
+            Dim BlockOffset = CLng(Math.Floor((BlockIndex / CDbl(TotalBlocks)) * TotalBytes))
+            Dim BlockEndOffset = CLng(Math.Ceiling(((BlockIndex + 1L) / CDbl(TotalBlocks)) * TotalBytes))
+
+            If BlockEndOffset <= BlockOffset Then
+                BlockEndOffset = BlockOffset + 1L
+            End If
+
+            If BlockEndOffset > TotalBytes Then
+                BlockEndOffset = TotalBytes
+            End If
+
+            While SegmentStartIndex < RenderSegments.Count AndAlso
+                  RenderSegments(SegmentStartIndex).EndOffset <= BlockOffset
+
+                SegmentStartIndex += 1
+
+            End While
+
+            Dim OverlappingSegments As New List(Of RenderSegment)
+            Dim SegmentIndex = SegmentStartIndex
+
+            While SegmentIndex < RenderSegments.Count
+
+                Dim Segment = RenderSegments(SegmentIndex)
+
+                If Segment.Offset >= BlockEndOffset Then Exit While
+
+                If Segment.EndOffset > BlockOffset Then
+                    OverlappingSegments.Add(Segment)
+                End If
+
+                SegmentIndex += 1
+
+            End While
+
+            If OverlappingSegments.Count = 0 Then Continue For
+
+            Dim Regions = OverlappingSegments.Select(Function(segment) segment.Region).ToArray()
+            Dim DefaultColor = GetDominantColor(OverlappingSegments, BlockOffset, BlockEndOffset)
+            Dim SuggestedColor = Options.RegionColorSelector.Invoke(Regions, DefaultColor)
+
+            RenderBlocks.Add(New RenderBlock With {
+                .BlockIndex = BlockIndex,
+                .Offset = BlockOffset,
+                .EndOffset = BlockEndOffset,
+                .SuggestedColor = SuggestedColor,
+                .Regions = Regions
+            })
+
+        Next
+
+        Return RenderBlocks
+
+    End Function
+
+    Private Function GetDominantColor(Segments As IEnumerable(Of RenderSegment),
+                                      BlockOffset As Long,
+                                      BlockEndOffset As Long) As Color
+
+        'Average color
+        Dim s = Segments.Where(Function(x) x.Color.A <> 0).ToArray()
+        If s.Any = False Then
+            Return Color.Transparent
+        Else
+            Return Color.FromArgb(CInt(s.Average(Function(x) x.Color.R)), CInt(s.Average(Function(x) x.Color.G)), CInt(s.Average(Function(x) x.Color.B)))
+        End If
+
+        'Get color of the most dominant segment based on segment count
+        'Return (Segments.GroupBy(Function(x) x.Color).
+        '                 OrderByDescending(Function(x) x.Count).
+        '                 Select(Function(x) x.First).
+        '                 FirstOrDefault()?.
+        '                 Color).
+        '       GetValueOrDefault(Color.Transparent)
+
+        'Get color of the most dominant segment based on block size
+        'Return (Segments.Select(Function(x) New With {.Segment = x,
+        '                                              .Size = Math.Max(0L, Math.Min(BlockEndOffset, x.EndOffset) - Math.Max(BlockOffset, x.Offset))}).
+        '                 GroupBy(Function(x) x.Segment.Color).
+        '                 OrderByDescending(Function(x) x.Sum(Function(y) y.Size)).
+        '                 Select(Function(x) x.First).
+        '                 FirstOrDefault()?.
+        '                 Segment.Color).
+        '       GetValueOrDefault(Color.Transparent)
+
+        'Get color of the largest segment based on block size
+        'Return (Segments.Where(Function(x) x.Color.A <> 0).
+        '                 OrderByDescending(Function(x) Math.Max(0L, Math.Min(BlockEndOffset, x.EndOffset) - Math.Max(BlockOffset, x.Offset))).
+        '                 FirstOrDefault()?.
+        '                 Color).
+        '       GetValueOrDefault(Color.Transparent)
+
+    End Function
+
+    Private Function GetHorizontalBlockCount(Width As Integer,
+                                             Options As FragmentationDrawOptions) As Integer
+
+        If Width <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Width))
+
+        If Options.MaxBlockCount.HasValue Then
+
+            Dim RequestedBlockCount = Options.MaxBlockCount.Value
+
+            If RequestedBlockCount > 0 AndAlso RequestedBlockCount <= Width Then
+                Return RequestedBlockCount
+            End If
+
+        End If
+
+        Return Width
+
+    End Function
+
+    Private Function GetBlockBounds(BaseRect As Rectangle,
+                                    HorizontalBlockCount As Integer,
+                                    BlockIndex As Long) As Rectangle
+
+        If HorizontalBlockCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(HorizontalBlockCount))
+        If BlockIndex < 0 Then Throw New ArgumentOutOfRangeException(NameOf(BlockIndex))
+
+        Dim Row = CInt(BlockIndex \ HorizontalBlockCount)
+        Dim Column = CInt(BlockIndex Mod HorizontalBlockCount)
+
+        If Row >= BaseRect.Height Then
+            Return Rectangle.Empty
+        End If
+
+        Dim Left = BaseRect.Left + CInt(Math.Floor((Column / CDbl(HorizontalBlockCount)) * BaseRect.Width))
+        Dim Right = BaseRect.Left + CInt(Math.Floor(((Column + 1) / CDbl(HorizontalBlockCount)) * BaseRect.Width))
+
+        If Right <= Left Then
+            Right = Left + 1
+        End If
+
+        If Right > BaseRect.Right Then
+            Right = BaseRect.Right
+        End If
+
+        Return New Rectangle(Left,
+                             BaseRect.Top + Row,
+                             Math.Max(0, Right - Left),
+                             1)
+
     End Function
 
     Private Function GetRenderLength(ChunkedStreamStructure As Streams.ChunkedStreamStructure,
@@ -308,8 +478,8 @@ Partial Module Extensions
             Case FragmentationDrawOptions.RenderLengthModes.DataAreaEndOffset
                 Return Math.Max(1L, ChunkedStreamStructure.DataAreaEndOffset)
 
-            Case FragmentationDrawOptions.RenderLengthModes.IndexEndOffset
-                Return Math.Max(1L, ChunkedStreamStructure.IndexEndOffset)
+            Case FragmentationDrawOptions.RenderLengthModes.MetadataRootEndOffset
+                Return Math.Max(1L, ChunkedStreamStructure.MetadataRootEndOffset)
 
             Case FragmentationDrawOptions.RenderLengthModes.PhysicalLength
                 Return Math.Max(1L, ChunkedStreamStructure.PhysicalLength)
@@ -321,112 +491,13 @@ Partial Module Extensions
 
     End Function
 
-    Private Sub FillBuffer(Buffer As Byte(),
-                           AbsStride As Integer,
-                           Width As Integer,
-                           Height As Integer,
-                           Colour As Color)
+    Private Function GetRegionColor(RegionType As Streams.ChunkedStreamStructure.RegionTypes,
+                                    Options As FragmentationDrawOptions) As Color
 
-        For Y = 0 To Height - 1
+        Dim RegionColor As Color = Color.Transparent
 
-            Dim RowOffset = Y * AbsStride
-
-            For X = 0 To Width - 1
-
-                Dim BufferOffset = RowOffset + (X * 3)
-
-                Buffer(BufferOffset) = Colour.B
-                Buffer(BufferOffset + 1) = Colour.G
-                Buffer(BufferOffset + 2) = Colour.R
-
-            Next
-
-        Next
-
-    End Sub
-
-    Private Sub PaintPixelRange(Buffer As Byte(),
-                                AbsStride As Integer,
-                                Width As Integer,
-                                Height As Integer,
-                                StartPixel As Long,
-                                EndPixel As Long,
-                                Colour As Color)
-
-        For PixelIndex = StartPixel To EndPixel - 1
-
-            Dim X = CInt(PixelIndex Mod Width)
-            Dim Y = CInt(PixelIndex \ Width)
-
-            If Y >= Height Then Exit For
-
-            Dim BufferOffset = (Y * AbsStride) + (X * 3)
-
-            Buffer(BufferOffset) = Colour.B
-            Buffer(BufferOffset + 1) = Colour.G
-            Buffer(BufferOffset + 2) = Colour.R
-
-        Next
-
-    End Sub
-
-    Private Sub PaintPixelRangeWithGraphics(Surface As Graphics,
-                                            Rect As Rectangle,
-                                            StartPixel As Long,
-                                            EndPixel As Long,
-                                            SuggestedColor As Color,
-                                            Region As Streams.ChunkedStreamStructure.Region,
-                                            Options As FragmentationDrawOptions)
-
-        Dim CurrentPixel = StartPixel
-
-        While CurrentPixel < EndPixel
-
-            Dim Row = CInt(CurrentPixel \ Rect.Width)
-            Dim X = CInt(CurrentPixel Mod Rect.Width)
-
-            If Row >= Rect.Height Then Exit While
-
-            Dim RowEndPixel = Math.Min(EndPixel, (CLng(Row) + 1L) * Rect.Width)
-            Dim RunLength = CInt(RowEndPixel - CurrentPixel)
-
-            Dim Bounds As New Rectangle(Rect.Left + X,
-                                        Rect.Top + Row,
-                                        RunLength,
-                                        1)
-
-            If Options.PixelPadding > 0 Then
-
-                Bounds.Inflate(-Options.PixelPadding, -Options.PixelPadding)
-
-                If Bounds.Width <= 0 OrElse Bounds.Height <= 0 Then
-                    CurrentPixel = RowEndPixel
-                    Continue While
-                End If
-
-            End If
-
-            If Options.RegionPainter IsNot Nothing Then
-                Options.RegionPainter.Invoke(Surface, Bounds, SuggestedColor, Region)
-            Else
-                Using Brush As New SolidBrush(SuggestedColor)
-                    Surface.FillRectangle(Brush, Bounds)
-                End Using
-            End If
-
-            CurrentPixel = RowEndPixel
-
-        End While
-
-    End Sub
-
-    Private Function GetSegmentColor(SegmentType As FragmentationDrawOptions.SegmentColorTypes,
-                                     Options As FragmentationDrawOptions) As Color
-
-        Dim Colour As Color = Color.Transparent
-
-        If Options.Colors IsNot Nothing AndAlso Options.Colors.TryGetValue(SegmentType, Colour) Then
-            Return Colour
+        If Options.Colors IsNot Nothing AndAlso Options.Colors.TryGetValue(RegionType, RegionColor) Then
+            Return RegionColor
         End If
 
         Return Color.Transparent
