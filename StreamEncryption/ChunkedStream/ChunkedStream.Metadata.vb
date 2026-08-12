@@ -374,7 +374,7 @@ Namespace Streams
                                     ToList()
 
             Dim DescriptorCount = DirectIndexPageList.Count + ChunkDirectoryList.Count + HoleDirectoryList.Count
-            Dim RootLengthWithoutMac = MetadataRootHeaderSize + (DescriptorCount * MetadataDescriptorSize)
+            Dim RootLengthWithoutMac = MetadataRootHeaderSize + (DescriptorCount * MetadataRootDescriptorSize)
             Dim Root(RootLengthWithoutMac + MacSize - 1) As Byte
 
             Buffer.BlockCopy(MetadataRootMagic, 0, Root, 0, MetadataRootMagic.Length)
@@ -389,17 +389,17 @@ Namespace Streams
 
             For Each Descriptor In DirectIndexPageList
                 WriteMetadataRootDescriptor(Root, EntryOffset, DirectoryTypes.ChunkIndexPages, Descriptor)
-                EntryOffset += MetadataDescriptorSize
+                EntryOffset += MetadataRootDescriptorSize
             Next
 
             For Each Descriptor In ChunkDirectoryList
                 WriteMetadataRootDescriptor(Root, EntryOffset, DirectoryTypes.ChunkIndexPages, Descriptor)
-                EntryOffset += MetadataDescriptorSize
+                EntryOffset += MetadataRootDescriptorSize
             Next
 
             For Each Descriptor In HoleDirectoryList
                 WriteMetadataRootDescriptor(Root, EntryOffset, DirectoryTypes.Holes, Descriptor)
-                EntryOffset += MetadataDescriptorSize
+                EntryOffset += MetadataRootDescriptorSize
             Next
 
             Dim Mac = ComputeMac(Root, RootLengthWithoutMac, PublicIntegrityKey)
@@ -415,14 +415,16 @@ Namespace Streams
                                                        DirectoryType As DirectoryTypes,
                                                        Descriptor As MetadataPageDescriptor)
 
+            If Buffer Is Nothing Then Throw New ArgumentNullException(NameOf(Buffer))
+            If Offset < 0 OrElse Offset + MetadataRootDescriptorSize > Buffer.Length Then Throw New ArgumentOutOfRangeException(NameOf(Offset))
+            If Descriptor.Mac Is Nothing OrElse Descriptor.Mac.Length <> MacSize Then Throw New InvalidDataException("Invalid metadata descriptor MAC.")
+
             System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(DirectoryType)), 0, Buffer, Offset, 4)
             System.Buffer.BlockCopy(BitConverter.GetBytes(Descriptor.PageNumber), 0, Buffer, Offset + 4, 4)
             System.Buffer.BlockCopy(BitConverter.GetBytes(Descriptor.Offset), 0, Buffer, Offset + 8, 8)
             System.Buffer.BlockCopy(BitConverter.GetBytes(Descriptor.Length), 0, Buffer, Offset + 16, 4)
+            System.Buffer.BlockCopy(Descriptor.Mac, 0, Buffer, Offset + 20, MacSize)
 
-            If Descriptor.Mac IsNot Nothing Then
-                System.Buffer.BlockCopy(Descriptor.Mac, 0, Buffer, Offset + 20, Math.Min(MacSize, Descriptor.Mac.Length))
-            End If
         End Sub
 
         Private Sub PersistPagedMetadata(IndexOffset As Long, Durable As Boolean)
@@ -591,7 +593,11 @@ Namespace Streams
 
         End Sub
 
-        Private Shared Function ReadMetadataPageDescriptor(Buffer As Byte(), Offset As Integer) As MetadataPageDescriptor
+        Private Shared Function ReadMetadataRootDescriptor(Buffer As Byte(), Offset As Integer) As MetadataPageDescriptor
+
+            If Buffer Is Nothing Then Throw New ArgumentNullException(NameOf(Buffer))
+            If Offset < 0 OrElse Offset + MetadataRootDescriptorSize > Buffer.Length Then Throw New ArgumentOutOfRangeException(NameOf(Offset))
+
             Dim Mac(MacSize - 1) As Byte
 
             System.Buffer.BlockCopy(Buffer, Offset + 20, Mac, 0, Mac.Length)
@@ -602,6 +608,25 @@ Namespace Streams
                 .Length = BitConverter.ToInt32(Buffer, Offset + 16),
                 .Mac = Mac
             }
+
+        End Function
+
+        Private Shared Function ReadDirectoryMetadataPageDescriptor(Buffer As Byte(), Offset As Integer) As MetadataPageDescriptor
+
+            If Buffer Is Nothing Then Throw New ArgumentNullException(NameOf(Buffer))
+            If Offset < 0 OrElse Offset + MetadataDescriptorSize > Buffer.Length Then Throw New ArgumentOutOfRangeException(NameOf(Offset))
+
+            Dim Mac(MacSize - 1) As Byte
+
+            System.Buffer.BlockCopy(Buffer, Offset + 16, Mac, 0, Mac.Length)
+
+            Return New MetadataPageDescriptor With {
+                .PageNumber = BitConverter.ToInt32(Buffer, Offset),
+                .Offset = BitConverter.ToInt64(Buffer, Offset + 4),
+                .Length = BitConverter.ToInt32(Buffer, Offset + 12),
+                .Mac = Mac
+            }
+
         End Function
 
         Private Shared Function ReadMetadataRoot(Fs As Stream,
@@ -610,7 +635,6 @@ Namespace Streams
                                                  ExpectedMac As Byte()) As MetadataRootReadResult
 
             If RootLength = 0 Then
-
                 Return New MetadataRootReadResult With {
                     .IndexPageEntryCount = 256,
                     .IndexDirectoryEntryCount = 256,
@@ -619,7 +643,6 @@ Namespace Streams
                     .ChunkIndexDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
                     .HoleDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)()
                 }
-
             End If
 
             If RootOffset < DataStartOffset Then Throw New InvalidDataException("Invalid metadata root offset.")
@@ -638,11 +661,9 @@ Namespace Streams
             Dim RootMac = ComputeMac(Root, RootLength - MacSize, PublicIntegrityKey)
 
             If ExpectedMac IsNot Nothing AndAlso ExpectedMac.Length = MacSize Then
-
                 If FixedTimeEquals(RootMac, 0, ExpectedMac, 0, MacSize) = False Then
                     Throw New CryptographicException("Metadata root MAC invalid.")
                 End If
-
             End If
 
             If FixedTimeEquals(RootMac, 0, Root, RootLength - MacSize, MacSize) = False Then
@@ -671,8 +692,7 @@ Namespace Streams
             Dim DescriptorEndOffset = RootLength - MacSize
 
             For Index = 0 To DirectIndexPageDescriptorCount - 1
-
-                If EntryOffset + MetadataDescriptorSize > DescriptorEndOffset Then
+                If EntryOffset + MetadataRootDescriptorSize > DescriptorEndOffset Then
                     Throw New InvalidDataException("Metadata root direct index page descriptor area is truncated.")
                 End If
 
@@ -682,14 +702,12 @@ Namespace Streams
                     Throw New InvalidDataException("Metadata root contains an unexpected direct index page descriptor.")
                 End If
 
-                DirectIndexPageDescriptors.Add(ReadMetadataPageDescriptor(Root, EntryOffset))
-                EntryOffset += MetadataDescriptorSize
-
+                DirectIndexPageDescriptors.Add(ReadMetadataRootDescriptor(Root, EntryOffset))
+                EntryOffset += MetadataRootDescriptorSize
             Next
 
             For Index = 0 To ChunkDirectoryPageCount - 1
-
-                If EntryOffset + MetadataDescriptorSize > DescriptorEndOffset Then
+                If EntryOffset + MetadataRootDescriptorSize > DescriptorEndOffset Then
                     Throw New InvalidDataException("Metadata root chunk-index directory descriptor area is truncated.")
                 End If
 
@@ -699,14 +717,12 @@ Namespace Streams
                     Throw New InvalidDataException("Metadata root contains an unexpected chunk-index directory descriptor.")
                 End If
 
-                ChunkDirectoryDescriptors.Add(ReadMetadataPageDescriptor(Root, EntryOffset))
-                EntryOffset += MetadataDescriptorSize
-
+                ChunkDirectoryDescriptors.Add(ReadMetadataRootDescriptor(Root, EntryOffset))
+                EntryOffset += MetadataRootDescriptorSize
             Next
 
             For Index = 0 To HoleDirectoryPageCount - 1
-
-                If EntryOffset + MetadataDescriptorSize > DescriptorEndOffset Then
+                If EntryOffset + MetadataRootDescriptorSize > DescriptorEndOffset Then
                     Throw New InvalidDataException("Metadata root hole directory descriptor area is truncated.")
                 End If
 
@@ -716,9 +732,8 @@ Namespace Streams
                     Throw New InvalidDataException("Metadata root contains an unexpected hole directory descriptor.")
                 End If
 
-                HoleDirectoryDescriptors.Add(ReadMetadataPageDescriptor(Root, EntryOffset))
-                EntryOffset += MetadataDescriptorSize
-
+                HoleDirectoryDescriptors.Add(ReadMetadataRootDescriptor(Root, EntryOffset))
+                EntryOffset += MetadataRootDescriptorSize
             Next
 
             Return New MetadataRootReadResult With {
@@ -733,7 +748,7 @@ Namespace Streams
         End Function
 
         Private Shared Function ReadChunkIndexDirectoryPages(Fs As Stream,
-                                                            Descriptors As IEnumerable(Of MetadataPageDescriptor)) As List(Of MetadataPageDescriptor)
+                                                             Descriptors As IEnumerable(Of MetadataPageDescriptor)) As List(Of MetadataPageDescriptor)
 
             Dim Result As New List(Of MetadataPageDescriptor)()
 
@@ -760,15 +775,25 @@ Namespace Streams
                 End If
 
                 Dim EntryCount = BitConverter.ToInt32(Page, 16)
+
+                If EntryCount < 0 Then
+                    Throw New InvalidDataException("Invalid chunk-index directory page entry count.")
+                End If
+
+                If DirectoryPageHeaderSize + (EntryCount * MetadataDescriptorSize) + MacSize > Page.Length Then
+                    Throw New InvalidDataException("Chunk-index directory page entry area is truncated.")
+                End If
+
                 Dim EntryOffset = DirectoryPageHeaderSize
 
                 For Index = 0 To EntryCount - 1
-                    Result.Add(ReadMetadataPageDescriptor(Page, EntryOffset))
+                    Result.Add(ReadDirectoryMetadataPageDescriptor(Page, EntryOffset))
                     EntryOffset += MetadataDescriptorSize
                 Next
             Next
 
             Return Result
+
         End Function
 
         Private Shared Function ReadPagedIndexTable(Fs As Stream,
@@ -910,6 +935,15 @@ Namespace Streams
                 End If
 
                 Dim EntryCount = BitConverter.ToInt32(Page, 16)
+
+                If EntryCount < 0 Then
+                    Throw New InvalidDataException("Invalid hole directory page entry count.")
+                End If
+
+                If DirectoryPageHeaderSize + (EntryCount * HoleDirectoryEntrySize) + MacSize > Page.Length Then
+                    Throw New InvalidDataException("Hole directory page entry area is truncated.")
+                End If
+
                 Dim EntryOffset = DirectoryPageHeaderSize
 
                 For Index = 0 To EntryCount - 1
@@ -930,6 +964,7 @@ Namespace Streams
             Next
 
             Return Result
+
         End Function
 
     End Class

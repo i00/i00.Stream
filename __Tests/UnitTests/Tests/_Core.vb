@@ -606,7 +606,7 @@ Namespace Tests
             End Sub
 
             ''' <summary>
-            ''' Verifies that structure snapshots contain header, chunk and index regions after data is written.
+            ''' Verifies that structure snapshots contain header, chunk and metadata regions after data is written.
             ''' </summary>
             <UnitTester.SimpleTest()>
             Public Shared Sub StructureSnapshotContainsExpectedRegions()
@@ -619,17 +619,25 @@ Namespace Tests
 
                         Dim Struct = Cs.GetStructure()
 
-                        AssertTrue(Struct.Regions.Any(Function(region) region.RegionType = ChunkedStreamStructure.RegionTypes.Header),
-                                       "Structure did not contain header regions.")
+                        AssertTrue(
+                            Struct.Regions.Any(Function(region) region.RegionType = ChunkedStreamStructure.RegionTypes.Header),
+                            "Structure did not contain header regions.")
 
-                        AssertTrue(Struct.Regions.Any(Function(region) region.RegionType = ChunkedStreamStructure.RegionTypes.Chunk),
-                                       "Structure did not contain chunk regions.")
+                        AssertTrue(
+                            Struct.Regions.Any(Function(region) region.RegionType = ChunkedStreamStructure.RegionTypes.Chunk),
+                            "Structure did not contain chunk regions.")
 
-                        AssertTrue(Struct.Regions.Any(Function(region) region.RegionType = ChunkedStreamStructure.RegionTypes.Index),
-                                       "Structure did not contain an index region.")
+                        AssertTrue(
+                            Struct.Regions.Any(Function(region) region.RegionType = ChunkedStreamStructure.RegionTypes.IndexPage),
+                            "Structure did not contain index-page regions.")
 
-                        AssertTrue(Struct.Chunks.Any(Function(chunk) chunk.IsAllocated),
-                                       "Structure did not contain allocated chunks.")
+                        AssertTrue(
+                            Struct.Regions.Any(Function(region) region.RegionType = ChunkedStreamStructure.RegionTypes.MetadataRoot),
+                            "Structure did not contain a metadata-root region.")
+
+                        AssertTrue(
+                            Struct.Chunks.Any(Function(chunk) chunk.IsAllocated),
+                            "Structure did not contain allocated chunks.")
 
                     End Using
 

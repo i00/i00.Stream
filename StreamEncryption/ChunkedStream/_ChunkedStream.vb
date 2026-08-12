@@ -431,6 +431,7 @@ Namespace Streams
         Private Const MetadataRootHeaderSize As Integer = 40
         Private Const MetadataRootMagicSize As Integer = 8
         Private Const MetadataDescriptorSize As Integer = 48
+        Private Const MetadataRootDescriptorSize As Integer = 52
 
         Private Const IndexPageHeaderSize As Integer = 32
         Private Const IndexPageMagicSize As Integer = 8
