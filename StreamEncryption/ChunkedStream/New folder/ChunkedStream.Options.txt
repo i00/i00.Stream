@@ -172,55 +172,17 @@ Namespace Streams
             End Property
 
             ''' <summary>
-            ''' Controls whether reusable free-space information is persisted as metadata.
-            ''' </summary>
-            Public Enum HoleDirectoryModes
-
-                ''' <summary>
-                ''' Never persist reusable free-space information.
-                ''' Known holes created during the current open stream session may still be reused in memory.
-                ''' </summary>
-                Never = 0
-
-                ''' <summary>
-                ''' Persist reusable free-space information only once the stream reaches
-                ''' HoleDirectoryAutoThresholdBytes.
-                ''' </summary>
-                Auto = 1
-
-                ''' <summary>
-                ''' Always persist reusable free-space information when metadata is published.
-                ''' </summary>
-                Always = 2
-
-            End Enum
-
-            ''' <summary>
-            ''' Gets or sets when reusable free-space information should be persisted.
+            ''' True when reusable free-space information should be persisted as metadata.
             ''' </summary>
             ''' <remarks>
             ''' A stored hole directory is an acceleration structure only. Correctness must not
             ''' depend on it. If the hole directory is missing, disabled or invalid, reusable
-            ''' free space can still be discovered by scanning the active stream layout when
-            ''' the selected write-location policy allows it.
+            ''' free space can be discovered by scanning the active stream layout.
+            '''
+            ''' In the current flat-index layout this option is stored only. The in-memory free-space
+            ''' map is still maintained for holes created during the current open stream session.
             ''' </remarks>
-            Public Property HoleDirectoryMode As HoleDirectoryModes = HoleDirectoryModes.Auto
-
-            Private _HoleDirectoryAutoThresholdBytes As Long = 1024L * 1024L
-
-            ''' <summary>
-            ''' Minimum physical stream size before hole directories are persisted when
-            ''' HoleDirectoryMode is Auto.
-            ''' </summary>
-            Public Property HoleDirectoryAutoThresholdBytes As Long
-                Get
-                    Return _HoleDirectoryAutoThresholdBytes
-                End Get
-                Set
-                    If Value < 0 Then Throw New ArgumentOutOfRangeException(NameOf(HoleDirectoryAutoThresholdBytes))
-                    _HoleDirectoryAutoThresholdBytes = Value
-                End Set
-            End Property
+            Public Property StoreHoleDirectory As Boolean = True
 
             ''' <summary>
             ''' Raised when EncryptionInfo changes.

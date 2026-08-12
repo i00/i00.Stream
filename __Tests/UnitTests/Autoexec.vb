@@ -4,9 +4,9 @@ Imports StreamEncryption.Streams
 Public Class Autoexec
 
     Public Shared Function Main() As Integer
-        Test()
+        'Test()
         'Tests.StreamChunked.Checkpoints.CheckpointLifoEnforced()
-        UnitTester.SimpleTest.TestTypesToRun = UnitTester.SimpleTest.TestTypes.Benchmark
+        UnitTester.SimpleTest.TestTypesToRun = UnitTester.SimpleTest.TestTypes.Test
 
         Return UnitTester.Autoexec.Main()
     End Function

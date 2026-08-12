@@ -86,12 +86,15 @@ Namespace Tests
         ''' <summary>
         ''' Benchmarks new chunk write-location policies.
         ''' </summary>
-        <UnitTester.SimpleTest({128, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
-        <UnitTester.SimpleTest({256, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
-        <UnitTester.SimpleTest({512, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
-        <UnitTester.SimpleTest({1024, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
-        <UnitTester.SimpleTest({2048, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
-        Public Shared Function NewChunkWriteLocationPolicyBenchmark(LogicalChunkCount As Integer, DurationMs As Long) As UnitTester.SimpleTest.BenchmarkResult
+        '<UnitTester.SimpleTest({128, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        '<UnitTester.SimpleTest({256, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        '<UnitTester.SimpleTest({512, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        '<UnitTester.SimpleTest({1024, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        '<UnitTester.SimpleTest({2048, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        '<UnitTester.SimpleTest({4096, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        <UnitTester.SimpleTest({8192, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        Public Shared Function NewChunkWriteLocationPolicyBenchmark(LogicalChunkCount As Integer,
+                                                                    DurationMs As Long) As UnitTester.SimpleTest.BenchmarkResult
 
             Dim Messages As New List(Of String)
 
@@ -108,6 +111,8 @@ Namespace Tests
                         ChunkIndex + 1)
             Next
 
+            Dim InitialWrite = True
+
             For Each Policy As ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies In
                 [Enum].GetValues(GetType(ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies))
 
@@ -120,28 +125,56 @@ Namespace Tests
                     }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
+
                         '
                         ' Build an initial file.
                         '
-                        For ChunkIndex = 0 To LogicalChunkCount - 1
+                        TotalBytesWritten = 0
 
+                        Dim Sw = Stopwatch.StartNew()
+
+                        For ChunkIndex = 0 To LogicalChunkCount - 1
                             Cs.Write(
-                                ChunkIndex * ChunkedStream.DefaultChunkSize,
+                                CLng(ChunkIndex) * ChunkedStream.DefaultChunkSize,
                                 DataSets(ChunkIndex))
 
+                            TotalBytesWritten += DataSets(ChunkIndex).Length
                         Next
+
+                        Sw.Stop()
+
+                        Dim BytesPerSecond =
+                            CLng(TotalBytesWritten /
+                                 Math.Max(0.001, Sw.Elapsed.TotalSeconds))
+
+                        If InitialWrite Then
+                            Dim StructInitial = Cs.GetStructure()
+
+                            Messages.Add(
+                                $"Initial: " &
+                                $"{BytesPerSecond.FormatFileSizeFromBytes()}/s, " &
+                                $"LiveData={StructInitial.LiveDataEndOffset.FormatFileSizeFromBytes()}, " &
+                                $"Physical={Ms.Length.FormatFileSizeFromBytes()}")
+
+                            InitialWrite = False
+                        End If
 
                         '
                         ' Create some initial fragmentation.
                         '
                         GenerateFragmentedData(Cs)
 
+                        '
+                        ' Only measure metadata cost for the timed benchmark section.
+                        '
+                        Cs.DebugResetMetadataCounters()
+
                         Dim Rng As New Random(1)
 
-                        Dim Sw = Stopwatch.StartNew()
+                        TotalBytesWritten = 0
+                        Sw.Restart()
 
                         Do While Sw.ElapsedMilliseconds < DurationMs
-
                             Dim ChunkIndex = Rng.Next(LogicalChunkCount)
 
                             Cs.Write(
@@ -149,12 +182,11 @@ Namespace Tests
                                 DataSets(ChunkIndex))
 
                             TotalBytesWritten += DataSets(ChunkIndex).Length
-
                         Loop
 
                         Sw.Stop()
 
-                        Dim BytesPerSecond =
+                        BytesPerSecond =
                             CLng(TotalBytesWritten /
                                  Math.Max(0.001, Sw.Elapsed.TotalSeconds))
 
@@ -163,9 +195,18 @@ Namespace Tests
                         Messages.Add(
     $"{Policy}: " &
     $"{BytesPerSecond.FormatFileSizeFromBytes()}/s, " &
-    $"LiveData={Struct.LiveDataEndOffset.FormatFileSizeFromBytes()}")
-                        'Messages.Add(
-                        '    $"{Policy}: {BytesPerSecond.FormatFileSizeFromBytes()}/s")
+    $"LiveData={Struct.LiveDataEndOffset.FormatFileSizeFromBytes()}, " &
+    $"Physical={Ms.Length.FormatFileSizeFromBytes()}, " &
+    $"Persists={Cs.DebugPersistCount:N0}, " &
+    $"AvgDirtyPages={Cs.DebugAveragePersistIndexPageCount:N2}, " &
+    $"PersistMs={Cs.DebugPersistMilliseconds:N0}, " &
+    $"AvgPersistMs={Cs.DebugAveragePersistMilliseconds:N3}, " &
+    $"IndexMs={Cs.DebugIndexPageMilliseconds:N0}, " &
+    $"DirMs={Cs.DebugDirectoryMilliseconds:N0}, " &
+    $"ChunkDirMs={Cs.DebugChunkDirectoryMilliseconds:N0}, " &
+    $"HoleDirMs={Cs.DebugHoleDirectoryMilliseconds:N0}, " &
+    $"RootMs={Cs.DebugRootMilliseconds:N0}, " &
+    $"HeaderMs={Cs.DebugHeaderMilliseconds:N0}")
 
                     End Using
 
