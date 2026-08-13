@@ -13,21 +13,32 @@
 ' Overview
 '   - Random-access authenticated chunk storage.
 '   - Encryption is optional.
-'   - Compression is optional and per chunk.
+'   - Compression is optional and evaluated per chunk.
 '   - Sparse chunk support.
-'   - Configurable chunk-record placement policies
-'     (Append-based storage with optional hole reuse for new chunk records).
-'   - Defragmentation and recovery support.
+'   - Dynamic paged metadata architecture.
+'   - Metadata roots, index pages, directory pages and optional hole-directory pages.
+'   - Configurable chunk-record placement policies.
+'   - Optional hole reuse for chunk records and metadata pages.
+'   - Defragmentation, recovery and ApplyOptions support.
 '   - Data-only checkpoints with automatic rollback to the current checkpoint
 '     baseline when disposed.
 '   - Configurable fixed logical chunk size per stream.
 '   - Optional most-recently-read plaintext chunk cache.
+'   - Built-in structure and fragmentation diagnostics.
 '
 ' Stream Model
 '   - The standard Stream API reads and writes at Position.
 '   - The random-access Read(LogicalOffset, Output) and Write(LogicalOffset, Input)
 '     overloads do not use or modify Position.
 '   - The stream is readable, writable and seekable.
+'
+' Logical / Physical Model
+'   - The logical stream is represented by logical chunk indices.
+'   - Each logical chunk may reference a physical chunk record.
+'   - Rewriting a chunk typically allocates a new physical chunk record and
+'     retires the previous physical record.
+'   - Unreferenced physical areas become holes and may later be reused.
+'   - Physical layout is independent of logical ordering.
 '
 ' Chunk Size Model
 '   - New streams use Options.ChunkSize.
@@ -38,12 +49,54 @@
 '     Options.ChunkSize.
 '   - Incomplete chunk-size rebuilds are rolled back on the next open.
 '
+' Metadata Model
+'   - Metadata is stored using variable-sized paged structures.
+'   - Metadata pages may be physically relocated when rewritten.
+'   - Metadata pages may optionally reuse suitable metadata holes.
+'   - Metadata consists of:
+'       - Chunk Index Pages
+'       - Chunk Index Directory Pages
+'       - Hole Directory Pages
+'       - Metadata Root
+'   - Only modified metadata pages are normally rewritten.
+'   - Metadata publication is atomic from the perspective of readers.
+'   - A newly written metadata root becomes active only after a header update.
+'
+' Metadata Root Model
+'   - The metadata root contains descriptors for all active metadata pages.
+'   - The metadata root stores:
+'       - Chunk Index Page descriptors
+'       - Chunk Index Directory Page descriptors
+'       - Hole Directory Page descriptors
+'       - Logical file length
+'       - Metadata generation information
+'   - The root is authenticated.
+'   - Old roots become inactive after publication of a newer root.
+'
+' Hole Directory Model
+'   - Hole records track reusable free space within the physical stream.
+'   - Hole records are maintained in memory while the stream is open.
+'   - Hole records may optionally be persisted depending on
+'     Options.HoleDirectoryMode.
+'   - Persisted hole records accelerate allocator reconstruction after reopen.
+'   - Hole records may describe chunk-space holes and metadata-space holes.
+'
 ' Write Location Model
 '   - Newly written physical chunk records are placed according to
 '     Options.NewChunkWriteLocationPolicy.
-'       - Append writes new chunk records at the current end of the chunk-data area.
-'       - FillHoles attempts to place new chunk records into existing unreferenced
-'         holes before extending the chunk-data area.
+'
+'       Append
+'         - New chunk records are written beyond the current live data area.
+'
+'       FillHoles
+'         - Existing reusable holes are preferred.
+'         - If no suitable hole exists, allocation falls back to append.
+'
+'       FillHolesFromStart
+'         - Existing reusable holes are preferred.
+'         - Hole searching is biased toward lower physical offsets.
+'         - If no suitable hole exists, allocation falls back to append.
+'
 '   - The selected policy affects newly written chunk records only.
 '   - Existing chunk layout is not reorganised automatically.
 '   - Defragmentation remains the preferred mechanism for compacting or
@@ -59,11 +112,12 @@
 '   - The cache is an optimisation only and is never required for correctness.
 '
 ' Integrity Model
-'   - Every header, index table and chunk record is authenticated.
-'   - If a header, index table or unencrypted chunk is authenticated, it uses a fixed
-'     public integrity key. This detects accidental corruption and bitrot, but is not
-'     tamper-proof.
-'   - If a chunk is encrypted, its MAC uses a key derived from the file master key.
+'   - Every header, metadata structure and chunk record is authenticated.
+'   - If a structure is unencrypted, authentication uses a public integrity key.
+'   - Public authentication detects corruption and accidental modification but is
+'     not tamper-proof.
+'   - If encryption is enabled, encrypted content uses keys derived from the
+'     file master key.
 '
 ' Encryption Model
 '   - A random file master key is generated when encryption is first enabled.
@@ -73,26 +127,32 @@
 '   - Existing encrypted chunks do not need to be rewritten when the user key changes.
 '   - If EncryptionInfo is set to Nothing, the file master key is publicly wrapped
 '     while encrypted chunks still exist.
-'   - If encryption is disabled and ApplyOptions(ApplyOptionTypes.Encryption) rewrites
-'     all chunks as unencrypted, the unused file master key will be removed.
+'   - If encryption is disabled and ApplyOptions(ApplyOptionTypes.Encryption)
+'     rewrites all chunks as unencrypted, the unused file master key will be removed.
 '   - New chunks are encrypted only when Options.EncryptionInfo is not Nothing.
 '
 ' Compression Model
 '   - Compression is evaluated per chunk.
 '   - Each physical chunk record stores the compression method actually used.
-'   - Each physical chunk record also stores the compression method last evaluated
-'     and the evaluated compressed-size percentage.
-'   - Compression Evaluated Percent is the compressed payload size as a percentage of
-'     the original plaintext size. Lower values indicate better compression.
-'   - Options.CompressionRatioThreshold controls whether evaluated compression is
-'     stored. For example, 0.95 means the compressed payload must be no larger than
-'     95% of the original plaintext size.
+'   - Each physical chunk record stores the compression method evaluated.
+'   - Each physical chunk record stores the evaluated compressed-size percentage.
+'   - Compression Evaluated Percent is the compressed payload size as a percentage
+'     of the original plaintext size.
+'   - Lower values indicate better compression.
+'   - Options.CompressionRatioThreshold controls whether evaluated compression is stored.
 '
 ' Sparse Chunk Model
 '   - All-zero logical chunks may be represented as sparse index entries.
-'   - When sparse chunks are physically stored, the PlaintextAllZero chunk flag records
-'     that the plaintext represented by the chunk is entirely zero bytes.
-'   - Sparse chunks are treated as plaintext-all-zero by structure diagnostics.
+'   - Sparse chunks consume no physical payload storage.
+'   - Physically stored all-zero chunks are marked using the
+'     PlaintextAllZero chunk flag.
+'   - Sparse chunks are treated as plaintext-all-zero by diagnostics.
+'
+' ApplyOptions Model
+'   - ApplyOptions may rewrite existing chunks to conform to current settings.
+'   - Compression, encryption and sparseness may be applied independently.
+'   - Existing chunk records are rewritten only when required.
+'   - ApplyOptions supports progress reporting and cancellation.
 '
 ' Checkpoint Model
 '   - CreateCheckpoint() creates a data-only checkpoint.
@@ -101,23 +161,25 @@
 '     keeps the checkpoint active.
 '   - Rollback() restores the current checkpoint baseline and keeps the checkpoint active.
 '   - Dispose restores the current checkpoint baseline and closes the checkpoint.
-'   - Checkpoints may be nested, but must be committed, rolled back or disposed in
+'   - Checkpoints may be nested but must be committed, rolled back or disposed in
 '     LIFO order.
 '   - Committing an inner checkpoint only updates that inner checkpoint's baseline.
-'   - A committed inner checkpoint is still part of its parent checkpoint and will be
-'     rolled back if the parent checkpoint is rolled back or disposed.
+'   - A committed inner checkpoint is still part of its parent checkpoint and will
+'     be rolled back if the parent checkpoint is rolled back or disposed.
 '   - Only the outermost checkpoint owns header recovery state.
-'   - Checkpoints roll back stream data only. Options, encryption settings and key
-'     wrapping changes are not rolled back.
+'   - Checkpoints roll back stream data only.
+'   - Options and encryption configuration are not rolled back.
 '   - Defragmentation is not allowed while a checkpoint is active.
 '
 ' Recovery Model
 '   - Recovery state is stored in the header recovery area.
 '   - Recovery is processed automatically during Open().
-'   - Chunk move recovery validates copied records before publishing recovered state.
+'   - Recovery always restores the most recently committed stream state.
+'   - Chunk move recovery validates copied records before publication.
+'   - Metadata publication recovery restores the last valid metadata root.
 '   - Checkpoint recovery restores the checkpoint baseline.
-'   - Chunk-size rebuild recovery truncates incomplete rebuild output and reopens the
-'     previously committed stream state.
+'   - Chunk-size rebuild recovery truncates incomplete rebuild output and reopens
+'     the previously committed stream state.
 '
 ' File Layout
 '
@@ -130,7 +192,13 @@
 '   | Chunk Records             |
 '   | Chunk Records             |
 '   +---------------------------+
-'   | Chunk Index Table         |
+'   | Index Pages               |
+'   +---------------------------+
+'   | Index Directory Pages     |
+'   +---------------------------+
+'   | Hole Directory Pages      |
+'   +---------------------------+
+'   | Metadata Roots            |
 '   +---------------------------+
 '
 '   DataStartOffset = 1024
@@ -141,85 +209,16 @@
 '   - Open() validates both headers and selects the valid header with the highest
 '     sequence number.
 '
-' Header Layout (512 bytes)
-'
-'   Offset  Size    Description
-'   0       8       Magic ("ESTRM001")
-'   8       8       Header Sequence Number
-'   16      8       Flags
-'   24      8       Logical Plaintext File Length
-'   32      16      File Salt
-'   48      4       Chunk Size
-'   52      8       Index Offset
-'   60      8       Index Entry Count
-'   68      32      Index HMAC-SHA256
-'
-'   100     64      Recovery State Area
-'
-'   164     4       Master Key Wrap Mode
-'   168     16      Master Key Wrap Salt
-'   184     32      Wrapped File Master Key
-'   216     32      Wrapped File Master Key MAC
-'
-'   248     232     Reserved For Future Use
-'
-'   480     32      Header HMAC-SHA256
-'
-' Header HMAC covers bytes:
-'   0..479
-'
-' Chunk Index Entry Layout (16 bytes)
-'
-'   Offset  Size    Description
-'   0       8       Chunk Record Offset
-'   8       4       Chunk Record Length
-'   12      4       Reserved
-'
-' Chunk Record Layout
-'
-'   Offset  Size    Description
-'   0       8       Chunk Index
-'   8       4       Compression Method
-'   12      4       Encryption Method
-'   16      4       Plain Length
-'   20      4       Payload Length
-'   24      4       Chunk Flags
-'   28      4       Compression Evaluated Method
-'   32      1       Compression Evaluated Percent
-'   33      15      Reserved
-'
-'   48      16      IV / Counter Start
-'   64      N       Payload
-'   64 + N  32      Chunk HMAC-SHA256
-'
-' Chunk HMAC covers:
-'   Record header + IV + payload
-'
-' Compression Methods
-'   0 = None
-'   1 = LZ4
-'   2 = Deflate
-'   3 = GZip
-'
-' Encryption Methods
-'   0 = None
-'   1 = AES-CTR using file master key
-'
-' Chunk Flags
-'   0 = None
-'   1 = PlaintextAllZero
-'
-' Master Key Wrap Modes
-'   0 = None
-'   1 = PublicWrap
-'   2 = UserWrap
-'
-' Recovery States
-'   0   = None
-'   1   = CopyingChunk
-'   2   = ChunkCopied
-'   100 = CheckpointActive
-'   200 = ChunkSizeRebuildActive
+' Structure Diagnostics
+'   - Diagnostic APIs expose:
+'       - Chunk regions
+'       - Metadata regions
+'       - Hole regions
+'       - Fragmentation statistics
+'       - Compression statistics
+'       - Encryption statistics
+'       - Physical layout information
+'   - Diagnostic information does not alter stream state.
 '
 ' ================================================================================
 
@@ -549,6 +548,8 @@ Namespace Streams
         Private _IndexDirectoryEntryCount As Integer
         Private _MetadataRootOffset As Long
         Private _MetadataRootLength As Integer
+        Private _CompactMetadataWriteOffset As Long?
+        Private _CompactMetadataWriteLimit As Long?
 
         Private ReadOnly _DirtyIndexPages As New HashSet(Of Integer)()
         Private ReadOnly _IndexPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()

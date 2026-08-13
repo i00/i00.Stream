@@ -246,6 +246,22 @@ Partial Module Extensions
         Dim HorizontalBlockCount = GetHorizontalBlockCount(Rect.Width, Options)
         Dim RenderBlocks = BuildRenderBlocks(ChunkedStreamStructure, HorizontalBlockCount, Rect.Height, Options)
 
+        'TODO: to make fragmentation odvious
+        Dim Frag = ChunkedStreamStructure.FragmentationRatio
+        '.Size = Math.Max(0L, Math.Min(BlockEndOffset, x.EndOffset) - Math.Max(BlockOffset, x.Offset))})
+        Dim BlocksByWorseToBest = RenderBlocks.OrderByDescending(Function(x) x.Regions.Count(Function(y) y.RegionType = Streams.ChunkedStreamStructure.RegionTypes.Hole)).ToArray()
+        For iBlock = 0 To BlocksByWorseToBest.Count - 1
+            Dim Block = BlocksByWorseToBest(iBlock
+                                           )
+            Dim PercentThrough = iBlock / BlocksByWorseToBest.Count
+            If PercentThrough < Frag Then
+                Block.SuggestedColor = Color.Red
+            Else
+                Block.SuggestedColor = Color.LimeGreen
+            End If
+        Next
+
+
         For Each Block In RenderBlocks
 
             Dim Bounds = GetBlockBounds(Rect, HorizontalBlockCount, Block.BlockIndex)

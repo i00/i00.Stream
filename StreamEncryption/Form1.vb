@@ -123,7 +123,8 @@ Public Class Form1
                     {
                         .CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
                         .EncryptionInfo = New Streams.ChunkedStream.EncryptionInfo("MySecretPassword"),
-                        .NewIndexPageWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.Append}
+                        .NewIndexPageWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.Append,
+                        .NewChunkWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.Append}
 
                     Using Enc = Streams.ChunkedStream.Open(EncStorage, Options)
 
@@ -368,6 +369,13 @@ Public Class Form1
                                                             Dim CurrentTime = Now()
                                                             Dim Done = ProcessedUnits = TotalUnits
                                                             If CurrentTime.Subtract(LastUpdate).TotalMilliseconds >= 250 OrElse Done Then
+                                                                Dim S = Enc.GetStructure()
+                                                                Debug.Print(
+                                                                    $"cs.Frag={Enc.GetFragmentation():P4}," &
+                                                                    $"S.Frag={S.FragmentationRatio:P4}, " &
+                                                                    $"S.FragBytes={S.FragmentedBytes:N0}, " &
+                                                                    $"S.LiveEnd={S.LiveDataEndOffset:N0}, " &
+                                                                    $"S.Physical={S.PhysicalLength:N0}")
                                                                 LastUpdate = CurrentTime
                                                                 pnlDefrag.BackgroundImage = Enc.GetStructure().GenerateFragmentationBitmap(pnlDefrag.ClientSize.Width, 1)
                                                                 'pnlDefrag.BackgroundImage = Enc.GenerateFragmentationBitmap(pnlDefrag.ClientSize.Width, 1)
@@ -376,6 +384,13 @@ Public Class Form1
                                                             'System.Threading.Thread.Sleep(10)
                                                             'ProgressReport.frmProgress.
                                                         End Sub)
+                    Dim S22 = Enc.GetStructure()
+                    Debug.Print(
+                        $"cs.Frag={Enc.GetFragmentation():P4}," &
+                        $"S.Frag={S22.FragmentationRatio:P4}, " &
+                        $"S.FragBytes={S22.FragmentedBytes:N0}, " &
+                        $"S.LiveEnd={S22.LiveDataEndOffset:N0}, " &
+                        $"S.Physical={S22.PhysicalLength:N0}")
 
                     Panel2.BackgroundImageLayout = ImageLayout.Stretch
                     'Panel2.BackgroundImage = Enc.GetStructure().GenerateFragmentationBitmap(Panel2.ClientSize, FragmentationDrawOptions)

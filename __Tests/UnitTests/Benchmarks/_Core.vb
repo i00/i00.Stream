@@ -86,10 +86,10 @@ Namespace Tests
         ''' <summary>
         ''' Benchmarks new chunk write-location policies.
         ''' </summary>
-        <UnitTester.SimpleTest({128, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
-        <UnitTester.SimpleTest({256, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
-        <UnitTester.SimpleTest({512, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
-        <UnitTester.SimpleTest({1024, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        <UnitTester.SimpleBenchmark({128, 1000})>
+        <UnitTester.SimpleBenchmark({256, 1000})>
+        <UnitTester.SimpleBenchmark({512, 1000})>
+        <UnitTester.SimpleBenchmark({1024, 1000})>
         Public Shared Function NewChunkWriteLocationPolicyBenchmark(LogicalChunkCount As Integer,
                                                                     DurationMs As Long) As UnitTester.SimpleTest.BenchmarkResult
             '<UnitTester.SimpleTest({2048, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>

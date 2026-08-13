@@ -15,13 +15,14 @@
 
     Protected Overrides Sub GetTestsInternal(Tests As TestCreator)
         Dim TestMethods = GetAllTestMethods().Select(Function(x) New With {.Method = x,
-                                                                           .UnitTests = x.GetCustomAttributes(False).OfType(Of SimpleTestAttribute)}).
+                                                                           .UnitTests = x.GetCustomAttributes(False).OfType(Of SimpleTestAttribute).
+                                                                                          Where(Function(y) TestTypesToRun.HasFlag(y.TestType)).
+                                                                                          ToArray()}).
                                             Where(Function(x) x.UnitTests.Any()).
                                             Select(Function(x) New With {x.Method,
-                                                                         .UnitTests = x.UnitTests.Where(Function(y) TestTypesToRun.HasFlag(y.TestType)).ToArray(),
+                                                                         x.UnitTests,
                                                                          .TypeNames = x.Method.DeclaringType.Recurse(Function(y) {y.DeclaringType}, True).Select(Function(y) y.Name).Reverse().ToArray(),
                                                                          .TypeName = Join(.TypeNames, ".")}).
-                                            Where(Function(x) x.UnitTests.Any()).
                                             OrderBy(Function(x) x.TypeName).
                                             ThenBy(Function(x) x.Method.Name).
                                             ToArray()
@@ -128,10 +129,51 @@
 End Class
 
 <AttributeUsage(AttributeTargets.Method, AllowMultiple:=True, Inherited:=True)>
+Public Class SimpleBenchmarkAttribute
+    Inherits SimpleTestAttribute
+
+    Public Overrides ReadOnly Property TestType As SimpleTest.TestTypes = SimpleTest.TestTypes.Benchmark
+
+    ''' <summary>
+    ''' Indicates that this method is for unit testing; a failure will occur if an unhandled Exception is thrown
+    ''' </summary>
+    Public Sub New()
+
+    End Sub
+
+    ''' <summary>
+    ''' Indicates that this method is for unit testing
+    ''' </summary>
+    ''' <param name="InputParameters">Parameters that will be used to test the method</param>
+    Public Sub New(InputParameters() As Object)
+        MyBase.New(InputParameters)
+    End Sub
+
+    ''' <summary>
+    ''' Indicates that this method is for unit testing
+    ''' </summary>
+    ''' <param name="InputParameters">Parameters that will be used to test the method</param>
+    ''' <param name="ExpectedValue">The expected result, other results being returned will result in a failure</param>
+    Public Sub New(InputParameters() As Object, ExpectedValue As Object)
+        MyBase.New(InputParameters, ExpectedValue)
+    End Sub
+
+    ''' <summary>
+    ''' Indicates that this method is for unit testing
+    ''' </summary>
+    ''' <param name="ExpectedValue">The expected result, other results being returned will result in a failure</param>
+    Public Sub New(ExpectedValue As Object)
+        MyBase.New(ExpectedValue)
+    End Sub
+
+End Class
+
+
+<AttributeUsage(AttributeTargets.Method, AllowMultiple:=True, Inherited:=True)>
 Public Class SimpleTestAttribute
     Inherits Attribute
 
-    Public Property TestType As SimpleTest.TestTypes = SimpleTest.TestTypes.Test
+    Public Overridable ReadOnly Property TestType As SimpleTest.TestTypes = SimpleTest.TestTypes.Test
 
     ''' <summary>
     ''' Indicates that this method is for unit testing; a failure will occur if an unhandled Exception is thrown

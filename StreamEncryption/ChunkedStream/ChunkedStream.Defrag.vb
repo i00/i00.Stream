@@ -291,7 +291,7 @@ Namespace Streams
 
                     Dim CurrentFragmentation = GetFragmentation()
 
-                    If Not OriginalFragmentation.HasValue Then
+                    If OriginalFragmentation.HasValue = False Then
                         OriginalFragmentation = Math.Max(CurrentFragmentation, 0.000001R)
                     End If
 
@@ -304,9 +304,10 @@ Namespace Streams
                     Exit For
                 Next
 
-                If Not MovedSomething Then Exit Do
+                If MovedSomething = False Then Exit Do
             Loop
 
+            If CancellationToken.Cancel Then Return
             CommitDefragCheckpoint(GetDataEndFromIndex())
             ReportProgress(ProgressCallback, ProgressScale, ProgressScale, ProcessUnitTypes.Arbitrary, CancellationToken)
 
@@ -332,11 +333,138 @@ Namespace Streams
 
         Private Sub CommitDefragCheckpoint(DataEnd As Long)
 
-            If DataEnd < DataStartOffset Then Throw New InvalidDataException("Invalid defrag data end.")
-
-            PersistIndexAndHeader(DataEnd, True)
+            TrimAndCommitDefragMetadata(DataEnd)
 
         End Sub
+
+        Private Sub TrimAndCommitDefragMetadata(DataEnd As Long)
+
+            If DataEnd < DataStartOffset Then
+                Throw New InvalidDataException("Invalid defrag data end.")
+            End If
+
+            If DataEnd > _Fs.Length Then
+                Throw New InvalidDataException("Defrag data end is beyond the backing stream length.")
+            End If
+
+            Dim CompactDataEnd = Math.Max(CLng(DataStartOffset), DataEnd)
+            Dim FirstActiveMetadataOffset = GetFirstActiveMetadataOffset()
+            Dim CompactWriteLimit As Long? = Nothing
+
+            If FirstActiveMetadataOffset > CompactDataEnd Then
+                CompactWriteLimit = FirstActiveMetadataOffset
+            End If
+
+            InvalidateChunkCache()
+            ClearFreeSpaceMaps()
+
+            _IndexOffset = CompactDataEnd
+
+            BuildFreeChunkSpaceMap()
+
+            _IndexPageDescriptors.Clear()
+            _ChunkIndexDirectoryPageDescriptors.Clear()
+            _HoleDirectoryPageDescriptors.Clear()
+            _DirtyIndexPages.Clear()
+
+            _MetadataRootOffset = 0
+            _MetadataRootLength = 0
+
+            MarkAllIndexPagesDirty()
+
+            _CompactMetadataWriteOffset = CompactDataEnd
+            _CompactMetadataWriteLimit = CompactWriteLimit
+
+            Try
+
+                PersistIndexAndHeader(CompactDataEnd, True)
+
+            Finally
+
+                _CompactMetadataWriteOffset = Nothing
+                _CompactMetadataWriteLimit = Nothing
+
+            End Try
+
+            'We could probably use this as we have called PersistIndexAndHeader(...)
+            '... as the metadata root will be the last live structure:
+            'Dim NewEndOffset = _MetadataRootOffset +CLng(_MetadataRootLength)
+            '...But lets just check everything for saftey:
+            Dim NewEndOffset =
+                If(_MetadataRootOffset > 0 AndAlso _MetadataRootLength > 0,
+                   _MetadataRootOffset + CLng(_MetadataRootLength),
+                   Math.Max(CLng(DataStartOffset), GetDataEndFromIndex()))
+
+            'DEBUG STUFF TO CHECK WE TRUNCATE CORRECTLY:
+            'Dim S = Me.GetStructure()
+            'Debug.Print("Layout")
+            'Debug.Print($"Physical={S.PhysicalLength:N0}")
+            'Debug.Print($"DataAreaEnd={S.DataAreaEndOffset:N0}")
+            'Debug.Print($"LiveDataEnd={S.LiveDataEndOffset:N0}")
+            'Debug.Print($"MetadataRootEnd={S.MetadataRootEndOffset:N0}")
+
+            'For Each R In S.Regions
+            '    Debug.Print(
+            '        $"{R.RegionType,-25} " &
+            '        $"{R.Offset,12:N0} -> {R.EndOffset,12:N0} " &
+            '        $"({R.Length:N0})")
+            'Next
+
+            'Debug.Print("")
+            'Debug.Print("Index Pages")
+
+            'For Each D In _IndexPageDescriptors
+            '    Debug.Print(D.Value.Offset.ToString("N0"))
+            'Next
+
+            'Debug.Print("Hole Directories")
+
+            'For Each D In _HoleDirectoryPageDescriptors
+            '    Debug.Print(D.Value.Offset.ToString("N0"))
+            'Next
+
+            'Debug.Print("")
+            'Debug.Print($"TrimTo={NewEndOffset:N0}")
+
+            If NewEndOffset < _Fs.Length Then
+                _Fs.SetLength(NewEndOffset)
+            End If
+
+        End Sub
+
+        Private Function GetFirstActiveMetadataOffset() As Long
+
+            Dim Result As Long = Long.MaxValue
+
+            For Each Descriptor In _IndexPageDescriptors.Values
+                If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                    Result = Math.Min(Result, Descriptor.Offset)
+                End If
+            Next
+
+            For Each Descriptor In _ChunkIndexDirectoryPageDescriptors.Values
+                If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                    Result = Math.Min(Result, Descriptor.Offset)
+                End If
+            Next
+
+            For Each Descriptor In _HoleDirectoryPageDescriptors.Values
+                If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                    Result = Math.Min(Result, Descriptor.Offset)
+                End If
+            Next
+
+            If _MetadataRootOffset > 0 AndAlso _MetadataRootLength > 0 Then
+                Result = Math.Min(Result, _MetadataRootOffset)
+            End If
+
+            If Result = Long.MaxValue Then
+                Return _Fs.Length
+            End If
+
+            Return Result
+
+        End Function
 
         Private Enum DefragmentSequenceProgressModes
             Normal
@@ -353,21 +481,28 @@ Namespace Streams
             Select Case ProgressMode
                 Case DefragmentSequenceProgressModes.RebuildFinalPhase
 
-                    ProgressStart = 0.5
-                    ProgressEnd = 1
+                    ProgressStart = 0.5R
+                    ProgressEnd = 1.0R
 
                 Case DefragmentSequenceProgressModes.Normal
 
-                    ProgressStart = 0
-                    ProgressEnd = 1
+                    ProgressStart = 0.0R
+                    ProgressEnd = 1.0R
+
+                Case Else
+                    Throw New ArgumentOutOfRangeException(NameOf(ProgressMode))
+
             End Select
 
             Dim TotalBytes = _Index.Where(Function(entry) entry.Offset > 0 AndAlso entry.RecordLength > 0).
-                                    Sum(Function(entry) CLng(entry.RecordLength))
+                       Sum(Function(entry) CLng(entry.RecordLength))
             Dim ProcessedBytes As Long = 0
             Dim TargetOffset = CLng(DataStartOffset)
 
             For ChunkIndex = 0 To _Index.Count - 1
+
+                If CancellationToken.Cancel Then Return
+
                 Dim Entry = _Index(ChunkIndex)
 
                 If Entry.Offset = 0 AndAlso Entry.RecordLength = 0 Then Continue For
@@ -383,8 +518,8 @@ Namespace Streams
                 ProcessedBytes += Entry.RecordLength
 
                 Dim Ratio = If(TotalBytes = 0,
-                               1.0R,
-                               ProcessedBytes / CDbl(TotalBytes))
+                       1.0R,
+                       ProcessedBytes / CDbl(TotalBytes))
 
                 Dim ScaledRatio = ProgressStart + ((ProgressEnd - ProgressStart) * Ratio)
 
@@ -397,8 +532,9 @@ Namespace Streams
 
                 TargetOffset += Entry.RecordLength
 
-                If CancellationToken.Cancel Then Return
             Next
+
+            If CancellationToken.Cancel Then Return
 
             CommitDefragCheckpoint(GetDataEndFromIndex())
 
@@ -520,7 +656,7 @@ Namespace Streams
             ClearRecoveryAreaInMemory()
             MarkAllIndexPagesDirty()
 
-            PersistIndexAndHeader(PhysicalOffset, True)
+            TrimAndCommitDefragMetadata(PhysicalOffset)
 
             ReportProgress(ProgressCallback,
                            TotalBytes,

@@ -32,9 +32,17 @@ Namespace Streams
         End Function
 
         Private Function GetNextIndexPageWriteOffset(Length As Integer) As Long
+
             If Length <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
 
+            Dim CompactOffset As Long
+
+            If TryGetCompactMetadataWriteOffset(Length, CompactOffset) Then
+                Return CompactOffset
+            End If
+
             Select Case Options.NewIndexPageWriteLocationPolicy
+
                 Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
                      ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
 
@@ -43,15 +51,50 @@ Namespace Streams
                     If _FreeIndexPageSpaces.TryAllocate(Length, Offset) Then
                         Return Offset
                     End If
+
             End Select
 
             Return Math.Max(_Fs.Length, GetDataEndFromIndex())
+
+        End Function
+
+        Private Function TryGetCompactMetadataWriteOffset(Length As Integer,
+                                                          ByRef Offset As Long) As Boolean
+
+            If Length <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
+
+            If _CompactMetadataWriteOffset.HasValue = False Then
+                Offset = -1
+                Return False
+            End If
+
+            Dim CandidateOffset = _CompactMetadataWriteOffset.Value
+            Dim CandidateEndOffset = CandidateOffset + CLng(Length)
+
+            If _CompactMetadataWriteLimit.HasValue AndAlso CandidateEndOffset > _CompactMetadataWriteLimit.Value Then
+                Offset = -1
+                Return False
+            End If
+
+            Offset = CandidateOffset
+            _CompactMetadataWriteOffset = CandidateEndOffset
+
+            Return True
+
         End Function
 
         Private Function GetNextIndexDirectoryPageWriteOffset(Length As Integer) As Long
+
             If Length <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
 
+            Dim CompactOffset As Long
+
+            If TryGetCompactMetadataWriteOffset(Length, CompactOffset) Then
+                Return CompactOffset
+            End If
+
             Select Case Options.NewIndexDirectoryPageWriteLocationPolicy
+
                 Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
                      ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
 
@@ -60,9 +103,11 @@ Namespace Streams
                     If _FreeIndexDirectoryPageSpaces.TryAllocate(Length, Offset) Then
                         Return Offset
                     End If
+
             End Select
 
             Return Math.Max(_Fs.Length, GetDataEndFromIndex())
+
         End Function
 
         Private Function ShouldPersistHoleDirectory(Durable As Boolean) As Boolean
@@ -438,9 +483,11 @@ Namespace Streams
             If _IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid index page entry count.")
             If _IndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid index directory entry count.")
 
+#If DEBUG Then
             _DebugPersistCount += 1
             _DebugLastPersistIndexPageCount = _DirtyIndexPages.Count
             _DebugTotalPersistIndexPages += _DirtyIndexPages.Count
+#End If
 
             Dim RequiredIndexPageCount = GetIndexPageCount(_Index.Count, _IndexPageEntryCount)
 
@@ -469,7 +516,10 @@ Namespace Streams
             _DirtyIndexPages.Clear()
 
             IndexPageSw.Stop()
+
+#If DEBUG Then
             _DebugIndexPageTicks += IndexPageSw.ElapsedTicks
+#End If
 
             Dim DirectorySw = System.Diagnostics.Stopwatch.StartNew()
             Dim ChunkDirectorySw = System.Diagnostics.Stopwatch.StartNew()
@@ -518,7 +568,10 @@ Namespace Streams
             End If
 
             ChunkDirectorySw.Stop()
+
+#If DEBUG Then
             _DebugChunkDirectoryTicks += ChunkDirectorySw.ElapsedTicks
+#End If
 
             Dim HoleDirectorySw = System.Diagnostics.Stopwatch.StartNew()
 
@@ -550,10 +603,16 @@ Namespace Streams
                                               ToArray()
 
             HoleDirectorySw.Stop()
+
+#If DEBUG Then
             _DebugHoleDirectoryTicks += HoleDirectorySw.ElapsedTicks
+#End If
 
             DirectorySw.Stop()
+
+#If DEBUG Then
             _DebugDirectoryTicks += DirectorySw.ElapsedTicks
+#End If
 
             Dim RootSw = System.Diagnostics.Stopwatch.StartNew()
 
@@ -564,7 +623,14 @@ Namespace Streams
             Dim OldRootOffset = _MetadataRootOffset
             Dim OldRootLength = _MetadataRootLength
 
-            _MetadataRootOffset = Math.Max(_Fs.Length, GetDataEndFromIndex())
+            Dim CompactRootOffset As Long
+
+            If TryGetCompactMetadataWriteOffset(Root.Length, CompactRootOffset) Then
+                _MetadataRootOffset = CompactRootOffset
+            Else
+                _MetadataRootOffset = Math.Max(_Fs.Length, GetDataEndFromIndex())
+            End If
+
             _MetadataRootLength = Root.Length
 
             _Fs.Position = _MetadataRootOffset
@@ -577,19 +643,28 @@ Namespace Streams
             If Durable Then FlushDurable(_Fs)
 
             RootSw.Stop()
+
+#If DEBUG Then
             _DebugRootTicks += RootSw.ElapsedTicks
+#End If
 
             Dim HeaderSw = System.Diagnostics.Stopwatch.StartNew()
 
             UpdateHeader(Durable)
 
             HeaderSw.Stop()
+
+#If DEBUG Then
             _DebugHeaderTicks += HeaderSw.ElapsedTicks
+#End If
 
             If Durable Then FlushDurable(_Fs)
 
             PersistSw.Stop()
+
+#If DEBUG Then
             _DebugPersistTicks += PersistSw.ElapsedTicks
+#End If
 
         End Sub
 
