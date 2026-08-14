@@ -231,20 +231,36 @@ Namespace Streams
                 ''' </summary>
                 None = 0
 
-                ''' <summary>
-                ''' Store the chunk payload using LZ4 block compression.
-                ''' </summary>
-                Lz4 = 1
+
+                ' ================================================================================
+                ' Inbuilt:
+                ' ================================================================================
 
                 ''' <summary>
                 ''' Store the chunk payload using Deflate compression.
                 ''' </summary>
-                Deflate = 2
+                Deflate = 1
 
                 ''' <summary>
                 ''' Store the chunk payload using GZip compression.
                 ''' </summary>
-                GZip = 3
+                GZip = 2
+
+
+                ' ================================================================================
+                ' Custom:
+                ' ================================================================================
+
+                ''' <summary>
+                ''' Store the chunk payload using LZ4 block compression.
+                ''' </summary>
+                Lz4 = 3
+
+                ''' <summary>
+                ''' Store the chunk payload using Snappy block compression.
+                ''' </summary>
+                Snappy = 4
+
 
             End Enum
 

@@ -1,10 +1,8 @@
-﻿Imports System
-Imports System.Collections.Generic
-Imports System.IO
+﻿Imports System.IO
 
-Namespace Streams
+Namespace Compression
 
-    Friend NotInheritable Class Lz4Block
+    Friend NotInheritable Class Lz4
 
         Private Const MinMatch As Integer = 4
         Private Const HashBits As Integer = 12

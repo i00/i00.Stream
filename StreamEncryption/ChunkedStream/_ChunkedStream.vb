@@ -477,11 +477,12 @@ Namespace Streams
         <Flags>
         Friend Enum HeaderFlags As Long
             None = 0
-            VariableChunkIndex = 1
-            CompressionLz4 = 2
-            CompressionDeflate = 4
-            CompressionGZip = 8
-            StoreSparseChunks = 16
+            VariableChunkIndex = 1 << 0
+            StoreSparseChunks = 1 << 1
+            CompressionDeflate = 1 << 2
+            CompressionGZip = 1 << 3
+            CompressionLz4 = 1 << 4
+            CompressionSnappy = 1 << 5
         End Enum
 
         Friend Structure ChunkIndexEntry
@@ -729,17 +730,15 @@ Namespace Streams
             Dim FlagsValue = BitConverter.ToInt64(Header, FlagsOffset)
             Dim Flags = CType(FlagsValue, HeaderFlags)
 
-            Dim SupportedFlags = HeaderFlags.VariableChunkIndex Or
-                                 HeaderFlags.CompressionLz4 Or
-                                 HeaderFlags.CompressionDeflate Or
-                                 HeaderFlags.CompressionGZip Or
-                                 HeaderFlags.StoreSparseChunks
+            Dim SupportedFlags = [Enum].GetValues(GetType(HeaderFlags)).
+                                        Cast(Of HeaderFlags)().
+                                        Aggregate(ChunkedStream.HeaderFlags.None, Function(Current, Flag) Current Or Flag)
 
-            If (FlagsValue And Not CLng(SupportedFlags)) <> 0 Then
-                Throw New InvalidDataException($"Unsupported chunked stream flags: {FlagsValue}.")
+            If (Flags And Not SupportedFlags) <> HeaderFlags.None Then
+                Throw New InvalidDataException($"Unsupported chunked stream flags: {CLng(Flags)}.")
             End If
 
-            If (Flags And HeaderFlags.VariableChunkIndex) = 0 Then
+            If Flags.HasFlag(HeaderFlags.VariableChunkIndex) = False Then
                 Throw New InvalidDataException("Chunked stream does not contain a chunk index.")
             End If
 
@@ -895,16 +894,7 @@ Namespace Streams
                 Flags = Flags Or HeaderFlags.StoreSparseChunks
             End If
 
-            Select Case EffectiveOptions.CompressionMethod
-                Case ChunkedStreamOptions.CompressionMethods.Lz4
-                    Flags = Flags Or HeaderFlags.CompressionLz4
-
-                Case ChunkedStreamOptions.CompressionMethods.Deflate
-                    Flags = Flags Or HeaderFlags.CompressionDeflate
-
-                Case ChunkedStreamOptions.CompressionMethods.GZip
-                    Flags = Flags Or HeaderFlags.CompressionGZip
-            End Select
+            Flags = Flags Or CompressionMethodsToHeaderFlags(EffectiveOptions.CompressionMethod)
 
             If EffectiveOptions.ChunkSize <= 0 Then EffectiveOptions.ChunkSize = DefaultChunkSize
             If EffectiveOptions.IndexPageEntryCount <= 0 Then EffectiveOptions.IndexPageEntryCount = 256

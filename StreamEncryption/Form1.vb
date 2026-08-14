@@ -67,7 +67,7 @@ Public Class Form1
 
         'Test("C:\Games\Vampire The Masquerade - Bloodlines.zip")
         'Test("C:\Windows\System32\mrt.exe")
-        'Test("C:\Games\mrt.zip")
+        'Test("C:\Games\mrt.zip", True)
         Test("C:\Games\mrt.exe", True)
         'Test("C:\Windows\explorer.exe", True)
 
@@ -80,6 +80,16 @@ Public Class Form1
     End Sub
 
     Public Sub Test(FileName As String, Optional RandomWrite As Boolean = False)
+
+        Dim Options As New Streams.ChunkedStream.ChunkedStreamOptions() With
+        {
+            .CompressionRatioThreshold = 1,
+            .CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+            .EncryptionInfo = New Streams.ChunkedStream.EncryptionInfo("MySecretPassword"),
+            .NewIndexPageWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.Append,
+            .NewChunkWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.Append
+        }
+
 
         Using frmProgress As New i00CodeLib.frmProgress(
         Sub(Parameter, ProgressReport)
@@ -118,13 +128,6 @@ Public Class Form1
 
                     Dim StartTime = DateTime.UtcNow
                     Dim FileLength = InputFs.Length
-
-                    Dim Options As New Streams.ChunkedStream.ChunkedStreamOptions() With
-                    {
-                        .CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
-                        .EncryptionInfo = New Streams.ChunkedStream.EncryptionInfo("MySecretPassword"),
-                        .NewIndexPageWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.Append,
-                        .NewChunkWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.Append}
 
                     Using Enc = Streams.ChunkedStream.Open(EncStorage, Options)
 

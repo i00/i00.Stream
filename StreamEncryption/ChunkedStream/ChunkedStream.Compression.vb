@@ -49,28 +49,42 @@ Namespace Streams
 
         End Function
 
-        Private Sub MarkCompressionFlag(Method As ChunkedStreamOptions.CompressionMethods)
+        Private Shared Function CompressionMethodsToHeaderFlags(Method As ChunkedStreamOptions.CompressionMethods) As HeaderFlags
 
             Select Case Method
-                Case ChunkedStreamOptions.CompressionMethods.Lz4
-                    _HeaderFlags = _HeaderFlags Or HeaderFlags.CompressionLz4
+                Case ChunkedStreamOptions.CompressionMethods.None
+                    Return HeaderFlags.None
                 Case ChunkedStreamOptions.CompressionMethods.Deflate
-                    _HeaderFlags = _HeaderFlags Or HeaderFlags.CompressionDeflate
+                    Return HeaderFlags.CompressionDeflate
                 Case ChunkedStreamOptions.CompressionMethods.GZip
-                    _HeaderFlags = _HeaderFlags Or HeaderFlags.CompressionGZip
+                    Return HeaderFlags.CompressionGZip
+                Case ChunkedStreamOptions.CompressionMethods.Lz4
+                    Return HeaderFlags.CompressionLz4
+                Case ChunkedStreamOptions.CompressionMethods.Snappy
+                    Return HeaderFlags.CompressionSnappy
+                Case Else
+                    Throw New NotSupportedException($"Value {Method} is not a known member of {NameOf(ChunkedStreamOptions.CompressionMethods)}")
             End Select
+
+        End Function
+
+        Private Sub MarkCompressionFlag(Method As ChunkedStreamOptions.CompressionMethods)
+
+            _HeaderFlags = _HeaderFlags Or CompressionMethodsToHeaderFlags(Method)
 
         End Sub
 
         Private Shared Function CompressPayload(Method As ChunkedStreamOptions.CompressionMethods, Input As Byte(), Count As Integer) As Byte()
 
             Select Case Method
-                Case ChunkedStreamOptions.CompressionMethods.Lz4
-                    Return Lz4Block.Compress(Input, 0, Count)
                 Case ChunkedStreamOptions.CompressionMethods.Deflate
                     Return CompressWithFrameworkStream(Input, Count, ChunkedStreamOptions.CompressionMethods.Deflate)
                 Case ChunkedStreamOptions.CompressionMethods.GZip
                     Return CompressWithFrameworkStream(Input, Count, ChunkedStreamOptions.CompressionMethods.GZip)
+                Case ChunkedStreamOptions.CompressionMethods.Lz4
+                    Return Compression.Lz4.Compress(Input, 0, Count)
+                Case ChunkedStreamOptions.CompressionMethods.Snappy
+                    Return Compression.Snappy.Compress(Input, 0, Count)
                 Case Else
                     Dim Output(Count - 1) As Byte
                     System.Buffer.BlockCopy(Input, 0, Output, 0, Count)
@@ -85,12 +99,14 @@ Namespace Streams
                 Case ChunkedStreamOptions.CompressionMethods.None
                     If Input.Length <> ExpectedLength Then Throw New InvalidDataException("Uncompressed data length does not match expected plain length.")
                     Return Input
-                Case ChunkedStreamOptions.CompressionMethods.Lz4
-                    Return Lz4Block.Decompress(Input, ExpectedLength)
                 Case ChunkedStreamOptions.CompressionMethods.Deflate
                     Return DecompressWithFrameworkStream(Input, ExpectedLength, ChunkedStreamOptions.CompressionMethods.Deflate)
                 Case ChunkedStreamOptions.CompressionMethods.GZip
                     Return DecompressWithFrameworkStream(Input, ExpectedLength, ChunkedStreamOptions.CompressionMethods.GZip)
+                Case ChunkedStreamOptions.CompressionMethods.Lz4
+                    Return Compression.Lz4.Decompress(Input, ExpectedLength)
+                Case ChunkedStreamOptions.CompressionMethods.Snappy
+                    Return Compression.Snappy.Decompress(Input)
                 Case Else
                     Throw New InvalidDataException($"Unsupported chunk compression method: {CInt(Method)}.")
             End Select

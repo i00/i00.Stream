@@ -486,20 +486,11 @@ Namespace Streams
 
             End If
 
-            Select Case CompressionEvaluatedMethod
-
-                Case ChunkedStreamOptions.CompressionMethods.None,
-                     ChunkedStreamOptions.CompressionMethods.Lz4,
-                     ChunkedStreamOptions.CompressionMethods.Deflate,
-                     ChunkedStreamOptions.CompressionMethods.GZip
-
-                    ' Valid.
-
-                Case Else
-
-                    Throw New InvalidDataException($"Unsupported evaluated compression method: {CInt(CompressionEvaluatedMethod)}.")
-
-            End Select
+            If [Enum].IsDefined(GetType(ChunkedStreamOptions.CompressionMethods), CompressionEvaluatedMethod) Then
+                ' Valid
+            Else
+                Throw New InvalidDataException($"Unsupported evaluated compression method: {CInt(CompressionEvaluatedMethod)}.")
+            End If
 
             Dim RecordMacKey =
                 If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey,
