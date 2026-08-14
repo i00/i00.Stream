@@ -571,6 +571,8 @@ Namespace Streams
             Dim NewIndex As New List(Of ChunkIndexEntry)(TargetChunkCount)
             Dim TargetBuffer(TargetChunkSize - 1) As Byte
 
+            ' Phase 1 writes the rebuilt chunk records after the current committed stream.
+            ' This preserves the old committed layout until the rebuilt index is published.
             Dim PhysicalOffset =
                 Math.Max(_Fs.Length,
                          GetDataEndFromIndex())
@@ -622,8 +624,12 @@ Namespace Streams
 
                 ProcessedBytes += PlainLength
 
+                Dim FirstPhaseUnits =
+                    CLng((Math.Min(ProcessedBytes, TotalBytes) / CDbl(TotalBytes)) *
+                         (TotalBytes / 2.0R))
+
                 ReportProgress(ProgressCallback,
-                               Math.Min(ProcessedBytes, TotalBytes),
+                               FirstPhaseUnits,
                                TotalBytes,
                                ProcessUnitTypes.Bytes,
                                CancellationToken)
@@ -656,7 +662,21 @@ Namespace Streams
             ClearRecoveryAreaInMemory()
             MarkAllIndexPagesDirty()
 
-            TrimAndCommitDefragMetadata(PhysicalOffset)
+            ' Publish the rebuilt appended layout first. After this point the rebuilt
+            ' chunks are the committed state, so the old pre-rebuild physical area can
+            ' safely be overwritten by the journalled sequence phase.
+            PersistIndexAndHeader(PhysicalOffset, True)
+
+            If CancellationToken.Cancel Then Return
+
+            ' Phase 2 compacts the newly rebuilt live chunks back to the start of the
+            ' data area using the existing journalled move path, then performs the final
+            ' compact metadata repack and tail trim through CommitDefragCheckpoint.
+            DefragmentSequence(DefragmentSequenceProgressModes.RebuildFinalPhase,
+                               ProgressCallback,
+                               CancellationToken)
+
+            If CancellationToken.Cancel Then Return
 
             ReportProgress(ProgressCallback,
                            TotalBytes,
@@ -682,8 +702,8 @@ Namespace Streams
 
             Dim PlaintextAllZero = PlainLength = 0 OrElse IsAllZero(Plain, PlainLength)
 
-            If PlainLength = 0 OrElse (Not Options.StoreSparseChunks AndAlso PlaintextAllZero) Then
-                _HeaderFlags = _HeaderFlags Or HeaderFlags.SparseChunks
+            If PlainLength = 0 OrElse (Options.StoreSparseChunks = False AndAlso PlaintextAllZero) Then
+                _HeaderFlags = _HeaderFlags Or HeaderFlags.StoreSparseChunks
                 Return New ChunkIndexEntry()
             End If
 

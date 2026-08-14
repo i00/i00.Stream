@@ -79,6 +79,8 @@ Namespace Streams
         ''' </summary>
         Public NotInheritable Class EncryptionInfo
 
+            Public Shared Property DefaultPBKDF2Iterations As Integer = 600000
+
             ''' <summary>
             ''' Derives a 256-bit key from a passphrase using PBKDF2-SHA256.
             ''' </summary>
@@ -88,7 +90,9 @@ Namespace Streams
             ''' <returns>A 32-byte key.</returns>
             Public Shared Function DeriveMasterKey(Passphrase As String,
                                                    Optional Salt As Byte() = Nothing,
-                                                   Optional Iterations As Integer = 10000) As Byte()
+                                                   Optional Iterations As Integer? = Nothing) As Byte()
+
+                If Iterations.HasValue = False Then Iterations = DefaultPBKDF2Iterations
 
                 If Passphrase Is Nothing Then Throw New ArgumentNullException(NameOf(Passphrase))
                 'If Salt Is Nothing Then Throw New ArgumentNullException(NameOf(Salt))
@@ -104,7 +108,7 @@ Namespace Streams
                 Dim PasswordBytes = Encoding.UTF8.GetBytes(Passphrase)
 
                 Try
-                    Using Kdf As New Rfc2898DeriveBytes(PasswordBytes, EffectiveSalt, Iterations, HashAlgorithmName.SHA256)
+                    Using Kdf As New Rfc2898DeriveBytes(PasswordBytes, EffectiveSalt, Iterations.Value, HashAlgorithmName.SHA256)
                         Return Kdf.GetBytes(32)
                     End Using
                 Finally
@@ -122,7 +126,7 @@ Namespace Streams
             ''' <returns>A 32-byte key.</returns>
             Public Shared Function DeriveMasterKey(Passphrase As String,
                                                    Optional Salt As String = "",
-                                                   Optional Iterations As Integer = 10000) As Byte()
+                                                   Optional Iterations As Integer? = Nothing) As Byte()
                 Return DeriveMasterKey(Passphrase, Encoding.UTF8.GetBytes(Salt & ""), Iterations)
             End Function
 
@@ -143,14 +147,14 @@ Namespace Streams
             ''' <summary>
             ''' Creates encryption information from a Passphrase
             ''' </summary>
-            Public Sub New(Passphrase As String, Salt As String, Optional Iterations As Integer = 10000)
+            Public Sub New(Passphrase As String, Salt As String, Optional Iterations As Integer? = Nothing)
                 Me.New(DeriveMasterKey(Passphrase, Salt, Iterations))
             End Sub
 
             ''' <summary>
             ''' Creates encryption information from a Passphrase
             ''' </summary>
-            Public Sub New(Passphrase As String, Optional Salt As Byte() = Nothing, Optional Iterations As Integer = 10000)
+            Public Sub New(Passphrase As String, Optional Salt As Byte() = Nothing, Optional Iterations As Integer? = Nothing)
                 Me.New(DeriveMasterKey(Passphrase, Salt, Iterations))
             End Sub
 

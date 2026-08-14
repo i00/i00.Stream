@@ -1141,12 +1141,27 @@ Namespace Streams
         Public ReadOnly Property MetadataRootEndOffset As Long
 
         ''' <summary>
-        ''' Fragmented bytes as a ratio of the physical data area.
+        ''' Chunk-data fragmentation as a ratio of the live chunk-data area.
+        ''' This uses the same definition as ChunkedStream.GetFragmentation().
         ''' </summary>
+        ''' <remarks>
+        ''' This value measures unused space between DataStartOffset and LiveDataEndOffset
+        ''' using live chunk-record bytes only. Metadata layout holes are still exposed
+        ''' through FragmentedBytes, HoleCount, LargestHoleBytes and Regions.
+        ''' </remarks>
         Public ReadOnly Property FragmentationRatio As Double
             Get
-                If PhysicalDataAreaBytes <= 0 Then Return 0
-                Return FragmentedBytes / CDbl(PhysicalDataAreaBytes)
+
+                Dim TotalStoredChunkBytes =
+                    Math.Max(0L, LiveDataEndOffset - DataStartOffset)
+
+                If TotalStoredChunkBytes <= 0 Then Return 0
+
+                Dim WastedChunkBytes =
+                    Math.Max(0L, TotalStoredChunkBytes - PhysicalChunkRecordBytes)
+
+                Return WastedChunkBytes / CDbl(TotalStoredChunkBytes)
+
             End Get
         End Property
 

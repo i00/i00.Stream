@@ -112,19 +112,11 @@ Namespace Streams
             ''' <summary>
             ''' Gets or sets the placement policy used for newly written index pages.
             ''' </summary>
-            ''' <remarks>
-            ''' This option is reserved for the paged-index metadata layout. In the current flat-index
-            ''' layout it is stored as an option only and is not used by the existing index writer.
-            ''' </remarks>
             Public Property NewIndexPageWriteLocationPolicy As NewWriteLocationPolicies = NewWriteLocationPolicies.FillHoles
 
             ''' <summary>
             ''' Gets or sets the placement policy used for newly written index-directory pages.
             ''' </summary>
-            ''' <remarks>
-            ''' This option is reserved for the paged-index metadata layout. In the current flat-index
-            ''' layout it is stored as an option only and is not used by the existing index writer.
-            ''' </remarks>
             Public Property NewIndexDirectoryPageWriteLocationPolicy As NewWriteLocationPolicies = NewWriteLocationPolicies.FillHoles
 
             ''' <summary>

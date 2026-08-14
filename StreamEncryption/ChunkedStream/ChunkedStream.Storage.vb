@@ -262,7 +262,7 @@ Namespace Streams
 
                 _Index(CInt(ChunkIndex)) = New ChunkIndexEntry()
                 MarkIndexPageDirty(CInt(ChunkIndex))
-                _HeaderFlags = _HeaderFlags Or HeaderFlags.SparseChunks
+                _HeaderFlags = _HeaderFlags Or HeaderFlags.StoreSparseChunks
 
                 If PreviousEntry.Offset > 0 AndAlso PreviousEntry.RecordLength > 0 Then
                     AddFreeChunkSpace(PreviousEntry.Offset, PreviousEntry.RecordLength)

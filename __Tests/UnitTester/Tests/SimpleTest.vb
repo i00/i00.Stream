@@ -79,8 +79,8 @@
                                              Dim IsBenchmark = test.TestType.HasFlag(TestTypes.Benchmark)
                                              Dim BenchmarkResult = TryCast(TestResult, BenchmarkResult)
                                              Dim SuccessMessage As String = BenchmarkResult?.Message
-                                             If IsBenchmark AndAlso SuccessMessage Is Nothing Then
-                                                 SuccessMessage = $"{sw.Elapsed}"
+                                             If SuccessMessage Is Nothing Then
+                                                 SuccessMessage = $"{sw.Elapsed.Format()}"
                                              End If
 
                                              If test.ExpectedValueSet Then

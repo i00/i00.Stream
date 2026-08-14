@@ -255,19 +255,19 @@ Namespace Streams
 
         Public Overrides ReadOnly Property CanRead As Boolean
             Get
-                Return True
+                Return _Fs.CanRead
             End Get
         End Property
 
         Public Overrides ReadOnly Property CanWrite As Boolean
             Get
-                Return True
+                Return _Fs.CanWrite
             End Get
         End Property
 
         Public Overrides ReadOnly Property CanSeek As Boolean
             Get
-                Return True
+                Return _Fs.CanSeek
             End Get
         End Property
 
@@ -380,6 +380,7 @@ Namespace Streams
         Private Const JournalAreaOffset As Integer = 100
         Private Const JournalAreaLength As Integer = 64
 
+        'TODO: hrm ... kind of duplicated names ... also maybe name some better... I mean 2x offsets etc: JournalOldOffsetOffset (above) and names with things like LengthOffset ... is it length or offset :P?
         Private Const RecoveryStateOffset As Integer = JournalStateOffset
         Private Const RecoveryAreaOffset As Integer = JournalAreaOffset
         Private Const RecoveryAreaLength As Integer = JournalAreaLength
@@ -470,8 +471,8 @@ Namespace Streams
             Public Length As Long
         End Structure
 
-        Private Shared ReadOnly HeaderMagic As Byte() = Encoding.ASCII.GetBytes("ESTRM001")
-        Private Shared ReadOnly PublicIntegrityKey As Byte() = Encoding.UTF8.GetBytes("ChunkedStream Public Integrity Key v1")
+        Private Shared ReadOnly HeaderMagic As Byte() = Encoding.ASCII.GetBytes("CSTRM001")
+        Private Shared ReadOnly PublicIntegrityKey As Byte() = Encoding.UTF8.GetBytes("ChunkedStream Public Integrity Key")
 
         <Flags>
         Friend Enum HeaderFlags As Long
@@ -480,7 +481,7 @@ Namespace Streams
             CompressionLz4 = 2
             CompressionDeflate = 4
             CompressionGZip = 8
-            SparseChunks = 16
+            StoreSparseChunks = 16
         End Enum
 
         Friend Structure ChunkIndexEntry
@@ -576,7 +577,7 @@ Namespace Streams
 
         Private Const SupportedChunkFlags As ChunkFlags = ChunkFlags.PlaintextAllZero
 
-        'TODO: get rid of these?
+        'TODO: get rid of these.. the values would be odvious in place and not change?
         Private Const MinimumCompressionEvaluatedPercent As Integer = 0
         Private Const MaximumCompressionEvaluatedPercent As Integer = 100
         Private Const MinimumCompressionRatioThreshold As Double = 0.0R
@@ -684,11 +685,19 @@ Namespace Streams
         ''' <param name="Options">Options controlling newly written chunks.</param>
         ''' <returns>An opened ChunkedStream.</returns>
         Public Shared Function Open(Fs As Stream,
-                                    Optional Options As ChunkedStreamOptions = Nothing) As ChunkedStream
+                                    Optional Options As ChunkedStreamOptions = Nothing,
+                                    Optional AllowOpeningWhenRecoveryFails As Boolean = False) As ChunkedStream
 
             If Fs Is Nothing Then Throw New ArgumentNullException(NameOf(Fs))
 
+            If Fs.CanRead = False OrElse Fs.CanSeek = False Then
+                Throw New NotSupportedException($"Provided {NameOf(Fs)} must support {NameOf(Fs.CanRead)} and {NameOf(Fs.CanSeek)}.")
+            End If
+
             If Fs.Length < DataStartOffset Then
+                If Fs.CanWrite = False Then
+                    Throw New NotSupportedException($"Provided {NameOf(Fs)} must support {NameOf(Fs.CanWrite)}.")
+                End If
                 Return CreateNew(Fs, Options)
             End If
 
@@ -724,7 +733,7 @@ Namespace Streams
                                  HeaderFlags.CompressionLz4 Or
                                  HeaderFlags.CompressionDeflate Or
                                  HeaderFlags.CompressionGZip Or
-                                 HeaderFlags.SparseChunks
+                                 HeaderFlags.StoreSparseChunks
 
             If (FlagsValue And Not CLng(SupportedFlags)) <> 0 Then
                 Throw New InvalidDataException($"Unsupported chunked stream flags: {FlagsValue}.")
@@ -821,11 +830,60 @@ Namespace Streams
                 Throw New EncryptionMismatchException("The supplied encryption information could not unwrap the file master key.")
             End If
 
-            Result.RecoverState()
+            Result._RecoveryStateAtOpen = Result.GetRecoveryState()
+            If Result._RecoveryStateAtOpen <> RecoveryStates.None Then
+                If Fs.CanWrite Then
+                    Try
+                        Result.RecoverState()
+                        Result._AutoRecoveryState = AutoRecoveryStates.Repaired
+                    Catch ex As Exception When AllowOpeningWhenRecoveryFails
+                        'we ignore errors to allow diagnostics if AllowOpeningRecoveryFails is set
+                        Result._AutoRecoveryException = ex
+                        Result._AutoRecoveryState = AutoRecoveryStates.Failed
+                    End Try
+                Else
+                    If AllowOpeningWhenRecoveryFails Then
+
+                    Else
+                        Throw New NotSupportedException(
+                            $"The stream is pending recovery ({Result._RecoveryStateAtOpen}). " &
+                            $"The backing stream must support write access to perform recovery, " &
+                            $"or {NameOf(AllowOpeningWhenRecoveryFails)} must be set to True to allow diagnostic access.")
+                    End If
+                End If
+            End If
 
             Return Result
 
         End Function
+
+        Dim _RecoveryStateAtOpen As RecoveryStates
+        Public ReadOnly Property RecoveryStateAtOpen As RecoveryStates
+            Get
+                Return _RecoveryStateAtOpen
+            End Get
+        End Property
+
+        Public Enum AutoRecoveryStates
+            NotRequired
+            Required
+            Repaired
+            Failed
+        End Enum
+
+        Private Property _AutoRecoveryState As AutoRecoveryStates
+        Public ReadOnly Property AutoRecoveryState As AutoRecoveryStates
+            Get
+                Return _AutoRecoveryState
+            End Get
+        End Property
+
+        Private Property _AutoRecoveryException As Exception
+        Public ReadOnly Property AutoRecoveryException As Exception
+            Get
+                Return _AutoRecoveryException
+            End Get
+        End Property
 
         Private Shared Function CreateNew(Fs As Stream, Options As ChunkedStreamOptions) As ChunkedStream
             Dim Header(HeaderSize - 1) As Byte
@@ -834,7 +892,7 @@ Namespace Streams
             Dim Flags = HeaderFlags.VariableChunkIndex
 
             If Not EffectiveOptions.StoreSparseChunks Then
-                Flags = Flags Or HeaderFlags.SparseChunks
+                Flags = Flags Or HeaderFlags.StoreSparseChunks
             End If
 
             Select Case EffectiveOptions.CompressionMethod
@@ -952,7 +1010,7 @@ Namespace Streams
 
                 If _Length > Integer.MaxValue Then
                     Throw New InvalidOperationException(
-                        "The logical length exceeds the maximum supported byte array size.")
+                        $"The logical length exceeds the maximum supported by an {NameOf(Array)}.")
                 End If
 
                 If _Length = 0 Then
@@ -1029,52 +1087,112 @@ Namespace Streams
                 Throw New ArgumentOutOfRangeException(NameOf(Count))
             End If
 
-            If Buffer.Length - Offset < Count Then
-                Throw New ArgumentException("Invalid offset/count.")
+            If Offset + Count > Buffer.Length Then
+                Throw New ArgumentException("Offset and count exceed the buffer length.")
             End If
 
-            Dim Temp(Count - 1) As Byte
+            SyncLock _SyncRoot
 
-            Dim BytesRead = Read(_Position, Temp)
+                ThrowIfDisposed()
 
-            If BytesRead > 0 Then
-                System.Buffer.BlockCopy(Temp, 0, Buffer, Offset, BytesRead)
-            End If
+                Dim BytesRead As Integer =
+                    Read(_Position,
+                         Buffer,
+                         Offset,
+                         Count)
 
-            _Position += BytesRead
+                _Position += BytesRead
 
-            Return BytesRead
+                Return BytesRead
+
+            End SyncLock
 
         End Function
 
         ''' <summary>
         ''' Reads plaintext from the logical stream at the specified offset.
         ''' </summary>
-        Public Overloads Function Read(LogicalOffset As Long, Output As Byte()) As Integer
+        ''' <param name="LogicalOffset">
+        ''' Logical stream offset to start reading from.
+        ''' </param>
+        ''' <param name="Output">
+        ''' Destination buffer.
+        ''' </param>
+        ''' <param name="OutputOffset">
+        ''' Offset within <paramref name="Output" /> where bytes should be written.
+        ''' </param>
+        ''' <param name="Count">
+        ''' Maximum number of bytes to read. If Nothing, reads as many bytes as will fit from <paramref name="OutputOffset" /> to the end of <paramref name="Output" />.
+        ''' </param>
+        ''' <returns>
+        ''' Number of bytes read into <paramref name="Output" />.
+        ''' </returns>
+        Public Overloads Function Read(LogicalOffset As Long,
+                                       Output As Byte(),
+                                       Optional OutputOffset As Integer = 0,
+                                       Optional Count As Integer? = Nothing) As Integer
 
             SyncLock _SyncRoot
 
                 ThrowIfDisposed()
 
-                If Output Is Nothing Then Throw New ArgumentNullException(NameOf(Output))
-                If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
-                If Output.Length = 0 OrElse LogicalOffset >= _Length Then Return 0
+                If Output Is Nothing Then
+                    Throw New ArgumentNullException(NameOf(Output))
+                End If
 
-                Dim ToRead = CInt(Math.Min(CLng(Output.Length), _Length - LogicalOffset))
+                If LogicalOffset < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+                End If
+
+                If OutputOffset < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(OutputOffset))
+                End If
+
+                If OutputOffset > Output.Length Then
+                    Throw New ArgumentException("Output offset exceeds the output buffer length.", NameOf(OutputOffset))
+                End If
+
+                Dim EffectiveCount As Integer
+
+                If Count.HasValue Then
+                    EffectiveCount = Count.Value
+                Else
+                    EffectiveCount = Output.Length - OutputOffset
+                End If
+
+                If EffectiveCount < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(Count))
+                End If
+
+                If EffectiveCount > Output.Length - OutputOffset Then
+                    Throw New ArgumentException("Invalid offset/count.")
+                End If
+
+                If EffectiveCount = 0 OrElse LogicalOffset >= _Length Then
+                    Return 0
+                End If
+
+                Dim ToRead = CInt(Math.Min(CLng(EffectiveCount), _Length - LogicalOffset))
                 Dim OutPos = 0
+
                 Dim FirstChunk = LogicalOffset \ _ChunkSize
                 Dim LastChunk = (LogicalOffset + ToRead - 1) \ _ChunkSize
 
                 For ChunkIndex = FirstChunk To LastChunk
 
                     Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
+
                     LoadChunk(ChunkIndex, _ChunkPlain)
 
                     Dim ChunkStart = ChunkIndex * CLng(_ChunkSize)
                     Dim SrcOffset = CInt(Math.Max(0L, LogicalOffset - ChunkStart))
                     Dim CopyLength = Math.Min(_ChunkSize - SrcOffset, ToRead - OutPos)
 
-                    System.Buffer.BlockCopy(_ChunkPlain, SrcOffset, Output, OutPos, CopyLength)
+                    System.Buffer.BlockCopy(_ChunkPlain,
+                                            SrcOffset,
+                                            Output,
+                                            OutputOffset + OutPos,
+                                            CopyLength)
 
                     OutPos += CopyLength
 
@@ -1085,6 +1203,7 @@ Namespace Streams
             End SyncLock
 
         End Function
+
 
 #If DEBUG Then
 
@@ -1201,40 +1320,97 @@ Namespace Streams
                 Throw New ArgumentOutOfRangeException(NameOf(Count))
             End If
 
-            If Buffer.Length - Offset < Count Then
-                Throw New ArgumentException("Invalid offset/count.")
+            If Offset + Count > Buffer.Length Then
+                Throw New ArgumentException("Offset and count exceed the buffer length.")
             End If
 
-            If Count = 0 Then
-                Return
-            End If
+            SyncLock _SyncRoot
 
-            Dim Temp(Count - 1) As Byte
+                ThrowIfDisposed()
 
-            System.Buffer.BlockCopy(Buffer, Offset, Temp, 0, Count)
+                Write(_Position,
+                      Buffer,
+                      Offset,
+                      Count)
 
-            Write(_Position, Temp)
+                _Position += Count
 
-            _Position += Count
+            End SyncLock
 
         End Sub
 
         ''' <summary>
         ''' Writes plaintext data at the specified logical offset.
         ''' </summary>
-        Public Overloads Function Write(LogicalOffset As Long, Input As Byte()) As Integer
+        ''' <param name="LogicalOffset">
+        ''' Logical stream offset to start writing to.
+        ''' </param>
+        ''' <param name="Input">
+        ''' Source buffer.
+        ''' </param>
+        ''' <param name="DataOffset">
+        ''' Offset within <paramref name="Input" /> where bytes should be read from.
+        ''' </param>
+        ''' <param name="Count">
+        ''' Number of bytes to write. If Nothing, writes from <paramref name="DataOffset" /> to the end of <paramref name="Input" />.
+        ''' </param>
+        ''' <returns>
+        ''' Number of bytes written.
+        ''' </returns>
+        Public Overloads Function Write(LogicalOffset As Long,
+                                        Input As Byte(),
+                                        Optional DataOffset As Integer = 0,
+                                        Optional Count As Integer? = Nothing) As Integer
 
             SyncLock _SyncRoot
 
                 ThrowIfDisposed()
 
-                If Input Is Nothing Then Throw New ArgumentNullException(NameOf(Input))
-                If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
-                If Input.Length = 0 Then Return 0
+                If Input Is Nothing Then
+                    Throw New ArgumentNullException(NameOf(Input))
+                End If
 
-                Dim EndOffset = LogicalOffset + CLng(Input.Length)
+                If LogicalOffset < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+                End If
+
+                If DataOffset < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(DataOffset))
+                End If
+
+                If DataOffset > Input.Length Then
+                    Throw New ArgumentException("Data offset exceeds the input buffer length.", NameOf(DataOffset))
+                End If
+
+                Dim EffectiveCount As Integer
+
+                If Count.HasValue Then
+                    EffectiveCount = Count.Value
+                Else
+                    EffectiveCount = Input.Length - DataOffset
+                End If
+
+                If EffectiveCount < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(Count))
+                End If
+
+                If EffectiveCount > Input.Length - DataOffset Then
+                    Throw New ArgumentException("Invalid offset/count.")
+                End If
+
+                If EffectiveCount = 0 Then
+                    Return 0
+                End If
+
+                If LogicalOffset > Long.MaxValue - CLng(EffectiveCount) Then
+                    Throw New ArgumentOutOfRangeException(NameOf(Count), "The write would exceed the maximum supported logical offset.")
+                End If
+
+                Dim EndOffset = LogicalOffset + CLng(EffectiveCount)
                 Dim NewLogicalLength = Math.Max(_Length, EndOffset)
+
                 Dim InPos = 0
+
                 Dim FirstChunk = LogicalOffset \ _ChunkSize
                 Dim LastChunk = (EndOffset - 1) \ _ChunkSize
 
@@ -1244,17 +1420,35 @@ Namespace Streams
 
                     Dim ChunkStart = ChunkIndex * CLng(_ChunkSize)
                     Dim DstOffset = CInt(Math.Max(0L, LogicalOffset - ChunkStart))
-                    Dim CopyLength = Math.Min(_ChunkSize - DstOffset, Input.Length - InPos)
+                    Dim CopyLength = Math.Min(_ChunkSize - DstOffset, EffectiveCount - InPos)
                     Dim LogicalPlainLength = CInt(Math.Min(CLng(_ChunkSize), Math.Max(0L, NewLogicalLength - ChunkStart)))
-                    Dim IsFullLogicalChunkWrite = DstOffset = 0 AndAlso CopyLength = LogicalPlainLength
+
+                    Dim IsFullLogicalChunkWrite =
+                        DstOffset = 0 AndAlso
+                        CopyLength = LogicalPlainLength
 
                     If IsFullLogicalChunkWrite Then
+
                         Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
-                        System.Buffer.BlockCopy(Input, InPos, _ChunkPlain, 0, CopyLength)
+
+                        System.Buffer.BlockCopy(Input,
+                                                DataOffset + InPos,
+                                                _ChunkPlain,
+                                                0,
+                                                CopyLength)
+
                     Else
+
                         Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
+
                         LoadChunk(ChunkIndex, _ChunkPlain)
-                        System.Buffer.BlockCopy(Input, InPos, _ChunkPlain, DstOffset, CopyLength)
+
+                        System.Buffer.BlockCopy(Input,
+                                                DataOffset + InPos,
+                                                _ChunkPlain,
+                                                DstOffset,
+                                                CopyLength)
+
                     End If
 
                     InPos += CopyLength
@@ -1269,7 +1463,7 @@ Namespace Streams
                     PersistIndexAndHeader(_IndexOffset)
                 End If
 
-                Return Input.Length
+                Return EffectiveCount
 
             End SyncLock
 
@@ -1407,7 +1601,7 @@ Namespace Streams
             _HeaderFlags = _HeaderFlags Or HeaderFlags.VariableChunkIndex
 
             If Not Options.StoreSparseChunks Then
-                _HeaderFlags = _HeaderFlags Or HeaderFlags.SparseChunks
+                _HeaderFlags = _HeaderFlags Or HeaderFlags.StoreSparseChunks
             End If
 
             Buffer.BlockCopy(BitConverter.GetBytes(CLng(_HeaderFlags)), 0, _Header, FlagsOffset, 8)

@@ -28,7 +28,7 @@ Namespace Streams
 
     Partial Class ChunkedStream
 
-        Private Enum RecoveryStates As Integer
+        Public Enum RecoveryStates As Integer
 
             None = 0
 
@@ -124,7 +124,7 @@ Namespace Streams
 
         End Sub
 
-        Private Function GetRecoveryState() As RecoveryStates
+        Public Function GetRecoveryState() As RecoveryStates
 
             Return CType(BitConverter.ToInt32(_Header, RecoveryStateOffset), RecoveryStates)
 

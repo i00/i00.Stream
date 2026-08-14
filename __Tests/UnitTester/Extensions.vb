@@ -1,5 +1,15 @@
 ﻿Friend Module Extensions
 
+
+    <System.Runtime.CompilerServices.Extension>
+    Public Function Format(ts As TimeSpan) As String
+        Dim Returner = $"{ts}".TrimStart("0"c, ":"c)
+        If Returner.StartsWith(".") Then
+            Returner = $"0{Returner}"
+        End If
+        Return Returner
+    End Function
+
     <Runtime.CompilerServices.Extension()>
     Public Function Indent(Text As String, Optional Indenter As String = vbTab, Optional SkipFirstLine As Boolean = False) As String
         Dim Lines = Split(Text, vbCrLf)

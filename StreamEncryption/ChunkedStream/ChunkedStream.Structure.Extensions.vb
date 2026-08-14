@@ -32,9 +32,9 @@ Partial Module Extensions
         End Enum
 
         Public Delegate Sub RegionPainterDelegate(Surface As Graphics,
-                                                   Bounds As Rectangle,
-                                                   SuggestedColor As Color,
-                                                   Regions As Streams.ChunkedStreamStructure.Region())
+                                                  Bounds As Rectangle,
+                                                  SuggestedColor As Color,
+                                                  Regions As Streams.ChunkedStreamStructure.Region())
 
         Public Delegate Function RegionColorSelectorDelegate(Regions As Streams.ChunkedStreamStructure.Region(),
                                                              SuggestedColor As Color) As Color
@@ -246,20 +246,20 @@ Partial Module Extensions
         Dim HorizontalBlockCount = GetHorizontalBlockCount(Rect.Width, Options)
         Dim RenderBlocks = BuildRenderBlocks(ChunkedStreamStructure, HorizontalBlockCount, Rect.Height, Options)
 
-        'TODO: to make fragmentation odvious
-        Dim Frag = ChunkedStreamStructure.FragmentationRatio
-        '.Size = Math.Max(0L, Math.Min(BlockEndOffset, x.EndOffset) - Math.Max(BlockOffset, x.Offset))})
-        Dim BlocksByWorseToBest = RenderBlocks.OrderByDescending(Function(x) x.Regions.Count(Function(y) y.RegionType = Streams.ChunkedStreamStructure.RegionTypes.Hole)).ToArray()
-        For iBlock = 0 To BlocksByWorseToBest.Count - 1
-            Dim Block = BlocksByWorseToBest(iBlock
-                                           )
-            Dim PercentThrough = iBlock / BlocksByWorseToBest.Count
-            If PercentThrough < Frag Then
-                Block.SuggestedColor = Color.Red
-            Else
-                Block.SuggestedColor = Color.LimeGreen
-            End If
-        Next
+        ''TODO: maybe have some callback in here in here so the user has some way for the user to do something like this to make fragmentation odvious?? ... maybe something called EvalBlocks?
+        'Dim Frag = ChunkedStreamStructure.FragmentationRatio
+        ''.Size = Math.Max(0L, Math.Min(BlockEndOffset, x.EndOffset) - Math.Max(BlockOffset, x.Offset))})
+        'Dim BlocksByWorseToBest = RenderBlocks.OrderByDescending(Function(x) x.Regions.Count(Function(y) y.RegionType = Streams.ChunkedStreamStructure.RegionTypes.Hole)).ToArray()
+        'For iBlock = 0 To BlocksByWorseToBest.Count - 1
+        '    Dim Block = BlocksByWorseToBest(iBlock
+        '                                   )
+        '    Dim PercentThrough = iBlock / BlocksByWorseToBest.Count
+        '    If PercentThrough < Frag Then
+        '        Block.SuggestedColor = Color.Red
+        '    Else
+        '        Block.SuggestedColor = Color.LimeGreen
+        '    End If
+        'Next
 
 
         For Each Block In RenderBlocks
@@ -394,41 +394,54 @@ Partial Module Extensions
     End Function
 
     Private Function GetDominantColor(Segments As IEnumerable(Of RenderSegment),
-                                      BlockOffset As Long,
-                                      BlockEndOffset As Long) As Color
+                                  BlockOffset As Long,
+                                  BlockEndOffset As Long) As Color
 
-        'Average color
-        Dim s = Segments.Where(Function(x) x.Color.A <> 0).ToArray()
-        If s.Any = False Then
+        Dim WeightedLinearR As Double = 0
+        Dim WeightedLinearG As Double = 0
+        Dim WeightedLinearB As Double = 0
+
+        Dim TotalWeight As Double = 0
+
+        For Each Segment In Segments
+
+            If Segment.Color.A = 0 Then Continue For
+
+            Dim OverlapLength =
+            Math.Max(
+                0L,
+                Math.Min(BlockEndOffset, Segment.EndOffset) -
+                Math.Max(BlockOffset, Segment.Offset))
+
+            If OverlapLength <= 0 Then Continue For
+
+            Dim Weight = CDbl(OverlapLength)
+
+            ' Convert from sRGB to linear light before averaging.
+            Dim LinearR = Math.Pow(Segment.Color.R / 255.0R, 2.2R)
+            Dim LinearG = Math.Pow(Segment.Color.G / 255.0R, 2.2R)
+            Dim LinearB = Math.Pow(Segment.Color.B / 255.0R, 2.2R)
+
+            WeightedLinearR += LinearR * Weight
+            WeightedLinearG += LinearG * Weight
+            WeightedLinearB += LinearB * Weight
+
+            TotalWeight += Weight
+
+        Next
+
+        If TotalWeight <= 0 Then
             Return Color.Transparent
-        Else
-            Return Color.FromArgb(CInt(s.Average(Function(x) x.Color.R)), CInt(s.Average(Function(x) x.Color.G)), CInt(s.Average(Function(x) x.Color.B)))
         End If
 
-        'Get color of the most dominant segment based on segment count
-        'Return (Segments.GroupBy(Function(x) x.Color).
-        '                 OrderByDescending(Function(x) x.Count).
-        '                 Select(Function(x) x.First).
-        '                 FirstOrDefault()?.
-        '                 Color).
-        '       GetValueOrDefault(Color.Transparent)
+        Dim AverageLinearR = WeightedLinearR / TotalWeight
+        Dim AverageLinearG = WeightedLinearG / TotalWeight
+        Dim AverageLinearB = WeightedLinearB / TotalWeight
 
-        'Get color of the most dominant segment based on block size
-        'Return (Segments.Select(Function(x) New With {.Segment = x,
-        '                                              .Size = Math.Max(0L, Math.Min(BlockEndOffset, x.EndOffset) - Math.Max(BlockOffset, x.Offset))}).
-        '                 GroupBy(Function(x) x.Segment.Color).
-        '                 OrderByDescending(Function(x) x.Sum(Function(y) y.Size)).
-        '                 Select(Function(x) x.First).
-        '                 FirstOrDefault()?.
-        '                 Segment.Color).
-        '       GetValueOrDefault(Color.Transparent)
-
-        'Get color of the largest segment based on block size
-        'Return (Segments.Where(Function(x) x.Color.A <> 0).
-        '                 OrderByDescending(Function(x) Math.Max(0L, Math.Min(BlockEndOffset, x.EndOffset) - Math.Max(BlockOffset, x.Offset))).
-        '                 FirstOrDefault()?.
-        '                 Color).
-        '       GetValueOrDefault(Color.Transparent)
+        Return Color.FromArgb(
+        CInt(Math.Round(Math.Pow(AverageLinearR, 1.0R / 2.2R) * 255)),
+        CInt(Math.Round(Math.Pow(AverageLinearG, 1.0R / 2.2R) * 255)),
+        CInt(Math.Round(Math.Pow(AverageLinearB, 1.0R / 2.2R) * 255)))
 
     End Function
 

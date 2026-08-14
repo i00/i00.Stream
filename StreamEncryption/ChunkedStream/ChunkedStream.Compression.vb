@@ -32,34 +32,6 @@ Namespace Streams
 
     Partial Class ChunkedStream
 
-        Private Function ShouldUseCompressed(PlainLength As Integer,
-                                             CompressedLength As Integer,
-                                             CompressionRatioThreshold As Double) As Boolean
-
-            If CompressionRatioThreshold < MinimumCompressionRatioThreshold Then CompressionRatioThreshold = MinimumCompressionRatioThreshold
-            If CompressionRatioThreshold > MaximumCompressionRatioThreshold Then CompressionRatioThreshold = MaximumCompressionRatioThreshold
-
-            Return GetCompressionEvaluatedPercent(PlainLength, CompressedLength) / 100.0R <= CompressionRatioThreshold
-
-        End Function
-
-        Private Function ShouldUseCompressed(PlainLength As Integer, CompressedLength As Integer) As Boolean
-
-            If PlainLength <= 0 Then Return False
-            If CompressedLength <= 0 Then Return True
-            If CompressedLength >= PlainLength Then Return False
-
-            Dim CompressionRatioThreshold = Options.CompressionRatioThreshold
-
-            If CompressionRatioThreshold < MinimumCompressionRatioThreshold Then CompressionRatioThreshold = MinimumCompressionRatioThreshold
-            If CompressionRatioThreshold > MaximumCompressionRatioThreshold Then CompressionRatioThreshold = MaximumCompressionRatioThreshold
-
-            Dim Ratio = CompressedLength / CDbl(PlainLength)
-
-            Return Ratio <= CompressionRatioThreshold
-
-        End Function
-
         Private Shared Function GetCompressionEvaluatedPercent(PlainLength As Integer,
                                                                CompressedLength As Integer) As Byte
 
