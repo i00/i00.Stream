@@ -10,7 +10,8 @@ Public Class Autoexec
         UnitTester.SimpleTest.TestTypesToRun = UnitTester.SimpleTest.TestTypes.Test
 
         'Test()
-        'Tests.StreamChunked.Checkpoints.CheckpointLifoEnforced()
+
+        'Tests.StreamChunked.Core.PartialOverwritePreservesUnaffectedBytes()
 
         Return UnitTester.Autoexec.Main()
     End Function
@@ -20,11 +21,18 @@ Public Class Autoexec
         Using Ms As New MemoryStream()
             Dim Options = New ChunkedStream.ChunkedStreamOptions With {
                 .EncryptionInfo = New ChunkedStream.EncryptionInfo("Hello"),
-                .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
-                .CompressionRatioThreshold = 50,
-                .StoreSparseChunks = False
+                .ChunkSize = 1024
             }
             Using Cs = ChunkedStream.Open(Ms, Options)
+                Dim Data =
+                   Tests.Helpers.GenerateRandomData(
+                         Options.ChunkSize * 100,
+                         8).ToArray()
+                Cs.Write(0, Data)
+                Cs.Clone(Options.ChunkSize \ 2, Options.ChunkSize * 10, Options.ChunkSize * 20)
+
+
+
                 'Cs.SetLength(Options.ChunkSize)
                 'Cs.Write(0, {0})
 

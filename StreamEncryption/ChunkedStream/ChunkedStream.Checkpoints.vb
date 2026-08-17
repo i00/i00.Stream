@@ -202,14 +202,12 @@ Namespace Streams
         Friend NotInheritable Class CheckpointState
 
             Public Property LogicalLength As Long
-
             Public Property PhysicalLength As Long
-
             Public Property IndexOffset As Long
-
             Public Property HeaderFlags As HeaderFlags
-
-            Public Property Index As List(Of ChunkIndexEntry)
+            Public Property Extents As List(Of ExtentIndexEntry)
+            Public Property PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry)
+            Public Property NextPhysicalRecordId As Long
 
             Public Sub Capture(Owner As ChunkedStream)
 
@@ -219,7 +217,9 @@ Namespace Streams
                 PhysicalLength = Owner._Fs.Length
                 IndexOffset = Owner._IndexOffset
                 HeaderFlags = Owner._HeaderFlags
-                Index = New List(Of ChunkIndexEntry)(Owner._Index)
+                Extents = New List(Of ExtentIndexEntry)(Owner._Extents)
+                PhysicalRecords = Owner._PhysicalRecords.ToDictionary(Function(pair) pair.Key, Function(pair) pair.Value)
+                NextPhysicalRecordId = Owner._NextPhysicalRecordId
 
             End Sub
 
@@ -283,6 +283,7 @@ Namespace Streams
 
                 Checkpoint.State.Capture(Me)
 
+                ReclaimPendingPhysicalRecords()
                 WriteCheckpointRecoveryState()
 
                 Checkpoint.MarkCommitted()
@@ -327,7 +328,9 @@ Namespace Streams
                 Checkpoint.MarkDisposed()
 
                 If _CheckpointStack.Count = 0 Then
+
                     ClearRecoveryState()
+                    ReclaimPendingPhysicalRecords()
 
                     If RemoveUnusedFileMasterKeyIfPossible() Then
                         PersistIndexAndHeader(_IndexOffset, True)
@@ -340,27 +343,39 @@ Namespace Streams
         End Sub
 
         Private Sub RestoreCheckpointState(State As CheckpointState)
+
             If State Is Nothing Then Throw New ArgumentNullException(NameOf(State))
 
             InvalidateChunkCache()
             ClearFreeSpaceMaps()
+            DiscardPendingPhysicalRecordReclaims()
 
             _Length = State.LogicalLength
             _IndexOffset = State.IndexOffset
             _HeaderFlags = State.HeaderFlags
+            _NextPhysicalRecordId = State.NextPhysicalRecordId
 
-            _Index.Clear()
-            _Index.AddRange(State.Index)
+            _Extents.Clear()
+            _Extents.AddRange(State.Extents)
 
-            _IndexPageDescriptors.Clear()
-            _ChunkIndexDirectoryPageDescriptors.Clear()
+            _PhysicalRecords.Clear()
+
+            For Each pair In State.PhysicalRecords
+                _PhysicalRecords(pair.Key) = pair.Value
+            Next
+
+            _ExtentPageDescriptors.Clear()
+            _ExtentDirectoryPageDescriptors.Clear()
+            _PhysicalRecordPageDescriptors.Clear()
+            _PhysicalRecordDirectoryPageDescriptors.Clear()
             _HoleDirectoryPageDescriptors.Clear()
 
-            MarkAllIndexPagesDirty()
+            MarkAllMetadataPagesDirty()
 
             If _Fs.Length > State.PhysicalLength Then
                 _Fs.SetLength(State.PhysicalLength)
             End If
+
         End Sub
 
         Private Sub EnsureTopCheckpoint(Checkpoint As ChunkedStreamCheckpoint)

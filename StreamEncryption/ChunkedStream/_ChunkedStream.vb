@@ -33,29 +33,34 @@
 '   - The stream is readable, writable and seekable.
 '
 ' Logical / Physical Model
-'   - The logical stream is represented by logical chunk indices.
-'   - Each logical chunk may reference a physical chunk record.
-'   - Rewriting a chunk typically allocates a new physical chunk record and
-'     retires the previous physical record.
-'   - Unreferenced physical areas become holes and may later be reused.
+'   - The logical stream is represented by extents.
+'   - Each extent references a physical record and an offset within that record.
+'   - Multiple extents may reference the same physical record.
+'   - Physical records are reference counted.
+'   - Rewriting data typically creates new physical records and retires old records.
 '   - Physical layout is independent of logical ordering.
+'   - Sparse extents may reference no physical record.
 '
 ' Chunk Size Model
 '   - New streams use Options.ChunkSize.
 '   - Existing streams load the stored chunk size from the header and update
 '     Options.ChunkSize to match.
-'   - Changing Options.ChunkSize does not immediately affect existing chunks.
-'   - Defragment(DefragTypes.Rebuild) rewrites all chunks using the current
-'     Options.ChunkSize.
-'   - Incomplete chunk-size rebuilds are rolled back on the next open.
+'   - Changing Options.ChunkSize does Not immediately affect existing extents.
+'     To apply ChunkSize changes use either:
+'       - ApplyOptions(ApplyOptionTypes.ChunkSize)
+'       - or Defragment(DefragTypes.Rebuild)
+'   - Physical records are Not required To share a common size.
+'   - Streams may legitimately contain physical records of many different sizes.
 '
 ' Metadata Model
 '   - Metadata is stored using variable-sized paged structures.
 '   - Metadata pages may be physically relocated when rewritten.
 '   - Metadata pages may optionally reuse suitable metadata holes.
 '   - Metadata consists of:
-'       - Chunk Index Pages
-'       - Chunk Index Directory Pages
+'       - Extent Pages
+'       - Extent Directory Pages
+'       - Physical Record Pages
+'       - Physical Record Directory Pages
 '       - Hole Directory Pages
 '       - Metadata Root
 '   - Only modified metadata pages are normally rewritten.
@@ -65,8 +70,10 @@
 ' Metadata Root Model
 '   - The metadata root contains descriptors for all active metadata pages.
 '   - The metadata root stores:
-'       - Chunk Index Page descriptors
-'       - Chunk Index Directory Page descriptors
+'       - Extent Page descriptors
+'       - Extent Directory Page descriptors
+'       - Physical Record Page descriptors
+'       - Physical Record Directory Page descriptors
 '       - Hole Directory Page descriptors
 '       - Logical file length
 '       - Metadata generation information
@@ -142,11 +149,11 @@
 '   - Options.CompressionRatioThreshold controls whether evaluated compression is stored.
 '
 ' Sparse Chunk Model
-'   - All-zero logical chunks may be represented as sparse index entries.
-'   - Sparse chunks consume no physical payload storage.
-'   - Physically stored all-zero chunks are marked using the
-'     PlaintextAllZero chunk flag.
-'   - Sparse chunks are treated as plaintext-all-zero by diagnostics.
+'   - All-zero logical ranges may be represented by sparse extents.
+'   - Sparse extents consume no physical payload storage.
+'   - Physically stored all-zero records are marked using
+'     the PlaintextAllZero flag.
+'   - Sparse extents are treated as plaintext-all-zero by diagnostics.
 '
 ' ApplyOptions Model
 '   - ApplyOptions may rewrite existing chunks to conform to current settings.
@@ -402,7 +409,8 @@ Namespace Streams
         Private Const HeaderMacOffset As Integer = 480
         Private Const HeaderMacCoveredSize As Integer = 480
 
-        Private Const IndexEntrySize As Integer = 16
+        Private Const ExtentEntrySize As Integer = 24
+        Private Const PhysicalRecordEntrySize As Integer = 32
 
         Private Const ChunkRecordHeaderSize As Integer = 48
         Private Const ChunkRecordIvOffset As Integer = ChunkRecordHeaderSize
@@ -428,7 +436,7 @@ Namespace Streams
         Private Const MetadataReservedOffset As Integer = 268
         Private Const MetadataReservedLength As Integer = 212
 
-        Private Const MetadataRootHeaderSize As Integer = 40
+        Private Const MetadataRootHeaderSize As Integer = 64
         Private Const MetadataRootMagicSize As Integer = 8
         Private Const MetadataDescriptorSize As Integer = 48
         Private Const MetadataRootDescriptorSize As Integer = 52
@@ -447,8 +455,9 @@ Namespace Streams
 
         Private Enum DirectoryTypes As Integer
             None = 0
-            ChunkIndexPages = 1
-            Holes = 2
+            ExtentPages = 1
+            PhysicalRecordPages = 2
+            Holes = 3
         End Enum
 
         Private Enum HoleSpaceTypes As Integer
@@ -485,9 +494,32 @@ Namespace Streams
             CompressionSnappy = 1 << 5
         End Enum
 
-        Friend Structure ChunkIndexEntry
-            Public Offset As Long
-            Public RecordLength As Integer
+        Friend Const SparsePhysicalRecordId As Long = 0
+
+        Friend Structure ExtentIndexEntry
+
+            Public LogicalOffset As Long
+
+            Public LogicalLength As Integer
+
+            Public PhysicalRecordId As Long
+
+            Public PhysicalRecordOffset As Integer
+
+        End Structure
+
+        Friend Structure PhysicalRecordEntry
+
+            Public RecordId As Long
+
+            Public PhysicalOffset As Long
+
+            Public PhysicalLength As Integer
+
+            Public PlainLength As Integer
+
+            Public RefCount As Integer
+
         End Structure
 
         Private Structure HeaderCandidate
@@ -520,11 +552,14 @@ Namespace Streams
         End Property
 
         Private ReadOnly _Header As Byte()
-        Private ReadOnly _Index As List(Of ChunkIndexEntry)
+        Private ReadOnly _Extents As List(Of ExtentIndexEntry)
+        Private ReadOnly _PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry)
+        Private _NextPhysicalRecordId As Long = 1
+        Private ReadOnly _PendingReclaimedPhysicalRecords As New HashSet(Of Long)()
 
         Private _ChunkPlain As Byte()
 
-        Private _CachedChunkIndex As Long = -1
+        Private _CachedExtentIndex As Integer = -1
         Private _CachedChunkPlain As Byte()
 
         Private ReadOnly _Counter As Byte()
@@ -553,9 +588,13 @@ Namespace Streams
         Private _CompactMetadataWriteOffset As Long?
         Private _CompactMetadataWriteLimit As Long?
 
-        Private ReadOnly _DirtyIndexPages As New HashSet(Of Integer)()
-        Private ReadOnly _IndexPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
-        Private ReadOnly _ChunkIndexDirectoryPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
+        Private ReadOnly _DirtyExtentPages As New HashSet(Of Integer)()
+        Private ReadOnly _DirtyPhysicalRecordPages As New HashSet(Of Integer)()
+
+        Private ReadOnly _ExtentPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
+        Private ReadOnly _ExtentDirectoryPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
+        Private ReadOnly _PhysicalRecordPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
+        Private ReadOnly _PhysicalRecordDirectoryPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
         Private ReadOnly _HoleDirectoryPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
 
         ''' <summary>
@@ -597,7 +636,11 @@ Namespace Streams
         End Property
 
         ''' <summary>
-        ''' Logical chunk size currently used by this stream instance.
+        ''' Preferred logical segment size used when
+        ''' creating new physical records.
+        '''
+        ''' Existing extents and physical records are not
+        ''' required to match this size.
         ''' </summary>
         Public ReadOnly Property ChunkSize As Integer
             Get
@@ -614,7 +657,9 @@ Namespace Streams
                         ActiveHeaderCopy As Integer,
                         Length As Long,
                         IndexOffset As Long,
-                        Index As List(Of ChunkIndexEntry),
+                        Extents As List(Of ExtentIndexEntry),
+                        PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry),
+                        NextPhysicalRecordId As Long,
                         HeaderFlags As HeaderFlags,
                         Options As ChunkedStreamOptions,
                         MetadataRootOffset As Long,
@@ -628,9 +673,10 @@ Namespace Streams
             _ActiveHeaderCopy = ActiveHeaderCopy
             _Length = Length
             _IndexOffset = IndexOffset
-            _Index = Index
+            _Extents = If(Extents, New List(Of ExtentIndexEntry)())
+            _PhysicalRecords = If(PhysicalRecords, New Dictionary(Of Long, PhysicalRecordEntry)())
+            _NextPhysicalRecordId = Math.Max(1L, NextPhysicalRecordId)
             _HeaderFlags = HeaderFlags
-
             _MetadataRootOffset = MetadataRootOffset
             _MetadataRootLength = MetadataRootLength
 
@@ -662,11 +708,12 @@ Namespace Streams
             _AesProvider.Padding = PaddingMode.None
 
             _Rng = RandomNumberGenerator.Create()
+
         End Sub
 
         Private Sub InvalidateChunkCache()
 
-            _CachedChunkIndex = -1
+            _CachedExtentIndex = -1
 
         End Sub
 
@@ -769,30 +816,19 @@ Namespace Streams
             EffectiveOptions.IndexDirectoryEntryCount = StoredIndexDirectoryEntryCount
 
             Dim RootMac(MacSize - 1) As Byte
+
             Buffer.BlockCopy(Header, IndexMacOffset, RootMac, 0, RootMac.Length)
 
-            Dim ChunkDirectoryDescriptors As Dictionary(Of Integer, MetadataPageDescriptor) = Nothing
-            Dim HoleDirectoryDescriptors As Dictionary(Of Integer, MetadataPageDescriptor) = Nothing
-            Dim IndexPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor) = Nothing
-            Dim HoleRecords As List(Of HoleDirectoryRecord) = Nothing
+            Dim Metadata =
+                ReadPagedMetadata(Fs,
+                                  MetadataRootOffset,
+                                  MetadataRootLength,
+                                  RootMac,
+                                  EffectiveOptions.IndexPageEntryCount,
+                                  EffectiveOptions.IndexDirectoryEntryCount)
 
-            Dim EffectiveIndexPageEntryCount = StoredIndexPageEntryCount
-            Dim EffectiveIndexDirectoryEntryCount = StoredIndexDirectoryEntryCount
-
-            Dim Index =
-                ReadPagedIndexTable(Fs,
-                                    MetadataRootOffset,
-                                    MetadataRootLength,
-                                    RootMac,
-                                    EffectiveIndexPageEntryCount,
-                                    EffectiveIndexDirectoryEntryCount,
-                                    ChunkDirectoryDescriptors,
-                                    HoleDirectoryDescriptors,
-                                    IndexPageDescriptors,
-                                    HoleRecords)
-
-            If Index.Count <> CInt(IndexCount) Then
-                Throw New InvalidDataException("Loaded index count does not match header index count.")
+            If Metadata.Extents.Count <> CInt(IndexCount) Then
+                Throw New InvalidDataException("Loaded extent count does not match header index count.")
             End If
 
             Dim Result = New ChunkedStream(Fs,
@@ -801,28 +837,38 @@ Namespace Streams
                                            Candidate.HeaderCopyIndex,
                                            FileLength,
                                            IndexOffset,
-                                           Index,
+                                           Metadata.Extents,
+                                           Metadata.PhysicalRecords,
+                                           Metadata.NextPhysicalRecordId,
                                            Flags,
                                            EffectiveOptions,
                                            MetadataRootOffset,
                                            MetadataRootLength,
-                                           EffectiveIndexPageEntryCount,
-                                           EffectiveIndexDirectoryEntryCount)
+                                           EffectiveOptions.IndexPageEntryCount,
+                                           EffectiveOptions.IndexDirectoryEntryCount)
 
-            For Each pair In ChunkDirectoryDescriptors
-                Result._ChunkIndexDirectoryPageDescriptors(pair.Key) = pair.Value
+            For Each pair In Metadata.ExtentPageDescriptors
+                Result._ExtentPageDescriptors(pair.Key) = pair.Value
             Next
 
-            For Each pair In HoleDirectoryDescriptors
+            For Each pair In Metadata.ExtentDirectoryPageDescriptors
+                Result._ExtentDirectoryPageDescriptors(pair.Key) = pair.Value
+            Next
+
+            For Each pair In Metadata.PhysicalRecordPageDescriptors
+                Result._PhysicalRecordPageDescriptors(pair.Key) = pair.Value
+            Next
+
+            For Each pair In Metadata.PhysicalRecordDirectoryPageDescriptors
+                Result._PhysicalRecordDirectoryPageDescriptors(pair.Key) = pair.Value
+            Next
+
+            For Each pair In Metadata.HoleDirectoryPageDescriptors
                 Result._HoleDirectoryPageDescriptors(pair.Key) = pair.Value
             Next
 
-            For Each pair In IndexPageDescriptors
-                Result._IndexPageDescriptors(pair.Key) = pair.Value
-            Next
-
-            If HoleRecords IsNot Nothing Then
-                Result.LoadKnownHoleRecords(HoleRecords)
+            If Metadata.HoleRecords IsNot Nothing Then
+                Result.LoadKnownHoleRecords(Metadata.HoleRecords)
             End If
 
             If Not Result.TryUnwrapFileMasterKey(EffectiveOptions.EncryptionInfo) Then
@@ -885,12 +931,12 @@ Namespace Streams
         End Property
 
         Private Shared Function CreateNew(Fs As Stream, Options As ChunkedStreamOptions) As ChunkedStream
+
             Dim Header(HeaderSize - 1) As Byte
             Dim EffectiveOptions = If(Options, New ChunkedStreamOptions())
-
             Dim Flags = HeaderFlags.VariableChunkIndex
 
-            If Not EffectiveOptions.StoreSparseChunks Then
+            If EffectiveOptions.StoreSparseChunks = False Then
                 Flags = Flags Or HeaderFlags.StoreSparseChunks
             End If
 
@@ -928,15 +974,15 @@ Namespace Streams
 
             FlushDurable(Fs)
 
-            Dim Index As New List(Of ChunkIndexEntry)()
-
             Dim Result = New ChunkedStream(Fs,
                                            Header,
                                            1L,
                                            0,
                                            0L,
                                            DataStartOffset,
-                                           Index,
+                                           New List(Of ExtentIndexEntry)(),
+                                           New Dictionary(Of Long, PhysicalRecordEntry)(),
+                                           1L,
                                            Flags,
                                            EffectiveOptions,
                                            0L,
@@ -949,6 +995,7 @@ Namespace Streams
             End If
 
             Return Result
+
         End Function
 
         Private Shared Function ReadBestHeader(Fs As Stream) As HeaderCandidate
@@ -1126,69 +1173,53 @@ Namespace Streams
 
                 ThrowIfDisposed()
 
-                If Output Is Nothing Then
-                    Throw New ArgumentNullException(NameOf(Output))
-                End If
+                If Output Is Nothing Then Throw New ArgumentNullException(NameOf(Output))
+                If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+                If OutputOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(OutputOffset))
+                If OutputOffset > Output.Length Then Throw New ArgumentException("Output offset exceeds the output buffer length.", NameOf(OutputOffset))
 
-                If LogicalOffset < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
-                End If
+                Dim EffectiveCount =
+                    If(Count.HasValue,
+                       Count.Value,
+                       Output.Length - OutputOffset)
 
-                If OutputOffset < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(OutputOffset))
-                End If
-
-                If OutputOffset > Output.Length Then
-                    Throw New ArgumentException("Output offset exceeds the output buffer length.", NameOf(OutputOffset))
-                End If
-
-                Dim EffectiveCount As Integer
-
-                If Count.HasValue Then
-                    EffectiveCount = Count.Value
-                Else
-                    EffectiveCount = Output.Length - OutputOffset
-                End If
-
-                If EffectiveCount < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(Count))
-                End If
-
-                If EffectiveCount > Output.Length - OutputOffset Then
-                    Throw New ArgumentException("Invalid offset/count.")
-                End If
+                If EffectiveCount < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Count))
+                If EffectiveCount > Output.Length - OutputOffset Then Throw New ArgumentException("Invalid offset/count.")
 
                 If EffectiveCount = 0 OrElse LogicalOffset >= _Length Then
                     Return 0
                 End If
 
                 Dim ToRead = CInt(Math.Min(CLng(EffectiveCount), _Length - LogicalOffset))
-                Dim OutPos = 0
+                Dim Remaining = ToRead
+                Dim CurrentLogicalOffset = LogicalOffset
+                Dim CurrentOutputOffset = OutputOffset
 
-                Dim FirstChunk = LogicalOffset \ _ChunkSize
-                Dim LastChunk = (LogicalOffset + ToRead - 1) \ _ChunkSize
+                While Remaining > 0
 
-                For ChunkIndex = FirstChunk To LastChunk
+                    Dim ExtentIndex = FindExtentIndex(CurrentLogicalOffset)
 
-                    Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
+                    If ExtentIndex < 0 Then
+                        Throw New InvalidDataException($"No extent found for logical offset {CurrentLogicalOffset}.")
+                    End If
 
-                    LoadChunk(ChunkIndex, _ChunkPlain)
+                    Dim Extent = _Extents(ExtentIndex)
+                    Dim OffsetInsideExtent = CInt(CurrentLogicalOffset - Extent.LogicalOffset)
+                    Dim CopyLength = Math.Min(Remaining, Extent.LogicalLength - OffsetInsideExtent)
 
-                    Dim ChunkStart = ChunkIndex * CLng(_ChunkSize)
-                    Dim SrcOffset = CInt(Math.Max(0L, LogicalOffset - ChunkStart))
-                    Dim CopyLength = Math.Min(_ChunkSize - SrcOffset, ToRead - OutPos)
+                    ReadExtentBytes(Extent,
+                                    OffsetInsideExtent,
+                                    Output,
+                                    CurrentOutputOffset,
+                                    CopyLength)
 
-                    System.Buffer.BlockCopy(_ChunkPlain,
-                                            SrcOffset,
-                                            Output,
-                                            OutputOffset + OutPos,
-                                            CopyLength)
+                    CurrentLogicalOffset += CopyLength
+                    CurrentOutputOffset += CopyLength
+                    Remaining -= CopyLength
 
-                    OutPos += CopyLength
+                End While
 
-                Next
-
-                Return OutPos
+                Return ToRead
 
             End SyncLock
 
@@ -1356,100 +1387,55 @@ Namespace Streams
 
                 ThrowIfDisposed()
 
-                If Input Is Nothing Then
-                    Throw New ArgumentNullException(NameOf(Input))
-                End If
+                If Input Is Nothing Then Throw New ArgumentNullException(NameOf(Input))
+                If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+                If DataOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(DataOffset))
+                If DataOffset > Input.Length Then Throw New ArgumentException("Data offset exceeds the input buffer length.", NameOf(DataOffset))
 
-                If LogicalOffset < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
-                End If
+                Dim EffectiveCount =
+                    If(Count.HasValue,
+                       Count.Value,
+                       Input.Length - DataOffset)
 
-                If DataOffset < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(DataOffset))
-                End If
-
-                If DataOffset > Input.Length Then
-                    Throw New ArgumentException("Data offset exceeds the input buffer length.", NameOf(DataOffset))
-                End If
-
-                Dim EffectiveCount As Integer
-
-                If Count.HasValue Then
-                    EffectiveCount = Count.Value
-                Else
-                    EffectiveCount = Input.Length - DataOffset
-                End If
-
-                If EffectiveCount < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(Count))
-                End If
-
-                If EffectiveCount > Input.Length - DataOffset Then
-                    Throw New ArgumentException("Invalid offset/count.")
-                End If
-
-                If EffectiveCount = 0 Then
-                    Return 0
-                End If
+                If EffectiveCount < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Count))
+                If EffectiveCount > Input.Length - DataOffset Then Throw New ArgumentException("Invalid offset/count.")
+                If EffectiveCount = 0 Then Return 0
 
                 If LogicalOffset > Long.MaxValue - CLng(EffectiveCount) Then
                     Throw New ArgumentOutOfRangeException(NameOf(Count), "The write would exceed the maximum supported logical offset.")
                 End If
 
-                Dim EndOffset = LogicalOffset + CLng(EffectiveCount)
-                Dim NewLogicalLength = Math.Max(_Length, EndOffset)
+                InvalidateChunkCache()
 
-                Dim InPos = 0
+                If LogicalOffset > _Length Then
+                    InsertSparseRange(_Length, LogicalOffset - _Length)
+                End If
 
-                Dim FirstChunk = LogicalOffset \ _ChunkSize
-                Dim LastChunk = (EndOffset - 1) \ _ChunkSize
+                Dim ExistingLength =
+                    If(LogicalOffset < _Length,
+                       Math.Min(CLng(EffectiveCount), _Length - LogicalOffset),
+                       0L)
 
-                EnsureIndexSize(CInt(LastChunk + 1))
+                '
+                ' Write replacement records before removing the old extents.
+                '
+                ' This preserves copy-on-write publication:
+                '   - existing committed metadata remains valid until new metadata is published;
+                '   - FillHoles can reuse older safe holes;
+                '   - FillHoles cannot immediately reuse the physical record being overwritten.
+                '
+                Dim NewExtents =
+                    BuildExtentsFromBuffer(Input,
+                                           DataOffset,
+                                           EffectiveCount)
 
-                For ChunkIndex = FirstChunk To LastChunk
+                If ExistingLength > 0 Then
+                    RemoveRangeCore(LogicalOffset, ExistingLength, False)
+                End If
 
-                    Dim ChunkStart = ChunkIndex * CLng(_ChunkSize)
-                    Dim DstOffset = CInt(Math.Max(0L, LogicalOffset - ChunkStart))
-                    Dim CopyLength = Math.Min(_ChunkSize - DstOffset, EffectiveCount - InPos)
-                    Dim LogicalPlainLength = CInt(Math.Min(CLng(_ChunkSize), Math.Max(0L, NewLogicalLength - ChunkStart)))
+                InsertExtentsCore(LogicalOffset, NewExtents)
 
-                    Dim IsFullLogicalChunkWrite =
-                        DstOffset = 0 AndAlso
-                        CopyLength = LogicalPlainLength
-
-                    If IsFullLogicalChunkWrite Then
-
-                        Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
-
-                        System.Buffer.BlockCopy(Input,
-                                                DataOffset + InPos,
-                                                _ChunkPlain,
-                                                0,
-                                                CopyLength)
-
-                    Else
-
-                        Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
-
-                        LoadChunk(ChunkIndex, _ChunkPlain)
-
-                        System.Buffer.BlockCopy(Input,
-                                                DataOffset + InPos,
-                                                _ChunkPlain,
-                                                DstOffset,
-                                                CopyLength)
-
-                    End If
-
-                    InPos += CopyLength
-
-                    WriteChunkRecord(ChunkIndex, _ChunkPlain, LogicalPlainLength)
-
-                Next
-
-                _Length = NewLogicalLength
-
-                If Not HasOpenCheckpoint Then
+                If HasOpenCheckpoint = False Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
 
@@ -1463,48 +1449,129 @@ Namespace Streams
         ''' Changes the logical plaintext length of the stream.
         ''' </summary>
         Public Overrides Sub SetLength(Length As Long)
+
             SyncLock _SyncRoot
+
                 ThrowIfDisposed()
 
                 If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
 
                 InvalidateChunkCache()
-                ClearFreeSpaceMaps()
 
-                _Length = Length
+                If Length = _Length Then Return
 
-                Dim RequiredChunks = GetRequiredChunkCount(_Length)
+                If Length < _Length Then
 
-                If _Index.Count > RequiredChunks Then
-                    _Index.RemoveRange(RequiredChunks, _Index.Count - RequiredChunks)
-                    MarkAllIndexPagesDirty()
+                    RemoveRangeCore(Length, _Length - Length, False)
+
                 Else
-                    EnsureIndexSize(RequiredChunks)
+
+                    InsertSparseRange(_Length, Length - _Length)
+
                 End If
 
-                If _Length > 0 AndAlso RequiredChunks > 0 Then
-                    Dim LastChunkIndex = RequiredChunks - 1
-                    Dim LastChunkStart = CLng(LastChunkIndex) * _ChunkSize
-                    Dim LastChunkPlainLength = CInt(_Length - LastChunkStart)
-
-                    If LastChunkPlainLength > 0 AndAlso LastChunkPlainLength < _ChunkSize Then
-                        Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
-
-                        LoadChunk(LastChunkIndex, _ChunkPlain)
-
-                        Array.Clear(_ChunkPlain, LastChunkPlainLength, _ChunkSize - LastChunkPlainLength)
-
-                        WriteChunkRecord(LastChunkIndex, _ChunkPlain, LastChunkPlainLength)
-                    End If
-                End If
-
-                _IndexOffset = GetDataEndFromIndex()
-
-                If Not HasOpenCheckpoint Then
+                If HasOpenCheckpoint = False Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
+
             End SyncLock
+
         End Sub
+
+        Public Sub Remove(LogicalOffset As Long,
+                          Length As Long)
+
+            SyncLock _SyncRoot
+
+                ThrowIfDisposed()
+
+                If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+                If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
+                If Length = 0 OrElse LogicalOffset >= _Length Then Return
+
+                InvalidateChunkCache()
+
+                Dim ActualLength = Math.Min(Length, _Length - LogicalOffset)
+
+                RemoveRangeCore(LogicalOffset, ActualLength, True)
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+            End SyncLock
+
+        End Sub
+
+        Public Sub Insert(LogicalOffset As Long,
+                          Data As Byte())
+
+            If Data Is Nothing Then Throw New ArgumentNullException(NameOf(Data))
+
+            Insert(LogicalOffset, Data, 0, Data.Length)
+
+        End Sub
+
+        Public Sub Insert(LogicalOffset As Long,
+                          Data As Byte(),
+                          DataOffset As Integer,
+                          Count As Integer)
+
+            SyncLock _SyncRoot
+
+                ThrowIfDisposed()
+
+                If LogicalOffset < 0 OrElse LogicalOffset > _Length Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+                If Data Is Nothing Then Throw New ArgumentNullException(NameOf(Data))
+                If DataOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(DataOffset))
+                If Count < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Count))
+                If Count > Data.Length - DataOffset Then Throw New ArgumentException("Invalid offset/count.")
+
+                If Count = 0 Then Return
+
+                InvalidateChunkCache()
+
+                Dim NewExtents = BuildExtentsFromBuffer(Data, DataOffset, Count)
+
+                InsertExtentsCore(LogicalOffset, NewExtents)
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+            End SyncLock
+
+        End Sub
+
+        Public Sub Clone(SourceLogicalOffset As Long,
+                         CloneLength As Long,
+                         TargetLogicalOffset As Long)
+
+            SyncLock _SyncRoot
+
+                ThrowIfDisposed()
+
+                If SourceLogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(SourceLogicalOffset))
+                If CloneLength < 0 Then Throw New ArgumentOutOfRangeException(NameOf(CloneLength))
+                If TargetLogicalOffset < 0 OrElse TargetLogicalOffset > _Length Then Throw New ArgumentOutOfRangeException(NameOf(TargetLogicalOffset))
+                If CloneLength = 0 Then Return
+                If SourceLogicalOffset >= _Length Then Return
+
+                InvalidateChunkCache()
+
+                Dim ActualLength = Math.Min(CloneLength, _Length - SourceLogicalOffset)
+                Dim CloneExtents = BuildCloneExtents(SourceLogicalOffset, ActualLength)
+
+                InsertExtentsCore(TargetLogicalOffset, CloneExtents)
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+            End SyncLock
+
+        End Sub
+
         ''' <summary>
         ''' Flushes pending changes to the backing stream.
         ''' </summary>
@@ -1588,9 +1655,10 @@ Namespace Streams
         End Sub
 
         Private Sub UpdateHeader(Optional Durable As Boolean = False)
+
             _HeaderFlags = _HeaderFlags Or HeaderFlags.VariableChunkIndex
 
-            If Not Options.StoreSparseChunks Then
+            If Options.StoreSparseChunks = False Then
                 _HeaderFlags = _HeaderFlags Or HeaderFlags.StoreSparseChunks
             End If
 
@@ -1598,13 +1666,14 @@ Namespace Streams
             Buffer.BlockCopy(BitConverter.GetBytes(_Length), 0, _Header, LengthOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(_ChunkSize), 0, _Header, ChunkSizeOffset, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(_IndexOffset), 0, _Header, IndexOffsetOffset, 8)
-            Buffer.BlockCopy(BitConverter.GetBytes(CLng(_Index.Count)), 0, _Header, IndexCountOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(CLng(_Extents.Count)), 0, _Header, IndexCountOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(_MetadataRootOffset), 0, _Header, MetadataRootOffsetOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(_MetadataRootLength), 0, _Header, MetadataRootLengthOffset, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(_IndexPageEntryCount), 0, _Header, IndexPageEntryCountOffset, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(_IndexDirectoryEntryCount), 0, _Header, IndexDirectoryEntryCountOffset, 4)
 
             If _MetadataRootOffset > 0 AndAlso _MetadataRootLength > 0 Then
+
                 Dim Root(_MetadataRootLength - 1) As Byte
 
                 _Fs.Position = _MetadataRootOffset
@@ -1613,11 +1682,15 @@ Namespace Streams
                 Dim RootMac = ComputeMac(Root, Root.Length - MacSize, PublicIntegrityKey)
 
                 Buffer.BlockCopy(RootMac, 0, _Header, IndexMacOffset, MacSize)
+
             Else
+
                 Array.Clear(_Header, IndexMacOffset, MacSize)
+
             End If
 
             WriteHeaderCopies(Durable)
+
         End Sub
 
         Private Sub WriteHeaderCopies(Durable As Boolean)

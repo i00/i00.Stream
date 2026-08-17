@@ -15,21 +15,23 @@
 '   - New chunk write-location configuration.
 '
 ' Design
-'   - Options affect newly written chunks.
-'   - Existing chunks retain their original representation until rewritten.
-'   - Most option changes do not immediately rewrite existing chunk records.
-'   - ApplyOptions may be used to rewrite existing chunk records using the
-'     currently configured policies.
+'   - Options affect newly written physical records.
+'   - Existing physical records retain their original representation until rewritten.
+'   - Most option changes do not immediately rewrite existing physical records.
+'   - ApplyOptions may be used to rewrite existing extents / physical records using
+'     the currently configured policies.
 '
 ' Chunk Size
-'   - Stored in the file header.
+'   - Stored in the file header as the current preferred write size.
 '   - Existing streams automatically load their stored chunk size.
-'   - Changing ChunkSize affects future rebuild operations only.
+'   - Changing ChunkSize does not immediately affect existing extents.
+'   - ApplyOptions(ApplyOptionTypes.ChunkSize) rewrites the logical stream using the
+'     current Options.ChunkSize.
 '
 ' ================================================================================
+Imports System.Linq
 
 Namespace Streams
-
     Partial Class ChunkedStream
 
         ''' <summary>
@@ -38,14 +40,46 @@ Namespace Streams
         ''' </summary>
         Public Class ChunkedStreamOptions
 
-            Private _ChunkSize As Integer = ChunkedStream.DefaultChunkSize
+            Public Enum ExtentReclaimTypes
+                RefCount = 0
+                Scan = 1
+            End Enum
+
             ''' <summary>
-            ''' Logical chunk size used when creating new streams and during rebuild defragmentation.
+            ''' Controls how unreferenced physical records are identified for reuse.
+            ''' </summary>
+            Public Property ExtentReclaimType As ExtentReclaimTypes = ExtentReclaimTypes.RefCount
+
+            Private _BisectLimit As Integer = 0
+
+            ''' <summary>
+            ''' Minimum preferred fragment size when bisecting an existing extent.
+            ''' A value of 0 always allows bisection.
+            ''' </summary>
+            ''' <remarks>
+            ''' This is a best-effort editing policy. It avoids unnecessary tiny fragments
+            ''' where practical, but it does not prevent small extents from existing when
+            ''' they are the natural result of the requested operation.
+            ''' </remarks>
+            Public Property BisectLimit As Integer
+                Get
+                    Return _BisectLimit
+                End Get
+                Set
+                    If Value < 0 Then Throw New ArgumentOutOfRangeException(NameOf(BisectLimit))
+                    _BisectLimit = Value
+                End Set
+            End Property
+
+            Private _ChunkSize As Integer = ChunkedStream.DefaultChunkSize
+
+            ''' <summary>
+            ''' Preferred logical segment size used when writing new physical records and during ApplyOptions chunk-size rewrites.
             ''' </summary>
             ''' <remarks>
             ''' Opening an existing stream updates this property to the chunk size stored in the stream.
-            ''' Changing this property does not immediately affect existing chunks.
-            ''' To apply a new chunk size to an existing stream, set this property and then call Defragment(DefragTypes.Rebuild).
+            ''' Changing this property does not immediately affect existing extents.
+            ''' To apply a new chunk size to an existing stream, set this property and call ApplyOptions(ApplyOptionTypes.ChunkSize).
             ''' </remarks>
             Public Property ChunkSize As Integer
                 Get
@@ -54,13 +88,10 @@ Namespace Streams
                 Set
                     If Value <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(ChunkSize))
                     If Value = _ChunkSize Then Return
-
                     _ChunkSize = Value
-
 #If DEBUG Then
-                    System.Diagnostics.Debug.Print($"ChunkedStream chunk size changed to {Value:N0} bytes. Existing chunks will not be affected until Defragment(Rebuild) is performed.")
+                    System.Diagnostics.Debug.Print($"ChunkedStream chunk size changed to {Value:N0} bytes. Existing extents will not be affected until ApplyOptions(ChunkSize) or Defragment(Rebuild) is performed.")
 #End If
-
                 End Set
             End Property
 
@@ -120,17 +151,8 @@ Namespace Streams
             Public Property NewIndexDirectoryPageWriteLocationPolicy As NewWriteLocationPolicies = NewWriteLocationPolicies.FillHoles
 
             ''' <summary>
-            ''' Number of chunk index entries stored in each authenticated index page.
+            ''' Number of extent or physical-record entries stored in each authenticated metadata page.
             ''' </summary>
-            ''' <remarks>
-            ''' New streams use this value when creating their index layout.
-            ''' Existing streams should load the stored value from the stream header once the
-            ''' paged-index layout is implemented.
-            '''
-            ''' Changing this property does not immediately affect the current stream.
-            ''' To apply a new value to an existing stream, call Defragment(DefragTypes.Rebuild)
-            ''' once the paged-index layout is implemented.
-            ''' </remarks>
             Public Property IndexPageEntryCount As Integer
                 Get
                     Return _IndexPageEntryCount
@@ -144,15 +166,6 @@ Namespace Streams
             ''' <summary>
             ''' Number of directory entries stored in each authenticated index-directory page.
             ''' </summary>
-            ''' <remarks>
-            ''' New streams use this value when creating their metadata directory layout.
-            ''' Existing streams should load the stored value from the stream header once the
-            ''' paged-index layout is implemented.
-            '''
-            ''' Changing this property does not immediately affect the current stream.
-            ''' To apply a new value to an existing stream, call Defragment(DefragTypes.Rebuild)
-            ''' once the paged-index layout is implemented.
-            ''' </remarks>
             Public Property IndexDirectoryEntryCount As Integer
                 Get
                     Return _IndexDirectoryEntryCount
@@ -167,7 +180,6 @@ Namespace Streams
             ''' Controls whether reusable free-space information is persisted as metadata.
             ''' </summary>
             Public Enum HoleDirectoryModes
-
                 ''' <summary>
                 ''' Never persist reusable free-space information.
                 ''' Known holes created during the current open stream session may still be reused in memory.
@@ -184,7 +196,6 @@ Namespace Streams
                 ''' Always persist reusable free-space information when metadata is published.
                 ''' </summary>
                 Always = 2
-
             End Enum
 
             ''' <summary>
@@ -225,17 +236,14 @@ Namespace Streams
             ''' Compression algorithm applied to individual chunk records.
             ''' </summary>
             Public Enum CompressionMethods As Integer
-
                 ''' <summary>
                 ''' Store the chunk payload uncompressed.
                 ''' </summary>
                 None = 0
 
-
                 ' ================================================================================
                 ' Inbuilt:
                 ' ================================================================================
-
                 ''' <summary>
                 ''' Store the chunk payload using Deflate compression.
                 ''' </summary>
@@ -246,11 +254,9 @@ Namespace Streams
                 ''' </summary>
                 GZip = 2
 
-
                 ' ================================================================================
                 ' Custom:
                 ' ================================================================================
-
                 ''' <summary>
                 ''' Store the chunk payload using LZ4 block compression.
                 ''' </summary>
@@ -260,8 +266,6 @@ Namespace Streams
                 ''' Store the chunk payload using Snappy block compression.
                 ''' </summary>
                 Snappy = 4
-
-
             End Enum
 
             ''' <summary>
@@ -303,10 +307,8 @@ Namespace Streams
                 End Get
                 Set
                     If Object.ReferenceEquals(_EncryptionInfo, Value) Then Return
-
                     Dim OldValue = _EncryptionInfo
                     _EncryptionInfo = Value
-
                     RaiseEvent EncryptionInfoChanged(OldValue, Value)
                 End Set
             End Property
@@ -318,35 +320,43 @@ Namespace Streams
         ''' </summary>
         <Flags>
         Public Enum ApplyOptionTypes
-
             ''' <summary>
             ''' Do not apply any options.
             ''' </summary>
             None = 0
 
             ''' <summary>
-            ''' Apply the current compression options to chunks that do not currently satisfy them.
+            ''' Apply the current compression options to physical records that do not currently satisfy them.
             ''' </summary>
             Compression = 1 << 0
 
             ''' <summary>
-            ''' Apply the current encryption state to chunks that do not currently satisfy it.
+            ''' Apply the current encryption state to physical records that do not currently satisfy it.
             ''' </summary>
             Encryption = 1 << 1
 
             ''' <summary>
-            ''' Apply the current sparse-storage setting to chunks that do not currently satisfy it.
+            ''' Apply the current sparse-storage setting to extents that do not currently satisfy it.
             ''' </summary>
             Sparseness = 1 << 2
 
-            All = Compression Or Encryption Or Sparseness
+            ''' <summary>
+            ''' Rewrite extents into physical records using the current Options.ChunkSize.
+            ''' </summary>
+            ChunkSize = 1 << 3
 
+            All = Compression Or Encryption Or Sparseness Or ChunkSize
         End Enum
 
         ''' <summary>
         ''' Summary of an ApplyOptions operation.
         ''' </summary>
         Public NotInheritable Class ApplyOptionsResult
+
+            ''' <summary>
+            ''' Number of extents rewritten because their logical size did not match the requested chunk-size policy.
+            ''' </summary>
+            Public Property ChunkSizeChanges As Integer
 
             ''' <summary>
             ''' Number of chunks examined by the operation.
@@ -412,17 +422,15 @@ Namespace Streams
             ''' Returns a concise diagnostic summary of the operation.
             ''' </summary>
             Public Overrides Function ToString() As String
-
                 Return $"ApplyOptions [examined={ExaminedChunks}, rewritten={RewrittenChunks}, " &
                        $"compression={CompressionChanges}, encryption={EncryptionChanges}, sparse={SparsenessChanges}, " &
-                       $"physicalDelta={PhysicalBytesChanged.FormatFileSizeFromBytes()}, cancelled={WasCancelled}]"
-
+                       $"chunkSize={ChunkSizeChanges}, physicalDelta={PhysicalBytesChanged.FormatFileSizeFromBytes()}, cancelled={WasCancelled}]"
             End Function
 
         End Class
 
         ''' <summary>
-        ''' Applies the current data options to existing chunks that do not currently satisfy the selected option categories.
+        ''' Applies the current data options to existing extents and physical records that do not currently satisfy the selected option categories.
         ''' </summary>
         ''' <param name="Types">
         ''' Option categories to apply.
@@ -430,21 +438,12 @@ Namespace Streams
         ''' <param name="ProgressCallback">
         ''' Optional progress callback.
         ''' </param>
+        ''' <param name="Durable">
+        ''' If True, metadata publication is flushed durably when this call publishes metadata.
+        ''' </param>
         ''' <returns>
         ''' A summary of the operation.
         ''' </returns>
-        ''' <remarks>
-        ''' ApplyOptions rewrites only chunks that need to change.
-        '''
-        ''' Compression changes are applied only where the current payload does not satisfy the requested compression options.
-        ''' Encryption changes are determined from chunk metadata.
-        ''' Sparse changes use the chunk PlaintextAllZero flag and do not need to read plaintext data.
-        '''
-        ''' ApplyOptions may increase fragmentation because changed chunks are appended and old physical records become holes.
-        '''
-        ''' ApplyOptions is internally protected by a checkpoint. If it is called inside an existing checkpoint, the internal
-        ''' checkpoint is nested and committed into the parent checkpoint.
-        ''' </remarks>
         Public Function ApplyOptions(Optional Types As ApplyOptionTypes = ApplyOptionTypes.All,
                                      Optional ProgressCallback As StreamProgressCallback = Nothing,
                                      Optional Durable As Boolean = True) As ApplyOptionsResult
@@ -463,137 +462,85 @@ Namespace Streams
                     Return Result
                 End If
 
-                Dim AppliesCompression = (Types And ApplyOptionTypes.Compression) = ApplyOptionTypes.Compression
-                Dim AppliesEncryption = (Types And ApplyOptionTypes.Encryption) = ApplyOptionTypes.Encryption
-                Dim AppliesSparseness = (Types And ApplyOptionTypes.Sparseness) = ApplyOptionTypes.Sparseness
-
-                If Not AppliesCompression AndAlso Not AppliesEncryption AndAlso Not AppliesSparseness Then
-                    Return Result
-                End If
-
-                Dim Struct = GetStructure()
                 Dim CancellationToken As New CancellationToken()
 
-                For Each chunk In Struct.Chunks
+                If Types.HasFlag(ApplyOptionTypes.ChunkSize) AndAlso NeedsChunkSizeRewrite() Then
 
-                    Result.ExaminedChunks += 1
+                    ApplyChunkSizeOptions(Result, ProgressCallback, CancellationToken)
 
-                    Dim PlainLoaded = False
-                    Dim NeedsCompressionChange = False
-                    Dim NeedsEncryptionChange = False
-                    Dim NeedsSparsenessChange = False
-                    Dim NewlySparse = False
-                    Dim NewlyAllocated = False
-
-                    Dim StoreSparsePolicy = GetApplyOptionsStoreSparsePolicy(chunk, AppliesSparseness)
-
-                    Dim WillBeSparse =
-                        chunk.PlainLength = 0 OrElse
-                        (Not StoreSparsePolicy AndAlso chunk.IsPlaintextAllZero)
-
-                    Dim CompressionPolicy = GetApplyOptionsCompressionPolicy(chunk, AppliesCompression)
-
-                    Dim ForceCompression =
-                        Not AppliesCompression AndAlso
-                        chunk.IsAllocated AndAlso
-                        chunk.IsCompressed
-
-                    Dim EncryptionPolicy = GetApplyOptionsEncryptionPolicy(chunk, AppliesEncryption)
-
-                    If AppliesSparseness Then
-
-                        If chunk.IsPlaintextAllZero AndAlso chunk.PlainLength > 0 Then
-
-                            If Options.StoreSparseChunks AndAlso chunk.IsSparse Then
-                                NeedsSparsenessChange = True
-                                NewlyAllocated = True
-                            ElseIf Not Options.StoreSparseChunks AndAlso chunk.IsAllocated Then
-                                NeedsSparsenessChange = True
-                                NewlySparse = True
-                            End If
-
-                        End If
-
+                    If CancellationToken.Cancel Then
+                        Result.WasCancelled = True
+                        Result.PhysicalLengthAfter = _Fs.Length
+                        Return Result
                     End If
 
-                    If AppliesEncryption AndAlso chunk.IsAllocated AndAlso Not WillBeSparse Then
+                    Dim RemovedFileMasterKeyAfterChunkSizeRewrite = False
 
-                        Dim DesiredEncryption =
-                            If(_CurrentWriteEncryptionEnabled,
-                               ChunkEncryptionMethods.AesCtrFileMasterKey,
-                               ChunkEncryptionMethods.None)
-
-                        If chunk.EncryptionMethod <> DesiredEncryption Then
-                            NeedsEncryptionChange = True
-                        End If
-
+                    If Types.HasFlag(ApplyOptionTypes.Encryption) Then
+                        RemovedFileMasterKeyAfterChunkSizeRewrite = RemoveUnusedFileMasterKeyIfPossible()
                     End If
 
-                    If AppliesCompression AndAlso chunk.IsAllocated AndAlso Not WillBeSparse Then
-                        NeedsCompressionChange = NeedsCompressionRewrite(chunk, CompressionPolicy)
+                    If HasOpenCheckpoint = False Then
+                        PersistIndexAndHeader(_IndexOffset, Durable)
                     End If
 
-                    Dim NeedsRewrite =
-                        NeedsCompressionChange OrElse
-                        NeedsEncryptionChange OrElse
-                        NeedsSparsenessChange
+                    Result.PhysicalLengthAfter = _Fs.Length
+                    Return Result
 
-                    If Not NeedsRewrite Then
+                End If
 
-                        ReportProgress(ProgressCallback,
-                                       Result.ExaminedChunks,
-                                       Struct.ChunkCount,
-                                       ProcessUnitTypes.Chunks,
-                                       CancellationToken)
+                If Types.HasFlag(ApplyOptionTypes.Sparseness) AndAlso Options.StoreSparseChunks Then
 
-                        If CancellationToken.Cancel Then
-                            Result.WasCancelled = True
-                            Exit For
-                        End If
+                    MaterialiseSparseExtents(Result, ProgressCallback, CancellationToken)
 
-                        Continue For
-
+                    If CancellationToken.Cancel Then
+                        Result.WasCancelled = True
+                        Result.PhysicalLengthAfter = _Fs.Length
+                        Return Result
                     End If
 
-                    EnsurePlainLoadedForApplyOptions(chunk, PlainLoaded)
+                End If
 
-                    WriteChunkRecordWithPolicy(chunk.Index,
-                                               _ChunkPlain,
-                                               chunk.PlainLength,
-                                               StoreSparsePolicy,
-                                               CompressionPolicy,
-                                               Options.CompressionRatioThreshold,
-                                               ForceCompression,
-                                               EncryptionPolicy)
+                Dim RecordIds = _PhysicalRecords.Values.
+                                 Where(Function(record) record.RefCount > 0).
+                                 OrderBy(Function(record) record.RecordId).
+                                 Select(Function(record) record.RecordId).
+                                 ToList()
 
-                    Result.RewrittenChunks += 1
+                Dim TotalRecords = Math.Max(1, RecordIds.Count)
+                Dim ProcessedRecords = 0
 
-                    If NeedsCompressionChange Then Result.CompressionChanges += 1
-                    If NeedsEncryptionChange Then Result.EncryptionChanges += 1
-
-                    If NeedsSparsenessChange Then
-                        Result.SparsenessChanges += 1
-
-                        If NewlySparse Then Result.NewlySparseChunks += 1
-                        If NewlyAllocated Then Result.NewlyAllocatedChunks += 1
-                    End If
-
-                    ReportProgress(ProgressCallback,
-                                   Result.ExaminedChunks,
-                                   Struct.ChunkCount,
-                                   ProcessUnitTypes.Chunks,
-                                   CancellationToken)
+                For Each RecordId In RecordIds
 
                     If CancellationToken.Cancel Then
                         Result.WasCancelled = True
                         Exit For
                     End If
 
+                    If _PhysicalRecords.ContainsKey(RecordId) = False Then
+                        ProcessedRecords += 1
+                        Continue For
+                    End If
+
+                    Result.ExaminedChunks += 1
+
+                    If ApplyRecordOptions(RecordId, Types, Result) Then
+                        Result.RewrittenChunks += 1
+                    End If
+
+                    ProcessedRecords += 1
+
+                    ReportProgress(ProgressCallback,
+                                   ProcessedRecords,
+                                   TotalRecords,
+                                   ProcessUnitTypes.Arbitrary,
+                                   CancellationToken)
+
                 Next
 
                 Dim RemovedFileMasterKey = False
 
-                If Result.WasCancelled = False AndAlso AppliesEncryption Then
+                If Result.WasCancelled = False AndAlso Types.HasFlag(ApplyOptionTypes.Encryption) Then
                     RemovedFileMasterKey = RemoveUnusedFileMasterKeyIfPossible()
                 End If
 
@@ -609,66 +556,123 @@ Namespace Streams
 
         End Function
 
-        Private Function GetApplyOptionsStoreSparsePolicy(chunk As ChunkedStreamStructure.Chunk,
-                                                          AppliesSparseness As Boolean) As Boolean
+        Private Function NeedsChunkSizeRewrite() As Boolean
 
-            If AppliesSparseness Then
-                Return Options.StoreSparseChunks
+            If Options.ChunkSize <= 0 Then
+                Throw New InvalidOperationException("Chunk size must be greater than zero.")
             End If
 
-            ' Preserve existing sparse/allocated shape when sparseness is not being applied.
-            Return chunk.IsAllocated
+            If _ChunkSize <> Options.ChunkSize Then
+                Return True
+            End If
+
+            For Each Extent In _Extents
+
+                If Extent.LogicalLength > Options.ChunkSize Then
+                    Return True
+                End If
+
+            Next
+
+            Return False
 
         End Function
 
-        Private Function GetApplyOptionsCompressionPolicy(chunk As ChunkedStreamStructure.Chunk,
-                                                          AppliesCompression As Boolean) As ChunkedStreamOptions.CompressionMethods
+        Private Function ApplyRecordOptions(RecordId As Long,
+                                            Types As ApplyOptionTypes,
+                                            Result As ApplyOptionsResult) As Boolean
 
-            If AppliesCompression Then
-                Return Options.CompressionMethod
+            Dim Record = GetPhysicalRecord(RecordId)
+            Dim Header = ReadApplyOptionsPhysicalRecordHeader(Record)
+            Dim Plain = ReadPhysicalRecordPlain(Record)
+            Dim PlainIsAllZero = Plain.Length = 0 OrElse IsAllZero(Plain, Plain.Length)
+
+            If Types.HasFlag(ApplyOptionTypes.Sparseness) AndAlso
+               Options.StoreSparseChunks = False AndAlso
+               PlainIsAllZero Then
+
+                ReplacePhysicalRecordWithSparseExtents(RecordId)
+
+                Result.SparsenessChanges += 1
+                Result.NewlySparseChunks += 1
+
+                Return True
+
             End If
 
-            If chunk.IsAllocated Then
-                Return chunk.CompressionMethod
+            Dim NeedsRewrite = False
+
+            If Types.HasFlag(ApplyOptionTypes.Compression) Then
+
+                If NeedsCompressionRewrite(Header) Then
+                    NeedsRewrite = True
+                    Result.CompressionChanges += 1
+                End If
+
             End If
 
-            ' Materialising a sparse chunk has no previous physical compression policy.
-            ' Use the current option if the chunk must become allocated.
-            Return Options.CompressionMethod
+            Dim DesiredEncryptionMethod =
+                If(_CurrentWriteEncryptionEnabled,
+                   ChunkEncryptionMethods.AesCtrFileMasterKey,
+                   ChunkEncryptionMethods.None)
+
+            If Types.HasFlag(ApplyOptionTypes.Encryption) Then
+
+                If Header.EncryptionMethod <> DesiredEncryptionMethod Then
+                    NeedsRewrite = True
+                    Result.EncryptionChanges += 1
+                End If
+
+            Else
+
+                DesiredEncryptionMethod = Header.EncryptionMethod
+
+            End If
+
+            If NeedsRewrite = False Then
+                Return False
+            End If
+
+            Dim CompressionMethodToUse As ChunkedStreamOptions.CompressionMethods
+            Dim CompressionRatioThreshold As Double
+            Dim ForceCompression As Boolean
+
+            If Types.HasFlag(ApplyOptionTypes.Compression) Then
+
+                CompressionMethodToUse = Options.CompressionMethod
+                CompressionRatioThreshold = Options.CompressionRatioThreshold
+                ForceCompression = False
+
+            Else
+
+                CompressionMethodToUse = Header.CompressionMethod
+                CompressionRatioThreshold = 1.0R
+                ForceCompression = Header.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None
+
+            End If
+
+            ReplacePhysicalRecordWithNewRecord(RecordId,
+                                               Plain,
+                                               CompressionMethodToUse,
+                                               CompressionRatioThreshold,
+                                               ForceCompression,
+                                               DesiredEncryptionMethod)
+
+            Return True
 
         End Function
 
-        Private Function GetApplyOptionsEncryptionPolicy(chunk As ChunkedStreamStructure.Chunk,
-                                                         AppliesEncryption As Boolean) As ChunkEncryptionMethods
 
-            If AppliesEncryption Then
+        Private Function NeedsCompressionRewrite(Header As ChunkHeaderSnapshot) As Boolean
 
-                Return If(_CurrentWriteEncryptionEnabled,
-                          ChunkEncryptionMethods.AesCtrFileMasterKey,
-                          ChunkEncryptionMethods.None)
-
-            End If
-
-            If chunk.IsAllocated Then
-                Return chunk.EncryptionMethod
-            End If
-
-            ' Materialising a sparse chunk has no previous physical encryption policy.
-            ' Use the current option if the chunk must become allocated.
-            Return If(_CurrentWriteEncryptionEnabled,
-                      ChunkEncryptionMethods.AesCtrFileMasterKey,
-                      ChunkEncryptionMethods.None)
-
-        End Function
-
-        Private Function NeedsCompressionRewrite(chunk As ChunkedStreamStructure.Chunk,
-                                                 DesiredCompressionMethod As ChunkedStreamOptions.CompressionMethods) As Boolean
+            Dim DesiredCompressionMethod = Options.CompressionMethod
 
             If DesiredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None Then
-                Return chunk.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None
+                Return Header.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None OrElse
+                       Header.CompressionEvaluatedMethod <> ChunkedStreamOptions.CompressionMethods.None
             End If
 
-            If chunk.CompressionEvaluatedMethod <> DesiredCompressionMethod Then
+            If Header.CompressionEvaluatedMethod <> DesiredCompressionMethod Then
                 Return True
             End If
 
@@ -677,35 +681,389 @@ Namespace Streams
             If CompressionRatioThreshold < MinimumCompressionRatioThreshold Then CompressionRatioThreshold = MinimumCompressionRatioThreshold
             If CompressionRatioThreshold > MaximumCompressionRatioThreshold Then CompressionRatioThreshold = MaximumCompressionRatioThreshold
 
-            Dim ShouldBeCompressed =
-                chunk.CompressionEvaluatedRatio <= CompressionRatioThreshold
+            Dim ShouldBeCompressed = (Header.CompressionEvaluatedPercent / 100.0R) <= CompressionRatioThreshold
 
             If ShouldBeCompressed Then
-                Return chunk.CompressionMethod <> DesiredCompressionMethod
+                Return Header.CompressionMethod <> DesiredCompressionMethod
             End If
 
-            Return chunk.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None
+            Return Header.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None
 
         End Function
 
-        Private Sub EnsurePlainLoadedForApplyOptions(chunk As ChunkedStreamStructure.Chunk,
-                                                     ByRef PlainLoaded As Boolean)
+        Private Sub ApplyChunkSizeOptions(Result As ApplyOptionsResult,
+                                          ProgressCallback As StreamProgressCallback,
+                                          CancellationToken As CancellationToken)
 
-            If PlainLoaded Then Return
-
-            Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
-
-            If chunk.IsSparse OrElse chunk.IsPlaintextAllZero Then
-                PlainLoaded = True
-                Return
+            If Options.ChunkSize <= 0 Then
+                Throw New InvalidOperationException("Chunk size must be greater than zero.")
             End If
 
-            LoadChunk(chunk.Index, _ChunkPlain)
+            Dim OriginalExtents = New List(Of ExtentIndexEntry)(_Extents)
+            Dim OriginalPhysicalRecords = _PhysicalRecords.ToDictionary(Function(pair) pair.Key, Function(pair) pair.Value)
+            Dim OriginalNextPhysicalRecordId = _NextPhysicalRecordId
+            Dim OriginalIndexOffset = _IndexOffset
+            Dim OriginalPhysicalLength = _Fs.Length
+            Dim OriginalChunkSize = _ChunkSize
+            Dim OriginalChunkPlain = _ChunkPlain
+            Dim OriginalCachedChunkPlain = _CachedChunkPlain
 
-            PlainLoaded = True
+            Try
+
+                Dim NewExtents As New List(Of ExtentIndexEntry)()
+                Dim NewRecordIds As New HashSet(Of Long)()
+                Dim LogicalOffset As Long = 0
+                Dim TotalBytes = Math.Max(1L, _Length)
+                Dim ProcessedBytes As Long = 0
+
+                While LogicalOffset < _Length
+
+                    If CancellationToken.Cancel Then
+                        RestoreApplyOptionsRewriteState(OriginalExtents,
+                                                        OriginalPhysicalRecords,
+                                                        OriginalNextPhysicalRecordId,
+                                                        OriginalIndexOffset,
+                                                        OriginalPhysicalLength,
+                                                        OriginalChunkSize,
+                                                        OriginalChunkPlain,
+                                                        OriginalCachedChunkPlain)
+                        Return
+                    End If
+
+                    Dim SegmentLength = CInt(Math.Min(CLng(Options.ChunkSize), _Length - LogicalOffset))
+                    Dim Buffer(SegmentLength - 1) As Byte
+
+                    Read(LogicalOffset, Buffer, 0, SegmentLength)
+
+                    Dim SegmentExtents = BuildExtentsFromBuffer(Buffer, 0, SegmentLength)
+
+                    For Each extent In SegmentExtents
+
+                        Dim NewExtent = extent
+                        NewExtent.LogicalOffset = LogicalOffset
+
+                        NewExtents.Add(NewExtent)
+
+                        If NewExtent.PhysicalRecordId <> SparsePhysicalRecordId Then
+                            NewRecordIds.Add(NewExtent.PhysicalRecordId)
+                        End If
+
+                        LogicalOffset += NewExtent.LogicalLength
+
+                    Next
+
+                    Result.ExaminedChunks += 1
+                    Result.ChunkSizeChanges += 1
+                    Result.RewrittenChunks += 1
+
+                    ProcessedBytes += SegmentLength
+
+                    ReportProgress(ProgressCallback,
+                                   Math.Min(ProcessedBytes, TotalBytes),
+                                   TotalBytes,
+                                   ProcessUnitTypes.Bytes,
+                                   CancellationToken)
+
+                End While
+
+                Dim OldPhysicalRecords = _PhysicalRecords.ToDictionary(Function(pair) pair.Key, Function(pair) pair.Value)
+                Dim NewPhysicalRecords As New Dictionary(Of Long, PhysicalRecordEntry)()
+
+                For Each recordId In NewRecordIds
+                    NewPhysicalRecords(recordId) = GetPhysicalRecord(recordId)
+                Next
+
+                _Extents.Clear()
+                _Extents.AddRange(NewExtents)
+
+                _PhysicalRecords.Clear()
+
+                For Each pair In NewPhysicalRecords
+                    _PhysicalRecords(pair.Key) = pair.Value
+                Next
+
+                _ChunkSize = Options.ChunkSize
+                _ChunkPlain = New Byte(_ChunkSize - 1) {}
+                _CachedChunkPlain = New Byte(_ChunkSize - 1) {}
+
+                ReleaseOldPhysicalRecordSpaces(OldPhysicalRecords.Values, NewRecordIds)
+
+                InvalidateChunkCache()
+                MarkAllMetadataPagesDirty()
+
+            Catch
+
+                RestoreApplyOptionsRewriteState(OriginalExtents,
+                                                OriginalPhysicalRecords,
+                                                OriginalNextPhysicalRecordId,
+                                                OriginalIndexOffset,
+                                                OriginalPhysicalLength,
+                                                OriginalChunkSize,
+                                                OriginalChunkPlain,
+                                                OriginalCachedChunkPlain)
+                Throw
+
+            End Try
 
         End Sub
 
-    End Class
+        Private Sub RestoreApplyOptionsRewriteState(OriginalExtents As List(Of ExtentIndexEntry),
+                                                    OriginalPhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry),
+                                                    OriginalNextPhysicalRecordId As Long,
+                                                    OriginalIndexOffset As Long,
+                                                    OriginalPhysicalLength As Long,
+                                                    OriginalChunkSize As Integer,
+                                                    OriginalChunkPlain As Byte(),
+                                                    OriginalCachedChunkPlain As Byte())
 
+            _Extents.Clear()
+            _Extents.AddRange(OriginalExtents)
+
+            _PhysicalRecords.Clear()
+
+            For Each pair In OriginalPhysicalRecords
+                _PhysicalRecords(pair.Key) = pair.Value
+            Next
+
+            _NextPhysicalRecordId = OriginalNextPhysicalRecordId
+            _IndexOffset = OriginalIndexOffset
+            _ChunkSize = OriginalChunkSize
+            _ChunkPlain = OriginalChunkPlain
+            _CachedChunkPlain = OriginalCachedChunkPlain
+
+            ClearFreeSpaceMaps()
+            DiscardPendingPhysicalRecordReclaims()
+            InvalidateChunkCache()
+            MarkAllMetadataPagesDirty()
+
+            If _Fs.Length > OriginalPhysicalLength Then
+                _Fs.SetLength(OriginalPhysicalLength)
+            End If
+
+        End Sub
+
+        Private Sub MaterialiseSparseExtents(Result As ApplyOptionsResult,
+                                             ProgressCallback As StreamProgressCallback,
+                                             CancellationToken As CancellationToken)
+
+            Dim SparseIndexes = _Extents.
+                                Select(Function(extent, index) New With {.Extent = extent, .Index = index}).
+                                Where(Function(item) item.Extent.PhysicalRecordId = SparsePhysicalRecordId).
+                                Select(Function(item) item.Index).
+                                ToList()
+
+            Dim Total = Math.Max(1, SparseIndexes.Count)
+            Dim Processed = 0
+
+            For Each extentIndex In SparseIndexes
+
+                If CancellationToken.Cancel Then
+                    Return
+                End If
+
+                Dim Extent = _Extents(extentIndex)
+
+                If Extent.PhysicalRecordId <> SparsePhysicalRecordId Then
+                    Processed += 1
+                    Continue For
+                End If
+
+                If Extent.LogicalLength <= 0 Then
+                    Processed += 1
+                    Continue For
+                End If
+
+                Dim Buffer(Extent.LogicalLength - 1) As Byte
+                Dim Record = WritePhysicalRecord(Buffer, Buffer.Length)
+
+                Extent.PhysicalRecordId = Record.RecordId
+                Extent.PhysicalRecordOffset = 0
+
+                _Extents(extentIndex) = Extent
+
+                Result.ExaminedChunks += 1
+                Result.SparsenessChanges += 1
+                Result.NewlyAllocatedChunks += 1
+                Result.RewrittenChunks += 1
+
+                Processed += 1
+
+                ReportProgress(ProgressCallback,
+                               Processed,
+                               Total,
+                               ProcessUnitTypes.Arbitrary,
+                               CancellationToken)
+
+            Next
+
+            MarkAllMetadataPagesDirty()
+
+        End Sub
+
+        Private Sub ReplacePhysicalRecordWithSparseExtents(RecordId As Long)
+
+            Dim Record = GetPhysicalRecord(RecordId)
+
+            For Index = 0 To _Extents.Count - 1
+
+                Dim Extent = _Extents(Index)
+
+                If Extent.PhysicalRecordId <> RecordId Then Continue For
+
+                Extent.PhysicalRecordId = SparsePhysicalRecordId
+                Extent.PhysicalRecordOffset = 0
+
+                _Extents(Index) = Extent
+
+            Next
+
+            Record.RefCount = 0
+            _PhysicalRecords(RecordId) = Record
+
+            If HasOpenCheckpoint Then
+                _PendingReclaimedPhysicalRecords.Add(RecordId)
+            Else
+                ReclaimPhysicalRecord(RecordId)
+            End If
+
+            MarkAllMetadataPagesDirty()
+
+        End Sub
+
+        Private Sub ReplacePhysicalRecordWithNewRecord(OldRecordId As Long,
+                                                       Plain As Byte(),
+                                                       CompressionMethod As ChunkedStreamOptions.CompressionMethods,
+                                                       CompressionRatioThreshold As Double,
+                                                       ForceCompression As Boolean,
+                                                       EncryptionMethod As ChunkEncryptionMethods)
+
+            If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
+
+            Dim OldRecord = GetPhysicalRecord(OldRecordId)
+
+            Dim NewRecord = WritePhysicalRecordWithPolicy(Plain,
+                                                          Plain.Length,
+                                                          CompressionMethod,
+                                                          CompressionRatioThreshold,
+                                                          ForceCompression,
+                                                          EncryptionMethod)
+
+            NewRecord.RefCount = OldRecord.RefCount
+            _PhysicalRecords(NewRecord.RecordId) = NewRecord
+
+            For Index = 0 To _Extents.Count - 1
+
+                Dim Extent = _Extents(Index)
+
+                If Extent.PhysicalRecordId <> OldRecordId Then Continue For
+
+                Extent.PhysicalRecordId = NewRecord.RecordId
+                _Extents(Index) = Extent
+
+            Next
+
+            OldRecord.RefCount = 0
+            _PhysicalRecords(OldRecordId) = OldRecord
+
+            If HasOpenCheckpoint Then
+                _PendingReclaimedPhysicalRecords.Add(OldRecordId)
+            Else
+                ReclaimPhysicalRecord(OldRecordId)
+            End If
+
+            MarkAllMetadataPagesDirty()
+
+        End Sub
+
+        Private Sub ReleaseOldPhysicalRecordSpaces(OldRecords As IEnumerable(Of PhysicalRecordEntry),
+                                                   NewRecordIds As HashSet(Of Long))
+
+            If OldRecords Is Nothing Then Return
+
+            For Each record In OldRecords
+
+                If record.RecordId <= SparsePhysicalRecordId Then Continue For
+                If NewRecordIds IsNot Nothing AndAlso NewRecordIds.Contains(record.RecordId) Then Continue For
+
+                If HasOpenCheckpoint = False Then
+                    AddFreeChunkSpace(record.PhysicalOffset, record.PhysicalLength)
+                End If
+
+            Next
+
+        End Sub
+
+        Private Function ReadApplyOptionsPhysicalRecordHeader(Record As PhysicalRecordEntry) As ChunkHeaderSnapshot
+
+            If Record.RecordId <= SparsePhysicalRecordId Then
+                Throw New System.IO.InvalidDataException("Invalid physical record id.")
+            End If
+
+            If Record.PhysicalOffset < DataStartOffset Then
+                Throw New System.IO.InvalidDataException($"Invalid physical record offset for record {Record.RecordId}.")
+            End If
+
+            If Record.PhysicalLength < MinChunkRecordSize Then
+                Throw New System.IO.InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
+            End If
+
+            If Record.PhysicalOffset + Record.PhysicalLength > _Fs.Length Then
+                Throw New System.IO.InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
+            End If
+
+            Dim Header(ChunkRecordHeaderSize - 1) As Byte
+
+            _Fs.Position = Record.PhysicalOffset
+            ReadExactly(_Fs, Header, 0, Header.Length)
+
+            Dim StoredRecordId = BitConverter.ToInt64(Header, 0)
+
+            If StoredRecordId <> Record.RecordId Then
+                Throw New System.IO.InvalidDataException($"Physical record id mismatch. Expected {Record.RecordId}, found {StoredRecordId}.")
+            End If
+
+            Dim PlainLength = BitConverter.ToInt32(Header, ChunkPlainLengthOffset)
+
+            If PlainLength <> Record.PlainLength Then
+                Throw New System.IO.InvalidDataException($"Physical record plain length mismatch for record {Record.RecordId}.")
+            End If
+
+            Dim PayloadLength = BitConverter.ToInt32(Header, ChunkPayloadLengthOffset)
+
+            If PayloadLength < 0 Then
+                Throw New System.IO.InvalidDataException($"Invalid payload length for record {Record.RecordId}.")
+            End If
+
+            If ChunkRecordDataOffset + PayloadLength + MacSize <> Record.PhysicalLength Then
+                Throw New System.IO.InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
+            End If
+
+            Dim Flags = CType(BitConverter.ToInt32(Header, ChunkFlagsOffset), ChunkFlags)
+
+            If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then
+                Throw New System.IO.InvalidDataException($"Unsupported physical record flags for record {Record.RecordId}: {CInt(Flags)}.")
+            End If
+
+            Dim CompressionEvaluatedPercent = CInt(Header(ChunkCompressionEvaluatedPercentOffset))
+
+            If CompressionEvaluatedPercent < MinimumCompressionEvaluatedPercent OrElse
+               CompressionEvaluatedPercent > MaximumCompressionEvaluatedPercent Then
+
+                Throw New System.IO.InvalidDataException($"Invalid compression evaluated percent for record {Record.RecordId}: {CompressionEvaluatedPercent}.")
+
+            End If
+
+            Return New ChunkHeaderSnapshot With {
+                .CompressionMethod = CType(BitConverter.ToInt32(Header, ChunkCompressionMethodOffset), ChunkedStreamOptions.CompressionMethods),
+                .CompressionEvaluatedMethod = CType(BitConverter.ToInt32(Header, ChunkCompressionEvaluatedMethodOffset), ChunkedStreamOptions.CompressionMethods),
+                .CompressionEvaluatedPercent = CompressionEvaluatedPercent,
+                .EncryptionMethod = CType(BitConverter.ToInt32(Header, ChunkEncryptionMethodOffset), ChunkEncryptionMethods),
+                .PlainLength = PlainLength,
+                .PayloadLength = PayloadLength,
+                .ChunkFlags = Flags
+            }
+
+        End Function
+
+    End Class
 End Namespace

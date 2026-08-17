@@ -80,6 +80,7 @@
     <Compile Include="ChunkedStream\ChunkedStream.Checkpoints.vb" />
     <Compile Include="ChunkedStream\ChunkedStream.Compression.vb" />
     <Compile Include="ChunkedStream\ChunkedStream.Diagnostics.vb" />
+    <Compile Include="ChunkedStream\ChunkedStream.Extents.vb" />
     <Compile Include="ChunkedStream\ChunkedStream.Options.vb" />
     <Compile Include="ChunkedStream\ChunkedStream.Recovery.vb" />
     <Compile Include="ChunkedStream\ChunkedStream.Defrag.vb" />

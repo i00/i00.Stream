@@ -652,7 +652,7 @@ Namespace Tests
             <UnitTester.SimpleTest({ChunkedStream.DefragTypes.Move})>
             <UnitTester.SimpleTest({ChunkedStream.DefragTypes.Sequence})>
             <UnitTester.SimpleTest({ChunkedStream.DefragTypes.Rebuild})>
-            Private Shared Sub DefragmentPreservesData(Type As ChunkedStream.DefragTypes)
+            Public Shared Sub DefragmentPreservesData(Type As ChunkedStream.DefragTypes)
 
                 Using Ms As New MemoryStream()
 

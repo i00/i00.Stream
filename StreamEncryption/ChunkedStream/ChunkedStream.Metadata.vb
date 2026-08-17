@@ -1,60 +1,48 @@
 ﻿Imports System.IO
+Imports System.Linq
 Imports System.Security.Cryptography
 
 Namespace Streams
-
     Partial Class ChunkedStream
 
-        Private NotInheritable Class MetadataRootReadResult
-
+        Private NotInheritable Class MetadataReadResult
             Public Property IndexPageEntryCount As Integer
-
             Public Property IndexDirectoryEntryCount As Integer
+            Public Property Extents As List(Of ExtentIndexEntry)
+            Public Property PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry)
+            Public Property NextPhysicalRecordId As Long
+            Public Property ExtentPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)
+            Public Property ExtentDirectoryPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)
+            Public Property PhysicalRecordPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)
+            Public Property PhysicalRecordDirectoryPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)
+            Public Property HoleDirectoryPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)
+            Public Property HoleRecords As List(Of HoleDirectoryRecord)
+        End Class
 
-            Public Property IndexCount As Integer
-
-            Public Property DirectIndexPageDescriptors As List(Of MetadataPageDescriptor)
-
-            Public Property ChunkIndexDirectoryPageDescriptors As List(Of MetadataPageDescriptor)
-
+        Private NotInheritable Class MetadataRootReadResult
+            Public Property IndexPageEntryCount As Integer
+            Public Property IndexDirectoryEntryCount As Integer
+            Public Property ExtentCount As Integer
+            Public Property PhysicalRecordCount As Integer
+            Public Property NextPhysicalRecordId As Long
+            Public Property DirectExtentPageDescriptors As List(Of MetadataPageDescriptor)
+            Public Property ExtentDirectoryPageDescriptors As List(Of MetadataPageDescriptor)
+            Public Property DirectPhysicalRecordPageDescriptors As List(Of MetadataPageDescriptor)
+            Public Property PhysicalRecordDirectoryPageDescriptors As List(Of MetadataPageDescriptor)
             Public Property HoleDirectoryPageDescriptors As List(Of MetadataPageDescriptor)
-
         End Class
 
         Private Shared Function ComputeMac(Buffer As Byte(), Count As Integer, MacKey As Byte()) As Byte()
+
             Using Hmac As New HMACSHA256(MacKey)
                 Return Hmac.ComputeHash(Buffer, 0, Count)
             End Using
+
         End Function
 
         Private Shared Function ComputeMac(Buffer As Byte(), MacKey As Byte()) As Byte()
+
             Return ComputeMac(Buffer, Buffer.Length, MacKey)
-        End Function
-
-        Private Function GetNextIndexPageWriteOffset(Length As Integer) As Long
-
-            If Length <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
-
-            Dim CompactOffset As Long
-
-            If TryGetCompactMetadataWriteOffset(Length, CompactOffset) Then
-                Return CompactOffset
-            End If
-
-            Select Case Options.NewIndexPageWriteLocationPolicy
-
-                Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
-                     ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
-
-                    Dim Offset As Long
-
-                    If _FreeIndexPageSpaces.TryAllocate(Length, Offset) Then
-                        Return Offset
-                    End If
-
-            End Select
-
-            Return Math.Max(_Fs.Length, GetDataEndFromIndex())
 
         End Function
 
@@ -83,27 +71,46 @@ Namespace Streams
 
         End Function
 
+        Private Function GetNextIndexPageWriteOffset(Length As Integer) As Long
+
+            If Length <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
+
+            Dim Offset As Long
+
+            If TryGetCompactMetadataWriteOffset(Length, Offset) Then
+                Return Offset
+            End If
+
+            Select Case Options.NewIndexPageWriteLocationPolicy
+                Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
+                     ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
+
+                    If _FreeIndexPageSpaces.TryAllocate(Length, Offset) Then
+                        Return Offset
+                    End If
+            End Select
+
+            Return Math.Max(_Fs.Length, GetDataEndFromIndex())
+
+        End Function
+
         Private Function GetNextIndexDirectoryPageWriteOffset(Length As Integer) As Long
 
             If Length <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
 
-            Dim CompactOffset As Long
+            Dim Offset As Long
 
-            If TryGetCompactMetadataWriteOffset(Length, CompactOffset) Then
-                Return CompactOffset
+            If TryGetCompactMetadataWriteOffset(Length, Offset) Then
+                Return Offset
             End If
 
             Select Case Options.NewIndexDirectoryPageWriteLocationPolicy
-
                 Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
                      ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
-
-                    Dim Offset As Long
 
                     If _FreeIndexDirectoryPageSpaces.TryAllocate(Length, Offset) Then
                         Return Offset
                     End If
-
             End Select
 
             Return Math.Max(_Fs.Length, GetDataEndFromIndex())
@@ -113,7 +120,6 @@ Namespace Streams
         Private Function ShouldPersistHoleDirectory(Durable As Boolean) As Boolean
 
             Select Case Options.HoleDirectoryMode
-
                 Case ChunkedStreamOptions.HoleDirectoryModes.Never
                     Return False
 
@@ -122,101 +128,76 @@ Namespace Streams
 
                 Case ChunkedStreamOptions.HoleDirectoryModes.Auto
                     If Durable = False Then Return False
-
                     Return Math.Max(_Fs.Length, GetDataEndFromIndex()) >= Options.HoleDirectoryAutoThresholdBytes
 
                 Case Else
                     Return False
-
             End Select
 
         End Function
 
-        Private Function IsIndexPageEmpty(PageNumber As Integer) As Boolean
+        Private Function BuildExtentPage(PageNumber As Integer) As Byte()
 
             If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
-            If _IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid index page entry count.")
+            If _IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid extent page entry count.")
 
-            Dim FirstChunkIndex = PageNumber * _IndexPageEntryCount
-            Dim EntryCount = Math.Max(0, Math.Min(_IndexPageEntryCount, _Index.Count - FirstChunkIndex))
-
-            For EntryIndex = 0 To EntryCount - 1
-
-                Dim Entry = _Index(FirstChunkIndex + EntryIndex)
-
-                If Entry.Offset <> 0 OrElse Entry.RecordLength <> 0 Then
-                    Return False
-                End If
-
-            Next
-
-            Return True
-
-        End Function
-
-        Private Function BuildIndexPage(PageNumber As Integer) As Byte()
-
-            If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
-            If _IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid index page entry count.")
-
-            Dim PageLengthWithoutMac = IndexPageHeaderSize + (_IndexPageEntryCount * IndexEntrySize)
+            Dim PageLengthWithoutMac = IndexPageHeaderSize + (_IndexPageEntryCount * ExtentEntrySize)
             Dim Page(PageLengthWithoutMac + MacSize - 1) As Byte
-
-            Dim FirstChunkIndex = PageNumber * _IndexPageEntryCount
-            Dim EntryCount = Math.Max(0, Math.Min(_IndexPageEntryCount, _Index.Count - FirstChunkIndex))
+            Dim FirstIndex = PageNumber * _IndexPageEntryCount
+            Dim EntryCount = Math.Max(0, Math.Min(_IndexPageEntryCount, _Extents.Count - FirstIndex))
 
             Buffer.BlockCopy(IndexPageMagic, 0, Page, 0, IndexPageMagic.Length)
-            Buffer.BlockCopy(BitConverter.GetBytes(CInt(DirectoryTypes.ChunkIndexPages)), 0, Page, 8, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(CInt(DirectoryTypes.ExtentPages)), 0, Page, 8, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(PageNumber), 0, Page, 12, 4)
-            Buffer.BlockCopy(BitConverter.GetBytes(FirstChunkIndex), 0, Page, 16, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(FirstIndex), 0, Page, 16, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(EntryCount), 0, Page, 20, 4)
 
             Dim EntryOffset = IndexPageHeaderSize
 
             For EntryIndex = 0 To _IndexPageEntryCount - 1
+                Dim SourceIndex = FirstIndex + EntryIndex
 
-                Dim ChunkIndex = FirstChunkIndex + EntryIndex
-                Dim Entry = If(ChunkIndex < _Index.Count, _Index(ChunkIndex), New ChunkIndexEntry())
+                If SourceIndex < _Extents.Count Then
+                    Dim Entry = _Extents(SourceIndex)
 
-                Buffer.BlockCopy(BitConverter.GetBytes(Entry.Offset), 0, Page, EntryOffset, 8)
-                Buffer.BlockCopy(BitConverter.GetBytes(Entry.RecordLength), 0, Page, EntryOffset + 8, 4)
+                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.LogicalOffset), 0, Page, EntryOffset, 8)
+                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.LogicalLength), 0, Page, EntryOffset + 8, 4)
+                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.PhysicalRecordId), 0, Page, EntryOffset + 12, 8)
+                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.PhysicalRecordOffset), 0, Page, EntryOffset + 20, 4)
+                End If
 
-                EntryOffset += IndexEntrySize
-
+                EntryOffset += ExtentEntrySize
             Next
 
             Dim Mac = ComputeMac(Page, PageLengthWithoutMac, PublicIntegrityKey)
-
             Buffer.BlockCopy(Mac, 0, Page, PageLengthWithoutMac, MacSize)
 
             Return Page
 
         End Function
 
-        Private Sub WriteIndexPage(PageNumber As Integer)
+        Private Sub WriteExtentPage(PageNumber As Integer)
 
             If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
 
             Dim OldDescriptor As MetadataPageDescriptor = Nothing
-            Dim HadOldDescriptor = _IndexPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
+            Dim HadOldDescriptor = _ExtentPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
+            Dim FirstIndex = PageNumber * _IndexPageEntryCount
+            Dim EntryCount = Math.Max(0, Math.Min(_IndexPageEntryCount, _Extents.Count - FirstIndex))
 
-            If IsIndexPageEmpty(PageNumber) Then
-
+            If EntryCount = 0 Then
                 If HadOldDescriptor Then
-
                     If OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
                         AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
                     End If
 
-                    _IndexPageDescriptors.Remove(PageNumber)
-
+                    _ExtentPageDescriptors.Remove(PageNumber)
                 End If
 
                 Return
-
             End If
 
-            Dim Page = BuildIndexPage(PageNumber)
+            Dim Page = BuildExtentPage(PageNumber)
             Dim Offset = GetNextIndexPageWriteOffset(Page.Length)
 
             _Fs.Position = Offset
@@ -233,7 +214,94 @@ Namespace Streams
                 AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
             End If
 
-            _IndexPageDescriptors(PageNumber) = Descriptor
+            _ExtentPageDescriptors(PageNumber) = Descriptor
+
+        End Sub
+
+        Private Function BuildPhysicalRecordPage(PageNumber As Integer,
+                                                 OrderedRecords As IList(Of PhysicalRecordEntry)) As Byte()
+
+            If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
+            If OrderedRecords Is Nothing Then Throw New ArgumentNullException(NameOf(OrderedRecords))
+            If _IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid physical-record page entry count.")
+
+            Dim PageLengthWithoutMac = IndexPageHeaderSize + (_IndexPageEntryCount * PhysicalRecordEntrySize)
+            Dim Page(PageLengthWithoutMac + MacSize - 1) As Byte
+            Dim FirstIndex = PageNumber * _IndexPageEntryCount
+            Dim EntryCount = Math.Max(0, Math.Min(_IndexPageEntryCount, OrderedRecords.Count - FirstIndex))
+
+            Buffer.BlockCopy(IndexPageMagic, 0, Page, 0, IndexPageMagic.Length)
+            Buffer.BlockCopy(BitConverter.GetBytes(CInt(DirectoryTypes.PhysicalRecordPages)), 0, Page, 8, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(PageNumber), 0, Page, 12, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(FirstIndex), 0, Page, 16, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(EntryCount), 0, Page, 20, 4)
+
+            Dim EntryOffset = IndexPageHeaderSize
+
+            For EntryIndex = 0 To _IndexPageEntryCount - 1
+                Dim SourceIndex = FirstIndex + EntryIndex
+
+                If SourceIndex < OrderedRecords.Count Then
+                    Dim Entry = OrderedRecords(SourceIndex)
+
+                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.RecordId), 0, Page, EntryOffset, 8)
+                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.PhysicalOffset), 0, Page, EntryOffset + 8, 8)
+                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.PhysicalLength), 0, Page, EntryOffset + 16, 4)
+                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.PlainLength), 0, Page, EntryOffset + 20, 4)
+                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.RefCount), 0, Page, EntryOffset + 24, 4)
+                End If
+
+                EntryOffset += PhysicalRecordEntrySize
+            Next
+
+            Dim Mac = ComputeMac(Page, PageLengthWithoutMac, PublicIntegrityKey)
+            Buffer.BlockCopy(Mac, 0, Page, PageLengthWithoutMac, MacSize)
+
+            Return Page
+
+        End Function
+
+        Private Sub WritePhysicalRecordPage(PageNumber As Integer,
+                                            OrderedRecords As IList(Of PhysicalRecordEntry))
+
+            If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
+            If OrderedRecords Is Nothing Then Throw New ArgumentNullException(NameOf(OrderedRecords))
+
+            Dim OldDescriptor As MetadataPageDescriptor = Nothing
+            Dim HadOldDescriptor = _PhysicalRecordPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
+            Dim FirstIndex = PageNumber * _IndexPageEntryCount
+            Dim EntryCount = Math.Max(0, Math.Min(_IndexPageEntryCount, OrderedRecords.Count - FirstIndex))
+
+            If EntryCount = 0 Then
+                If HadOldDescriptor Then
+                    If OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
+                        AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                    End If
+
+                    _PhysicalRecordPageDescriptors.Remove(PageNumber)
+                End If
+
+                Return
+            End If
+
+            Dim Page = BuildPhysicalRecordPage(PageNumber, OrderedRecords)
+            Dim Offset = GetNextIndexPageWriteOffset(Page.Length)
+
+            _Fs.Position = Offset
+            _Fs.Write(Page, 0, Page.Length)
+
+            Dim Descriptor = New MetadataPageDescriptor With {
+                .PageNumber = PageNumber,
+                .Offset = Offset,
+                .Length = Page.Length,
+                .Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
+            }
+
+            If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
+                AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+            End If
+
+            _PhysicalRecordPageDescriptors(PageNumber) = Descriptor
 
         End Sub
 
@@ -243,12 +311,10 @@ Namespace Streams
 
             If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
             If Entries Is Nothing Then Throw New ArgumentNullException(NameOf(Entries))
-            If _IndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid index directory entry count.")
+            If _IndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid metadata directory entry count.")
 
-            Dim EntrySize = MetadataDescriptorSize
-            Dim PageLengthWithoutMac = DirectoryPageHeaderSize + (_IndexDirectoryEntryCount * EntrySize)
+            Dim PageLengthWithoutMac = DirectoryPageHeaderSize + (_IndexDirectoryEntryCount * MetadataDescriptorSize)
             Dim Page(PageLengthWithoutMac + MacSize - 1) As Byte
-
             Dim FirstEntryIndex = PageNumber * _IndexDirectoryEntryCount
             Dim EntryCount = Math.Max(0, Math.Min(_IndexDirectoryEntryCount, Entries.Count - FirstEntryIndex))
 
@@ -274,14 +340,14 @@ Namespace Streams
                     End If
                 End If
 
-                EntryOffset += EntrySize
+                EntryOffset += MetadataDescriptorSize
             Next
 
             Dim Mac = ComputeMac(Page, PageLengthWithoutMac, PublicIntegrityKey)
-
             Buffer.BlockCopy(Mac, 0, Page, PageLengthWithoutMac, MacSize)
 
             Return Page
+
         End Function
 
         Private Function WriteDirectoryPages(DirectoryType As DirectoryTypes,
@@ -292,16 +358,12 @@ Namespace Streams
             If ExistingDirectoryDescriptors Is Nothing Then Throw New ArgumentNullException(NameOf(ExistingDirectoryDescriptors))
 
             Dim DescriptorList = Descriptors.OrderBy(Function(descriptor) descriptor.PageNumber).ToList()
-            Dim DirectoryPageCount = If(DescriptorList.Count = 0,
-                                        0,
-                                        CInt(((DescriptorList.Count - 1) \ _IndexDirectoryEntryCount) + 1))
-
+            Dim DirectoryPageCount = GetIndexPageCount(DescriptorList.Count, _IndexDirectoryEntryCount)
             Dim Result As New Dictionary(Of Integer, MetadataPageDescriptor)()
 
             For PageNumber = 0 To DirectoryPageCount - 1
                 Dim Page = BuildDirectoryPage(DirectoryType, PageNumber, DescriptorList)
                 Dim Offset = GetNextIndexDirectoryPageWriteOffset(Page.Length)
-
                 Dim OldDescriptor As MetadataPageDescriptor = Nothing
                 Dim HadOldDescriptor = ExistingDirectoryDescriptors.TryGetValue(PageNumber, OldDescriptor)
 
@@ -323,6 +385,7 @@ Namespace Streams
             Next
 
             Return Result
+
         End Function
 
         Private Function BuildHoleDirectoryPage(PageNumber As Integer,
@@ -330,11 +393,10 @@ Namespace Streams
 
             If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
             If Records Is Nothing Then Throw New ArgumentNullException(NameOf(Records))
-            If _IndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid index directory entry count.")
+            If _IndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid hole directory entry count.")
 
             Dim PageLengthWithoutMac = DirectoryPageHeaderSize + (_IndexDirectoryEntryCount * HoleDirectoryEntrySize)
             Dim Page(PageLengthWithoutMac + MacSize - 1) As Byte
-
             Dim FirstEntryIndex = PageNumber * _IndexDirectoryEntryCount
             Dim EntryCount = Math.Max(0, Math.Min(_IndexDirectoryEntryCount, Records.Count - FirstEntryIndex))
 
@@ -360,25 +422,25 @@ Namespace Streams
             Next
 
             Dim Mac = ComputeMac(Page, PageLengthWithoutMac, PublicIntegrityKey)
-
             Buffer.BlockCopy(Mac, 0, Page, PageLengthWithoutMac, MacSize)
 
             Return Page
+
         End Function
 
         Private Function WriteHoleDirectoryPages(Records As IList(Of HoleDirectoryRecord)) As Dictionary(Of Integer, MetadataPageDescriptor)
+
             Dim Result As New Dictionary(Of Integer, MetadataPageDescriptor)()
 
             If Records Is Nothing OrElse Records.Count = 0 Then
                 Return Result
             End If
 
-            Dim DirectoryPageCount = CInt(((Records.Count - 1) \ _IndexDirectoryEntryCount) + 1)
+            Dim DirectoryPageCount = GetIndexPageCount(Records.Count, _IndexDirectoryEntryCount)
 
             For PageNumber = 0 To DirectoryPageCount - 1
                 Dim Page = BuildHoleDirectoryPage(PageNumber, Records)
                 Dim Offset = GetNextIndexDirectoryPageWriteOffset(Page.Length)
-
                 Dim OldDescriptor As MetadataPageDescriptor = Nothing
                 Dim HadOldDescriptor = _HoleDirectoryPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
 
@@ -400,45 +462,55 @@ Namespace Streams
             Next
 
             Return Result
+
         End Function
 
-        Private Function BuildMetadataRoot(DirectIndexPageDescriptors As IEnumerable(Of MetadataPageDescriptor),
-                                           ChunkIndexDirectoryDescriptors As IEnumerable(Of MetadataPageDescriptor),
+        Private Function BuildMetadataRoot(DirectExtentPageDescriptors As IEnumerable(Of MetadataPageDescriptor),
+                                           ExtentDirectoryDescriptors As IEnumerable(Of MetadataPageDescriptor),
+                                           DirectPhysicalRecordPageDescriptors As IEnumerable(Of MetadataPageDescriptor),
+                                           PhysicalRecordDirectoryDescriptors As IEnumerable(Of MetadataPageDescriptor),
                                            HoleDirectoryDescriptors As IEnumerable(Of MetadataPageDescriptor)) As Byte()
 
-            Dim DirectIndexPageList = If(DirectIndexPageDescriptors, Enumerable.Empty(Of MetadataPageDescriptor)()).
-                                      OrderBy(Function(descriptor) descriptor.PageNumber).
-                                      ToList()
-
-            Dim ChunkDirectoryList = If(ChunkIndexDirectoryDescriptors, Enumerable.Empty(Of MetadataPageDescriptor)()).
-                                     OrderBy(Function(descriptor) descriptor.PageNumber).
-                                     ToList()
-
-            Dim HoleDirectoryList = If(HoleDirectoryDescriptors, Enumerable.Empty(Of MetadataPageDescriptor)()).
-                                    OrderBy(Function(descriptor) descriptor.PageNumber).
-                                    ToList()
-
-            Dim DescriptorCount = DirectIndexPageList.Count + ChunkDirectoryList.Count + HoleDirectoryList.Count
+            Dim DirectExtentList = If(DirectExtentPageDescriptors, Enumerable.Empty(Of MetadataPageDescriptor)()).OrderBy(Function(descriptor) descriptor.PageNumber).ToList()
+            Dim ExtentDirectoryList = If(ExtentDirectoryDescriptors, Enumerable.Empty(Of MetadataPageDescriptor)()).OrderBy(Function(descriptor) descriptor.PageNumber).ToList()
+            Dim DirectPhysicalRecordList = If(DirectPhysicalRecordPageDescriptors, Enumerable.Empty(Of MetadataPageDescriptor)()).OrderBy(Function(descriptor) descriptor.PageNumber).ToList()
+            Dim PhysicalRecordDirectoryList = If(PhysicalRecordDirectoryDescriptors, Enumerable.Empty(Of MetadataPageDescriptor)()).OrderBy(Function(descriptor) descriptor.PageNumber).ToList()
+            Dim HoleDirectoryList = If(HoleDirectoryDescriptors, Enumerable.Empty(Of MetadataPageDescriptor)()).OrderBy(Function(descriptor) descriptor.PageNumber).ToList()
+            Dim DescriptorCount = DirectExtentList.Count + ExtentDirectoryList.Count + DirectPhysicalRecordList.Count + PhysicalRecordDirectoryList.Count + HoleDirectoryList.Count
             Dim RootLengthWithoutMac = MetadataRootHeaderSize + (DescriptorCount * MetadataRootDescriptorSize)
             Dim Root(RootLengthWithoutMac + MacSize - 1) As Byte
 
             Buffer.BlockCopy(MetadataRootMagic, 0, Root, 0, MetadataRootMagic.Length)
             Buffer.BlockCopy(BitConverter.GetBytes(_IndexPageEntryCount), 0, Root, 8, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(_IndexDirectoryEntryCount), 0, Root, 12, 4)
-            Buffer.BlockCopy(BitConverter.GetBytes(CLng(_Index.Count)), 0, Root, 16, 8)
-            Buffer.BlockCopy(BitConverter.GetBytes(DirectIndexPageList.Count), 0, Root, 24, 4)
-            Buffer.BlockCopy(BitConverter.GetBytes(ChunkDirectoryList.Count), 0, Root, 28, 4)
-            Buffer.BlockCopy(BitConverter.GetBytes(HoleDirectoryList.Count), 0, Root, 32, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(CLng(_Extents.Count)), 0, Root, 16, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(CLng(_PhysicalRecords.Count)), 0, Root, 24, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(_NextPhysicalRecordId), 0, Root, 32, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(DirectExtentList.Count), 0, Root, 40, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(ExtentDirectoryList.Count), 0, Root, 44, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(DirectPhysicalRecordList.Count), 0, Root, 48, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(PhysicalRecordDirectoryList.Count), 0, Root, 52, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(HoleDirectoryList.Count), 0, Root, 56, 4)
 
             Dim EntryOffset = MetadataRootHeaderSize
 
-            For Each Descriptor In DirectIndexPageList
-                WriteMetadataRootDescriptor(Root, EntryOffset, DirectoryTypes.ChunkIndexPages, Descriptor)
+            For Each Descriptor In DirectExtentList
+                WriteMetadataRootDescriptor(Root, EntryOffset, DirectoryTypes.ExtentPages, Descriptor)
                 EntryOffset += MetadataRootDescriptorSize
             Next
 
-            For Each Descriptor In ChunkDirectoryList
-                WriteMetadataRootDescriptor(Root, EntryOffset, DirectoryTypes.ChunkIndexPages, Descriptor)
+            For Each Descriptor In ExtentDirectoryList
+                WriteMetadataRootDescriptor(Root, EntryOffset, DirectoryTypes.ExtentPages, Descriptor)
+                EntryOffset += MetadataRootDescriptorSize
+            Next
+
+            For Each Descriptor In DirectPhysicalRecordList
+                WriteMetadataRootDescriptor(Root, EntryOffset, DirectoryTypes.PhysicalRecordPages, Descriptor)
+                EntryOffset += MetadataRootDescriptorSize
+            Next
+
+            For Each Descriptor In PhysicalRecordDirectoryList
+                WriteMetadataRootDescriptor(Root, EntryOffset, DirectoryTypes.PhysicalRecordPages, Descriptor)
                 EntryOffset += MetadataRootDescriptorSize
             Next
 
@@ -448,7 +520,6 @@ Namespace Streams
             Next
 
             Dim Mac = ComputeMac(Root, RootLengthWithoutMac, PublicIntegrityKey)
-
             Buffer.BlockCopy(Mac, 0, Root, RootLengthWithoutMac, MacSize)
 
             Return Root
@@ -476,104 +547,98 @@ Namespace Streams
 
             If IndexOffset < DataStartOffset Then Throw New InvalidDataException("Invalid index offset.")
 
-            Dim PersistSw = System.Diagnostics.Stopwatch.StartNew()
-
             _IndexOffset = IndexOffset
 
-            If _IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid index page entry count.")
-            If _IndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid index directory entry count.")
+            If _IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid metadata page entry count.")
+            If _IndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid metadata directory entry count.")
 
 #If DEBUG Then
             _DebugPersistCount += 1
-            _DebugLastPersistIndexPageCount = _DirtyIndexPages.Count
-            _DebugTotalPersistIndexPages += _DirtyIndexPages.Count
+            _DebugLastPersistIndexPageCount = _DirtyExtentPages.Count + _DirtyPhysicalRecordPages.Count
+            _DebugTotalPersistIndexPages += _DirtyExtentPages.Count + _DirtyPhysicalRecordPages.Count
 #End If
 
-            Dim RequiredIndexPageCount = GetIndexPageCount(_Index.Count, _IndexPageEntryCount)
+            Dim RequiredExtentPageCount = GetIndexPageCount(_Extents.Count, _IndexPageEntryCount)
+            Dim RemovedExtentPages = _ExtentPageDescriptors.Keys.Where(Function(x) x >= RequiredExtentPageCount).ToArray()
 
-            Dim RemovedPageNumbers =
-                _IndexPageDescriptors.Keys.
-                                      Where(Function(x) x >= RequiredIndexPageCount).
-                                      ToArray()
-
-            For Each PageNumber In RemovedPageNumbers
-                Dim Descriptor = _IndexPageDescriptors(PageNumber)
-
+            For Each PageNumber In RemovedExtentPages
+                Dim Descriptor = _ExtentPageDescriptors(PageNumber)
                 AddFreeIndexPageSpace(Descriptor.Offset, Descriptor.Length)
-                _IndexPageDescriptors.Remove(PageNumber)
+                _ExtentPageDescriptors.Remove(PageNumber)
             Next
 
-            Dim IndexPageSw = System.Diagnostics.Stopwatch.StartNew()
+            Dim OrderedPhysicalRecords = _PhysicalRecords.Values.OrderBy(Function(record) record.RecordId).ToList()
+            Dim RequiredPhysicalRecordPageCount = GetIndexPageCount(OrderedPhysicalRecords.Count, _IndexPageEntryCount)
+            Dim RemovedPhysicalRecordPages = _PhysicalRecordPageDescriptors.Keys.Where(Function(x) x >= RequiredPhysicalRecordPageCount).ToArray()
 
-            Dim DirtyPageNumbers = _DirtyIndexPages.ToArray()
+            For Each PageNumber In RemovedPhysicalRecordPages
+                Dim Descriptor = _PhysicalRecordPageDescriptors(PageNumber)
+                AddFreeIndexPageSpace(Descriptor.Offset, Descriptor.Length)
+                _PhysicalRecordPageDescriptors.Remove(PageNumber)
+            Next
 
-            For Each PageNumber In DirtyPageNumbers
-                If PageNumber < RequiredIndexPageCount Then
-                    WriteIndexPage(PageNumber)
+            For Each PageNumber In _DirtyExtentPages.ToArray()
+                If PageNumber < RequiredExtentPageCount Then
+                    WriteExtentPage(PageNumber)
                 End If
             Next
 
-            _DirtyIndexPages.Clear()
+            For Each PageNumber In _DirtyPhysicalRecordPages.ToArray()
+                If PageNumber < RequiredPhysicalRecordPageCount Then
+                    WritePhysicalRecordPage(PageNumber, OrderedPhysicalRecords)
+                End If
+            Next
 
-            IndexPageSw.Stop()
+            _DirtyExtentPages.Clear()
+            _DirtyPhysicalRecordPages.Clear()
 
-#If DEBUG Then
-            _DebugIndexPageTicks += IndexPageSw.ElapsedTicks
-#End If
+            Dim DirectExtentPageDescriptors As MetadataPageDescriptor() = _ExtentPageDescriptors.Values.OrderBy(Function(descriptor) descriptor.PageNumber).ToArray()
+            Dim ExtentDirectoryDescriptors As MetadataPageDescriptor() = Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
 
-            Dim DirectorySw = System.Diagnostics.Stopwatch.StartNew()
-            Dim ChunkDirectorySw = System.Diagnostics.Stopwatch.StartNew()
+            If _ExtentPageDescriptors.Count > _IndexDirectoryEntryCount Then
+                Dim NewExtentDirectoryDescriptors = WriteDirectoryPages(DirectoryTypes.ExtentPages, _ExtentPageDescriptors.Values, _ExtentDirectoryPageDescriptors)
 
-            Dim DirectIndexPageDescriptors As MetadataPageDescriptor() =
-                _IndexPageDescriptors.Values.
-                                      OrderBy(Function(descriptor) descriptor.PageNumber).
-                                      ToArray()
+                _ExtentDirectoryPageDescriptors.Clear()
 
-            Dim ChunkIndexDirectoryDescriptors As MetadataPageDescriptor() =
-                Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
-
-            If _IndexPageDescriptors.Count > _IndexDirectoryEntryCount Then
-
-                Dim NewChunkDirectoryDescriptors =
-                    WriteDirectoryPages(DirectoryTypes.ChunkIndexPages,
-                                        _IndexPageDescriptors.Values,
-                                        _ChunkIndexDirectoryPageDescriptors)
-
-                _ChunkIndexDirectoryPageDescriptors.Clear()
-
-                For Each pair In NewChunkDirectoryDescriptors
-                    _ChunkIndexDirectoryPageDescriptors(pair.Key) = pair.Value
+                For Each Pair In NewExtentDirectoryDescriptors
+                    _ExtentDirectoryPageDescriptors(Pair.Key) = Pair.Value
                 Next
 
-                DirectIndexPageDescriptors =
-                    Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
-
-                ChunkIndexDirectoryDescriptors =
-                    _ChunkIndexDirectoryPageDescriptors.Values.
-                                                        OrderBy(Function(descriptor) descriptor.PageNumber).
-                                                        ToArray()
-
+                DirectExtentPageDescriptors = Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
+                ExtentDirectoryDescriptors = _ExtentDirectoryPageDescriptors.Values.OrderBy(Function(descriptor) descriptor.PageNumber).ToArray()
             Else
-
-                Dim ExistingDirectoryDescriptors = _ChunkIndexDirectoryPageDescriptors.Values.ToArray()
-
-                For Each Descriptor In ExistingDirectoryDescriptors
+                For Each Descriptor In _ExtentDirectoryPageDescriptors.Values.ToArray()
                     If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
                         AddFreeIndexDirectoryPageSpace(Descriptor.Offset, Descriptor.Length)
                     End If
                 Next
 
-                _ChunkIndexDirectoryPageDescriptors.Clear()
-
+                _ExtentDirectoryPageDescriptors.Clear()
             End If
 
-            ChunkDirectorySw.Stop()
+            Dim DirectPhysicalRecordPageDescriptors As MetadataPageDescriptor() = _PhysicalRecordPageDescriptors.Values.OrderBy(Function(descriptor) descriptor.PageNumber).ToArray()
+            Dim PhysicalRecordDirectoryDescriptors As MetadataPageDescriptor() = Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
 
-#If DEBUG Then
-            _DebugChunkDirectoryTicks += ChunkDirectorySw.ElapsedTicks
-#End If
+            If _PhysicalRecordPageDescriptors.Count > _IndexDirectoryEntryCount Then
+                Dim NewPhysicalRecordDirectoryDescriptors = WriteDirectoryPages(DirectoryTypes.PhysicalRecordPages, _PhysicalRecordPageDescriptors.Values, _PhysicalRecordDirectoryPageDescriptors)
 
-            Dim HoleDirectorySw = System.Diagnostics.Stopwatch.StartNew()
+                _PhysicalRecordDirectoryPageDescriptors.Clear()
+
+                For Each Pair In NewPhysicalRecordDirectoryDescriptors
+                    _PhysicalRecordDirectoryPageDescriptors(Pair.Key) = Pair.Value
+                Next
+
+                DirectPhysicalRecordPageDescriptors = Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
+                PhysicalRecordDirectoryDescriptors = _PhysicalRecordDirectoryPageDescriptors.Values.OrderBy(Function(descriptor) descriptor.PageNumber).ToArray()
+            Else
+                For Each Descriptor In _PhysicalRecordDirectoryPageDescriptors.Values.ToArray()
+                    If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                        AddFreeIndexDirectoryPageSpace(Descriptor.Offset, Descriptor.Length)
+                    End If
+                Next
+
+                _PhysicalRecordDirectoryPageDescriptors.Clear()
+            End If
 
             Dim NewHoleDirectoryDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
 
@@ -581,9 +646,7 @@ Namespace Streams
                 NewHoleDirectoryDescriptors = WriteHoleDirectoryPages(GetKnownHoleRecords())
             End If
 
-            Dim ExistingHoleDirectoryDescriptors = _HoleDirectoryPageDescriptors.Values.ToArray()
-
-            For Each Descriptor In ExistingHoleDirectoryDescriptors
+            For Each Descriptor In _HoleDirectoryPageDescriptors.Values.ToArray()
                 If NewHoleDirectoryDescriptors.ContainsKey(Descriptor.PageNumber) = False Then
                     If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
                         AddFreeIndexDirectoryPageSpace(Descriptor.Offset, Descriptor.Length)
@@ -593,36 +656,20 @@ Namespace Streams
 
             _HoleDirectoryPageDescriptors.Clear()
 
-            For Each pair In NewHoleDirectoryDescriptors
-                _HoleDirectoryPageDescriptors(pair.Key) = pair.Value
+            For Each Pair In NewHoleDirectoryDescriptors
+                _HoleDirectoryPageDescriptors(Pair.Key) = Pair.Value
             Next
 
-            Dim HoleDirectoryDescriptors =
-                _HoleDirectoryPageDescriptors.Values.
-                                              OrderBy(Function(descriptor) descriptor.PageNumber).
-                                              ToArray()
+            Dim HoleDirectoryDescriptors = _HoleDirectoryPageDescriptors.Values.OrderBy(Function(descriptor) descriptor.PageNumber).ToArray()
 
-            HoleDirectorySw.Stop()
-
-#If DEBUG Then
-            _DebugHoleDirectoryTicks += HoleDirectorySw.ElapsedTicks
-#End If
-
-            DirectorySw.Stop()
-
-#If DEBUG Then
-            _DebugDirectoryTicks += DirectorySw.ElapsedTicks
-#End If
-
-            Dim RootSw = System.Diagnostics.Stopwatch.StartNew()
-
-            Dim Root = BuildMetadataRoot(DirectIndexPageDescriptors,
-                                         ChunkIndexDirectoryDescriptors,
+            Dim Root = BuildMetadataRoot(DirectExtentPageDescriptors,
+                                         ExtentDirectoryDescriptors,
+                                         DirectPhysicalRecordPageDescriptors,
+                                         PhysicalRecordDirectoryDescriptors,
                                          HoleDirectoryDescriptors)
 
             Dim OldRootOffset = _MetadataRootOffset
             Dim OldRootLength = _MetadataRootLength
-
             Dim CompactRootOffset As Long
 
             If TryGetCompactMetadataWriteOffset(Root.Length, CompactRootOffset) Then
@@ -642,29 +689,9 @@ Namespace Streams
 
             If Durable Then FlushDurable(_Fs)
 
-            RootSw.Stop()
-
-#If DEBUG Then
-            _DebugRootTicks += RootSw.ElapsedTicks
-#End If
-
-            Dim HeaderSw = System.Diagnostics.Stopwatch.StartNew()
-
             UpdateHeader(Durable)
 
-            HeaderSw.Stop()
-
-#If DEBUG Then
-            _DebugHeaderTicks += HeaderSw.ElapsedTicks
-#End If
-
             If Durable Then FlushDurable(_Fs)
-
-            PersistSw.Stop()
-
-#If DEBUG Then
-            _DebugPersistTicks += PersistSw.ElapsedTicks
-#End If
 
         End Sub
 
@@ -674,7 +701,6 @@ Namespace Streams
             If Offset < 0 OrElse Offset + MetadataRootDescriptorSize > Buffer.Length Then Throw New ArgumentOutOfRangeException(NameOf(Offset))
 
             Dim Mac(MacSize - 1) As Byte
-
             System.Buffer.BlockCopy(Buffer, Offset + 20, Mac, 0, Mac.Length)
 
             Return New MetadataPageDescriptor With {
@@ -692,7 +718,6 @@ Namespace Streams
             If Offset < 0 OrElse Offset + MetadataDescriptorSize > Buffer.Length Then Throw New ArgumentOutOfRangeException(NameOf(Offset))
 
             Dim Mac(MacSize - 1) As Byte
-
             System.Buffer.BlockCopy(Buffer, Offset + 16, Mac, 0, Mac.Length)
 
             Return New MetadataPageDescriptor With {
@@ -700,6 +725,48 @@ Namespace Streams
                 .Offset = BitConverter.ToInt64(Buffer, Offset + 4),
                 .Length = BitConverter.ToInt32(Buffer, Offset + 12),
                 .Mac = Mac
+            }
+
+        End Function
+
+        Private Shared Function ReadPagedMetadata(Fs As Stream,
+                                                  RootOffset As Long,
+                                                  RootLength As Integer,
+                                                  ExpectedMac As Byte(),
+                                                  ByRef IndexPageEntryCount As Integer,
+                                                  ByRef IndexDirectoryEntryCount As Integer) As MetadataReadResult
+
+            Dim Root = ReadMetadataRoot(Fs, RootOffset, RootLength, ExpectedMac)
+
+            IndexPageEntryCount = Root.IndexPageEntryCount
+            IndexDirectoryEntryCount = Root.IndexDirectoryEntryCount
+
+            Dim ExtentPageDescriptors =
+                If(Root.DirectExtentPageDescriptors.Count > 0,
+                   Root.DirectExtentPageDescriptors,
+                   ReadDirectoryPages(Fs, Root.ExtentDirectoryPageDescriptors, DirectoryTypes.ExtentPages))
+
+            Dim PhysicalRecordPageDescriptors =
+                If(Root.DirectPhysicalRecordPageDescriptors.Count > 0,
+                   Root.DirectPhysicalRecordPageDescriptors,
+                   ReadDirectoryPages(Fs, Root.PhysicalRecordDirectoryPageDescriptors, DirectoryTypes.PhysicalRecordPages))
+
+            Dim Extents = ReadExtentPages(Fs, ExtentPageDescriptors, Root.ExtentCount, IndexPageEntryCount)
+            Dim PhysicalRecords = ReadPhysicalRecordPages(Fs, PhysicalRecordPageDescriptors, Root.PhysicalRecordCount, IndexPageEntryCount)
+            Dim HoleRecords = ReadHoleDirectoryPages(Fs, Root.HoleDirectoryPageDescriptors)
+
+            Return New MetadataReadResult With {
+                .IndexPageEntryCount = Root.IndexPageEntryCount,
+                .IndexDirectoryEntryCount = Root.IndexDirectoryEntryCount,
+                .Extents = Extents,
+                .PhysicalRecords = PhysicalRecords,
+                .NextPhysicalRecordId = Math.Max(1L, Root.NextPhysicalRecordId),
+                .ExtentPageDescriptors = ExtentPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
+                .ExtentDirectoryPageDescriptors = Root.ExtentDirectoryPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
+                .PhysicalRecordPageDescriptors = PhysicalRecordPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
+                .PhysicalRecordDirectoryPageDescriptors = Root.PhysicalRecordDirectoryPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
+                .HoleDirectoryPageDescriptors = Root.HoleDirectoryPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
+                .HoleRecords = HoleRecords
             }
 
         End Function
@@ -713,9 +780,13 @@ Namespace Streams
                 Return New MetadataRootReadResult With {
                     .IndexPageEntryCount = 256,
                     .IndexDirectoryEntryCount = 256,
-                    .IndexCount = 0,
-                    .DirectIndexPageDescriptors = New List(Of MetadataPageDescriptor)(),
-                    .ChunkIndexDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
+                    .ExtentCount = 0,
+                    .PhysicalRecordCount = 0,
+                    .NextPhysicalRecordId = 1,
+                    .DirectExtentPageDescriptors = New List(Of MetadataPageDescriptor)(),
+                    .ExtentDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
+                    .DirectPhysicalRecordPageDescriptors = New List(Of MetadataPageDescriptor)(),
+                    .PhysicalRecordDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
                     .HoleDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)()
                 }
             End If
@@ -745,85 +816,74 @@ Namespace Streams
                 Throw New CryptographicException("Metadata root embedded MAC invalid.")
             End If
 
-            Dim IndexPageEntryCount = BitConverter.ToInt32(Root, 8)
-            Dim IndexDirectoryEntryCount = BitConverter.ToInt32(Root, 12)
-            Dim IndexCount = CInt(BitConverter.ToInt64(Root, 16))
-            Dim DirectIndexPageDescriptorCount = BitConverter.ToInt32(Root, 24)
-            Dim ChunkDirectoryPageCount = BitConverter.ToInt32(Root, 28)
-            Dim HoleDirectoryPageCount = BitConverter.ToInt32(Root, 32)
+            Dim Result As New MetadataRootReadResult With {
+                .IndexPageEntryCount = BitConverter.ToInt32(Root, 8),
+                .IndexDirectoryEntryCount = BitConverter.ToInt32(Root, 12),
+                .ExtentCount = CInt(BitConverter.ToInt64(Root, 16)),
+                .PhysicalRecordCount = CInt(BitConverter.ToInt64(Root, 24)),
+                .NextPhysicalRecordId = BitConverter.ToInt64(Root, 32),
+                .DirectExtentPageDescriptors = New List(Of MetadataPageDescriptor)(),
+                .ExtentDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
+                .DirectPhysicalRecordPageDescriptors = New List(Of MetadataPageDescriptor)(),
+                .PhysicalRecordDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
+                .HoleDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)()
+            }
 
-            If IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid metadata index page entry count.")
-            If IndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid metadata directory entry count.")
-            If IndexCount < 0 Then Throw New InvalidDataException("Invalid metadata index count.")
-            If DirectIndexPageDescriptorCount < 0 Then Throw New InvalidDataException("Invalid direct index page descriptor count.")
-            If ChunkDirectoryPageCount < 0 Then Throw New InvalidDataException("Invalid chunk-index directory descriptor count.")
-            If HoleDirectoryPageCount < 0 Then Throw New InvalidDataException("Invalid hole directory descriptor count.")
+            Dim DirectExtentDescriptorCount = BitConverter.ToInt32(Root, 40)
+            Dim ExtentDirectoryDescriptorCount = BitConverter.ToInt32(Root, 44)
+            Dim DirectPhysicalRecordDescriptorCount = BitConverter.ToInt32(Root, 48)
+            Dim PhysicalRecordDirectoryDescriptorCount = BitConverter.ToInt32(Root, 52)
+            Dim HoleDirectoryDescriptorCount = BitConverter.ToInt32(Root, 56)
 
-            Dim DirectIndexPageDescriptors As New List(Of MetadataPageDescriptor)()
-            Dim ChunkDirectoryDescriptors As New List(Of MetadataPageDescriptor)()
-            Dim HoleDirectoryDescriptors As New List(Of MetadataPageDescriptor)()
+            If Result.IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid metadata page entry count.")
+            If Result.IndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid metadata directory entry count.")
+            If Result.ExtentCount < 0 Then Throw New InvalidDataException("Invalid extent count.")
+            If Result.PhysicalRecordCount < 0 Then Throw New InvalidDataException("Invalid physical-record count.")
+            If Result.NextPhysicalRecordId <= 0 Then Throw New InvalidDataException("Invalid next physical record id.")
 
             Dim EntryOffset = MetadataRootHeaderSize
             Dim DescriptorEndOffset = RootLength - MacSize
 
-            For Index = 0 To DirectIndexPageDescriptorCount - 1
-                If EntryOffset + MetadataRootDescriptorSize > DescriptorEndOffset Then
-                    Throw New InvalidDataException("Metadata root direct index page descriptor area is truncated.")
-                End If
+            ReadRootDescriptorGroup(Root, EntryOffset, DescriptorEndOffset, DirectExtentDescriptorCount, DirectoryTypes.ExtentPages, Result.DirectExtentPageDescriptors)
+            ReadRootDescriptorGroup(Root, EntryOffset, DescriptorEndOffset, ExtentDirectoryDescriptorCount, DirectoryTypes.ExtentPages, Result.ExtentDirectoryPageDescriptors)
+            ReadRootDescriptorGroup(Root, EntryOffset, DescriptorEndOffset, DirectPhysicalRecordDescriptorCount, DirectoryTypes.PhysicalRecordPages, Result.DirectPhysicalRecordPageDescriptors)
+            ReadRootDescriptorGroup(Root, EntryOffset, DescriptorEndOffset, PhysicalRecordDirectoryDescriptorCount, DirectoryTypes.PhysicalRecordPages, Result.PhysicalRecordDirectoryPageDescriptors)
+            ReadRootDescriptorGroup(Root, EntryOffset, DescriptorEndOffset, HoleDirectoryDescriptorCount, DirectoryTypes.Holes, Result.HoleDirectoryPageDescriptors)
 
-                Dim DirectoryType = CType(BitConverter.ToInt32(Root, EntryOffset), DirectoryTypes)
-
-                If DirectoryType <> DirectoryTypes.ChunkIndexPages Then
-                    Throw New InvalidDataException("Metadata root contains an unexpected direct index page descriptor.")
-                End If
-
-                DirectIndexPageDescriptors.Add(ReadMetadataRootDescriptor(Root, EntryOffset))
-                EntryOffset += MetadataRootDescriptorSize
-            Next
-
-            For Index = 0 To ChunkDirectoryPageCount - 1
-                If EntryOffset + MetadataRootDescriptorSize > DescriptorEndOffset Then
-                    Throw New InvalidDataException("Metadata root chunk-index directory descriptor area is truncated.")
-                End If
-
-                Dim DirectoryType = CType(BitConverter.ToInt32(Root, EntryOffset), DirectoryTypes)
-
-                If DirectoryType <> DirectoryTypes.ChunkIndexPages Then
-                    Throw New InvalidDataException("Metadata root contains an unexpected chunk-index directory descriptor.")
-                End If
-
-                ChunkDirectoryDescriptors.Add(ReadMetadataRootDescriptor(Root, EntryOffset))
-                EntryOffset += MetadataRootDescriptorSize
-            Next
-
-            For Index = 0 To HoleDirectoryPageCount - 1
-                If EntryOffset + MetadataRootDescriptorSize > DescriptorEndOffset Then
-                    Throw New InvalidDataException("Metadata root hole directory descriptor area is truncated.")
-                End If
-
-                Dim DirectoryType = CType(BitConverter.ToInt32(Root, EntryOffset), DirectoryTypes)
-
-                If DirectoryType <> DirectoryTypes.Holes Then
-                    Throw New InvalidDataException("Metadata root contains an unexpected hole directory descriptor.")
-                End If
-
-                HoleDirectoryDescriptors.Add(ReadMetadataRootDescriptor(Root, EntryOffset))
-                EntryOffset += MetadataRootDescriptorSize
-            Next
-
-            Return New MetadataRootReadResult With {
-                .IndexPageEntryCount = IndexPageEntryCount,
-                .IndexDirectoryEntryCount = IndexDirectoryEntryCount,
-                .IndexCount = IndexCount,
-                .DirectIndexPageDescriptors = DirectIndexPageDescriptors,
-                .ChunkIndexDirectoryPageDescriptors = ChunkDirectoryDescriptors,
-                .HoleDirectoryPageDescriptors = HoleDirectoryDescriptors
-            }
+            Return Result
 
         End Function
 
-        Private Shared Function ReadChunkIndexDirectoryPages(Fs As Stream,
-                                                             Descriptors As IEnumerable(Of MetadataPageDescriptor)) As List(Of MetadataPageDescriptor)
+        Private Shared Sub ReadRootDescriptorGroup(Buffer As Byte(),
+                                                   ByRef EntryOffset As Integer,
+                                                   DescriptorEndOffset As Integer,
+                                                   Count As Integer,
+                                                   ExpectedDirectoryType As DirectoryTypes,
+                                                   Target As List(Of MetadataPageDescriptor))
+
+            If Count < 0 Then Throw New InvalidDataException("Invalid metadata root descriptor count.")
+            If Target Is Nothing Then Throw New ArgumentNullException(NameOf(Target))
+
+            For Index = 0 To Count - 1
+                If EntryOffset + MetadataRootDescriptorSize > DescriptorEndOffset Then
+                    Throw New InvalidDataException("Metadata root descriptor area is truncated.")
+                End If
+
+                Dim DirectoryType = CType(BitConverter.ToInt32(Buffer, EntryOffset), DirectoryTypes)
+
+                If DirectoryType <> ExpectedDirectoryType Then
+                    Throw New InvalidDataException("Metadata root contains an unexpected descriptor type.")
+                End If
+
+                Target.Add(ReadMetadataRootDescriptor(Buffer, EntryOffset))
+                EntryOffset += MetadataRootDescriptorSize
+            Next
+
+        End Sub
+
+        Private Shared Function ReadDirectoryPages(Fs As Stream,
+                                                   Descriptors As IEnumerable(Of MetadataPageDescriptor),
+                                                   ExpectedDirectoryType As DirectoryTypes) As List(Of MetadataPageDescriptor)
 
             Dim Result As New List(Of MetadataPageDescriptor)()
 
@@ -836,28 +896,23 @@ Namespace Streams
                 Dim Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
 
                 If FixedTimeEquals(Mac, 0, Descriptor.Mac, 0, MacSize) = False Then
-                    Throw New CryptographicException("Chunk-index directory page MAC invalid.")
+                    Throw New CryptographicException("Metadata directory page MAC invalid.")
                 End If
 
                 If FixedTimeEquals(DirectoryPageMagic, 0, Page, 0, DirectoryPageMagicSize) = False Then
-                    Throw New InvalidDataException("Invalid chunk-index directory page magic.")
+                    Throw New InvalidDataException("Invalid metadata directory page magic.")
                 End If
 
                 Dim DirectoryType = CType(BitConverter.ToInt32(Page, 8), DirectoryTypes)
 
-                If DirectoryType <> DirectoryTypes.ChunkIndexPages Then
-                    Throw New InvalidDataException("Unexpected directory type while reading chunk-index directory pages.")
+                If DirectoryType <> ExpectedDirectoryType Then
+                    Throw New InvalidDataException("Unexpected directory type while reading metadata directory pages.")
                 End If
 
                 Dim EntryCount = BitConverter.ToInt32(Page, 16)
 
-                If EntryCount < 0 Then
-                    Throw New InvalidDataException("Invalid chunk-index directory page entry count.")
-                End If
-
-                If DirectoryPageHeaderSize + (EntryCount * MetadataDescriptorSize) + MacSize > Page.Length Then
-                    Throw New InvalidDataException("Chunk-index directory page entry area is truncated.")
-                End If
+                If EntryCount < 0 Then Throw New InvalidDataException("Invalid metadata directory page entry count.")
+                If DirectoryPageHeaderSize + (EntryCount * MetadataDescriptorSize) + MacSize > Page.Length Then Throw New InvalidDataException("Metadata directory page entry area is truncated.")
 
                 Dim EntryOffset = DirectoryPageHeaderSize
 
@@ -871,43 +926,21 @@ Namespace Streams
 
         End Function
 
-        Private Shared Function ReadPagedIndexTable(Fs As Stream,
-                                                    RootOffset As Long,
-                                                    RootLength As Integer,
-                                                    RootMac As Byte(),
-                                                    ByRef IndexPageEntryCount As Integer,
-                                                    ByRef IndexDirectoryEntryCount As Integer,
-                                                    ByRef ChunkDirectoryDescriptors As Dictionary(Of Integer, MetadataPageDescriptor),
-                                                    ByRef HoleDirectoryDescriptors As Dictionary(Of Integer, MetadataPageDescriptor),
-                                                    ByRef IndexPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor),
-                                                    ByRef HoleRecords As List(Of HoleDirectoryRecord)) As List(Of ChunkIndexEntry)
+        Private Shared Function ReadExtentPages(Fs As Stream,
+                                                Descriptors As IEnumerable(Of MetadataPageDescriptor),
+                                                ExtentCount As Integer,
+                                                PageEntryCount As Integer) As List(Of ExtentIndexEntry)
 
-            Dim Root = ReadMetadataRoot(Fs, RootOffset, RootLength, RootMac)
+            If ExtentCount < 0 Then Throw New ArgumentOutOfRangeException(NameOf(ExtentCount))
+            If PageEntryCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageEntryCount))
 
-            IndexPageEntryCount = Root.IndexPageEntryCount
-            IndexDirectoryEntryCount = Root.IndexDirectoryEntryCount
+            Dim Result As New List(Of ExtentIndexEntry)(ExtentCount)
 
-            ChunkDirectoryDescriptors = Root.ChunkIndexDirectoryPageDescriptors.ToDictionary(Function(x) x.PageNumber)
-            HoleDirectoryDescriptors = Root.HoleDirectoryPageDescriptors.ToDictionary(Function(x) x.PageNumber)
-
-            Dim PageDescriptors As List(Of MetadataPageDescriptor)
-
-            If Root.DirectIndexPageDescriptors.Count > 0 Then
-                PageDescriptors = Root.DirectIndexPageDescriptors
-            Else
-                PageDescriptors = ReadChunkIndexDirectoryPages(Fs, Root.ChunkIndexDirectoryPageDescriptors)
-            End If
-
-            IndexPageDescriptors = PageDescriptors.ToDictionary(Function(x) x.PageNumber)
-
-            Dim Index As New List(Of ChunkIndexEntry)(Root.IndexCount)
-
-            For IndexNumber = 0 To Root.IndexCount - 1
-                Index.Add(New ChunkIndexEntry())
+            For Index = 0 To ExtentCount - 1
+                Result.Add(New ExtentIndexEntry())
             Next
 
-            For Each Descriptor In PageDescriptors.OrderBy(Function(x) x.PageNumber)
-
+            For Each Descriptor In Descriptors.OrderBy(Function(x) x.PageNumber)
                 Dim Page(Descriptor.Length - 1) As Byte
 
                 Fs.Position = Descriptor.Offset
@@ -916,69 +949,109 @@ Namespace Streams
                 Dim Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
 
                 If FixedTimeEquals(Mac, 0, Descriptor.Mac, 0, MacSize) = False Then
-                    'Throw New CryptographicException("Index page MAC invalid.")
-                    Throw New CryptographicException(
-    $"Index page MAC invalid. " &
-    $"Page={Descriptor.PageNumber}, " &
-    $"Offset={Descriptor.Offset}, " &
-    $"Length={Descriptor.Length}," &
-    $"Expected={BitConverter.ToString(Descriptor.Mac)}, " &
-    $"Actual={BitConverter.ToString(Mac)}")
+                    Throw New CryptographicException("Extent page MAC invalid.")
                 End If
 
                 If FixedTimeEquals(IndexPageMagic, 0, Page, 0, IndexPageMagicSize) = False Then
-                    Throw New InvalidDataException("Invalid index page magic.")
+                    Throw New InvalidDataException("Invalid extent page magic.")
                 End If
 
                 Dim DirectoryType = CType(BitConverter.ToInt32(Page, 8), DirectoryTypes)
 
-                If DirectoryType <> DirectoryTypes.ChunkIndexPages Then
-                    Throw New InvalidDataException("Unexpected directory type while reading index page.")
+                If DirectoryType <> DirectoryTypes.ExtentPages Then
+                    Throw New InvalidDataException("Unexpected directory type while reading extent page.")
                 End If
 
                 Dim PageNumber = BitConverter.ToInt32(Page, 12)
-                Dim FirstChunkIndex = BitConverter.ToInt32(Page, 16)
+                Dim FirstIndex = BitConverter.ToInt32(Page, 16)
                 Dim EntryCount = BitConverter.ToInt32(Page, 20)
 
-                If PageNumber <> Descriptor.PageNumber Then
-                    Throw New InvalidDataException("Index page number mismatch.")
-                End If
-
-                If EntryCount < 0 OrElse EntryCount > IndexPageEntryCount Then
-                    Throw New InvalidDataException("Invalid index page entry count.")
-                End If
+                If PageNumber <> Descriptor.PageNumber Then Throw New InvalidDataException("Extent page number mismatch.")
+                If EntryCount < 0 OrElse EntryCount > PageEntryCount Then Throw New InvalidDataException("Invalid extent page entry count.")
 
                 Dim EntryOffset = IndexPageHeaderSize
 
                 For EntryIndex = 0 To EntryCount - 1
+                    Dim ExtentIndex = FirstIndex + EntryIndex
 
-                    Dim ChunkIndex = FirstChunkIndex + EntryIndex
+                    If ExtentIndex >= Result.Count Then Exit For
 
-                    If ChunkIndex >= Index.Count Then Exit For
-
-                    Dim Entry = New ChunkIndexEntry With {
-                        .Offset = BitConverter.ToInt64(Page, EntryOffset),
-                        .RecordLength = BitConverter.ToInt32(Page, EntryOffset + 8)
+                    Result(ExtentIndex) = New ExtentIndexEntry With {
+                        .LogicalOffset = BitConverter.ToInt64(Page, EntryOffset),
+                        .LogicalLength = BitConverter.ToInt32(Page, EntryOffset + 8),
+                        .PhysicalRecordId = BitConverter.ToInt64(Page, EntryOffset + 12),
+                        .PhysicalRecordOffset = BitConverter.ToInt32(Page, EntryOffset + 20)
                     }
 
-                    If Entry.Offset <> 0 OrElse Entry.RecordLength <> 0 Then
-
-                        If Entry.Offset < DataStartOffset OrElse Entry.RecordLength < MinChunkRecordSize Then
-                            Throw New InvalidDataException($"Invalid index entry {ChunkIndex}.")
-                        End If
-
-                    End If
-
-                    Index(ChunkIndex) = Entry
-                    EntryOffset += IndexEntrySize
-
+                    EntryOffset += ExtentEntrySize
                 Next
-
             Next
 
-            HoleRecords = ReadHoleDirectoryPages(Fs, Root.HoleDirectoryPageDescriptors)
+            Return Result
 
-            Return Index
+        End Function
+
+        Private Shared Function ReadPhysicalRecordPages(Fs As Stream,
+                                                        Descriptors As IEnumerable(Of MetadataPageDescriptor),
+                                                        PhysicalRecordCount As Integer,
+                                                        PageEntryCount As Integer) As Dictionary(Of Long, PhysicalRecordEntry)
+
+            If PhysicalRecordCount < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PhysicalRecordCount))
+            If PageEntryCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageEntryCount))
+
+            Dim Result As New Dictionary(Of Long, PhysicalRecordEntry)()
+
+            For Each Descriptor In Descriptors.OrderBy(Function(x) x.PageNumber)
+                Dim Page(Descriptor.Length - 1) As Byte
+
+                Fs.Position = Descriptor.Offset
+                ReadExactly(Fs, Page, 0, Page.Length)
+
+                Dim Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
+
+                If FixedTimeEquals(Mac, 0, Descriptor.Mac, 0, MacSize) = False Then
+                    Throw New CryptographicException("Physical-record page MAC invalid.")
+                End If
+
+                If FixedTimeEquals(IndexPageMagic, 0, Page, 0, IndexPageMagicSize) = False Then
+                    Throw New InvalidDataException("Invalid physical-record page magic.")
+                End If
+
+                Dim DirectoryType = CType(BitConverter.ToInt32(Page, 8), DirectoryTypes)
+
+                If DirectoryType <> DirectoryTypes.PhysicalRecordPages Then
+                    Throw New InvalidDataException("Unexpected directory type while reading physical-record page.")
+                End If
+
+                Dim EntryCount = BitConverter.ToInt32(Page, 20)
+
+                If EntryCount < 0 OrElse EntryCount > PageEntryCount Then Throw New InvalidDataException("Invalid physical-record page entry count.")
+
+                Dim EntryOffset = IndexPageHeaderSize
+
+                For EntryIndex = 0 To EntryCount - 1
+                    Dim Entry = New PhysicalRecordEntry With {
+                        .RecordId = BitConverter.ToInt64(Page, EntryOffset),
+                        .PhysicalOffset = BitConverter.ToInt64(Page, EntryOffset + 8),
+                        .PhysicalLength = BitConverter.ToInt32(Page, EntryOffset + 16),
+                        .PlainLength = BitConverter.ToInt32(Page, EntryOffset + 20),
+                        .RefCount = BitConverter.ToInt32(Page, EntryOffset + 24)
+                    }
+
+                    If Entry.RecordId <= SparsePhysicalRecordId Then
+                        Throw New InvalidDataException("Invalid physical record id.")
+                    End If
+
+                    Result(Entry.RecordId) = Entry
+                    EntryOffset += PhysicalRecordEntrySize
+                Next
+            Next
+
+            If Result.Count <> PhysicalRecordCount Then
+                Throw New InvalidDataException("Loaded physical-record count does not match metadata root.")
+            End If
+
+            Return Result
 
         End Function
 
@@ -1011,13 +1084,8 @@ Namespace Streams
 
                 Dim EntryCount = BitConverter.ToInt32(Page, 16)
 
-                If EntryCount < 0 Then
-                    Throw New InvalidDataException("Invalid hole directory page entry count.")
-                End If
-
-                If DirectoryPageHeaderSize + (EntryCount * HoleDirectoryEntrySize) + MacSize > Page.Length Then
-                    Throw New InvalidDataException("Hole directory page entry area is truncated.")
-                End If
+                If EntryCount < 0 Then Throw New InvalidDataException("Invalid hole directory page entry count.")
+                If DirectoryPageHeaderSize + (EntryCount * HoleDirectoryEntrySize) + MacSize > Page.Length Then Throw New InvalidDataException("Hole directory page entry area is truncated.")
 
                 Dim EntryOffset = DirectoryPageHeaderSize
 
@@ -1042,6 +1110,51 @@ Namespace Streams
 
         End Function
 
-    End Class
+        Private Sub MarkExtentPageDirty(ExtentIndex As Integer)
 
+            If ExtentIndex < 0 Then Throw New ArgumentOutOfRangeException(NameOf(ExtentIndex))
+            If _IndexPageEntryCount <= 0 Then Return
+
+            _DirtyExtentPages.Add(ExtentIndex \ _IndexPageEntryCount)
+
+        End Sub
+
+        Private Sub MarkPhysicalRecordPageDirtyByOrdinal(Ordinal As Integer)
+
+            If Ordinal < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Ordinal))
+            If _IndexPageEntryCount <= 0 Then Return
+
+            _DirtyPhysicalRecordPages.Add(Ordinal \ _IndexPageEntryCount)
+
+        End Sub
+
+        Private Sub MarkAllMetadataPagesDirty()
+
+            _DirtyExtentPages.Clear()
+            _DirtyPhysicalRecordPages.Clear()
+
+            Dim ExtentPageCount = GetIndexPageCount(_Extents.Count, _IndexPageEntryCount)
+
+            For PageNumber = 0 To ExtentPageCount - 1
+                _DirtyExtentPages.Add(PageNumber)
+            Next
+
+            Dim PhysicalRecordPageCount = GetIndexPageCount(_PhysicalRecords.Count, _IndexPageEntryCount)
+
+            For PageNumber = 0 To PhysicalRecordPageCount - 1
+                _DirtyPhysicalRecordPages.Add(PageNumber)
+            Next
+
+        End Sub
+
+        Private Shared Function GetIndexPageCount(IndexCount As Integer, IndexPageEntryCount As Integer) As Integer
+
+            If IndexCount <= 0 Then Return 0
+            If IndexPageEntryCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(IndexPageEntryCount))
+
+            Return CInt(((CLng(IndexCount) - 1L) \ CLng(IndexPageEntryCount)) + 1L)
+
+        End Function
+
+    End Class
 End Namespace

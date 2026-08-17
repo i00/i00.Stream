@@ -1,131 +1,116 @@
-﻿' ================================================================================
-' ChunkedStream Diagnostics
-' ================================================================================
-'
-' Purpose
-'   - Validation and diagnostic helpers.
-'
-' Features
-'   - Fragmentation calculation.
-'   - Full chunk-record validation.
-'   - Progress reporting for long-running validation.
-'
-' Design
-'   - Validation authenticates and verifies all live chunk records.
-'   - Diagnostic methods do not modify stream state.
-'
-' ================================================================================
-
-Imports System.IO
+﻿Imports System.IO
 Imports System.Security.Cryptography
 
 Namespace Streams
-
     Partial Class ChunkedStream
 
-        ''' <summary>
-        ''' Returns fragmentation as a value between 0 and 1.
-        ''' </summary>
         Public Function GetFragmentation() As Double
 
             SyncLock _SyncRoot
+
                 ThrowIfDisposed()
 
                 Dim UsedBytes As Long = 0
 
-                For Each entry In _Index
-                    If entry.Offset <> 0 AndAlso entry.RecordLength > 0 Then
-                        UsedBytes += entry.RecordLength
+                For Each record In _PhysicalRecords.Values
+                    If record.RefCount > 0 Then
+                        UsedBytes += record.PhysicalLength
                     End If
                 Next
 
                 Dim DataEnd = GetDataEndFromIndex()
-                Dim TotalStoredChunkBytes = Math.Max(0L, DataEnd - DataStartOffset)
-                Dim WastedBytes = Math.Max(0L, TotalStoredChunkBytes - UsedBytes)
+                Dim TotalStoredBytes = Math.Max(0L, DataEnd - DataStartOffset)
+                Dim WastedBytes = Math.Max(0L, TotalStoredBytes - UsedBytes)
 
-                If TotalStoredChunkBytes = 0 Then Return 0
+                If TotalStoredBytes = 0 Then Return 0
 
-                Return WastedBytes / CDbl(TotalStoredChunkBytes)
+                Return WastedBytes / CDbl(TotalStoredBytes)
+
             End SyncLock
 
         End Function
 
-        ''' <summary>
-        ''' Validates all live chunk records.
-        ''' </summary>
         Public Sub Validate(Optional ProgressCallback As StreamProgressCallback = Nothing)
 
             SyncLock _SyncRoot
+
                 ThrowIfDisposed()
+
+                ValidateExtentsAreSortedAndNonOverlapping()
+                ValidatePhysicalRecordRefCounts()
 
                 Dim CancellationToken As New CancellationToken()
 
-                ValidateAllLiveChunkRecords(ProgressCallback, CancellationToken)
+                ValidateAllLivePhysicalRecords(ProgressCallback, CancellationToken)
+
             End SyncLock
 
         End Sub
 
+        Private Sub ValidateAllLivePhysicalRecords(ProgressCallback As StreamProgressCallback,
+                                                   CancellationToken As CancellationToken)
 
-        Private Sub ValidateAllLiveChunkRecords(ProgressCallback As StreamProgressCallback,
-                                                CancellationToken As CancellationToken)
+            Dim TotalRecords = Math.Max(1, _PhysicalRecords.Count)
+            Dim ProcessedRecords As Long = 0
 
-            Dim TotalChunks = _Index.Count
-            Dim ProcessedChunks As Long = 0
+            For Each pair In _PhysicalRecords.OrderBy(Function(x) x.Key)
 
-            For ChunkIndex = 0 To _Index.Count - 1
                 If CancellationToken.Cancel Then Return
 
-                Dim Entry = _Index(ChunkIndex)
+                Dim Record = pair.Value
 
-                If Entry.Offset = 0 AndAlso Entry.RecordLength = 0 Then Continue For
+                If Record.RefCount > 0 Then
+                    ValidatePhysicalRecord(Record)
+                End If
 
-                ValidateChunkRecord(ChunkIndex)
+                ProcessedRecords += 1
 
-                ProcessedChunks += 1
-                ReportProgress(ProgressCallback, ProcessedChunks, Math.Max(1, TotalChunks), ProcessUnitTypes.Chunks, CancellationToken)
+                ReportProgress(ProgressCallback,
+                               ProcessedRecords,
+                               TotalRecords,
+                               ProcessUnitTypes.Arbitrary,
+                               CancellationToken)
+
             Next
 
         End Sub
 
-        Private Sub ValidateChunkRecord(ExpectedChunkIndex As Integer)
+        Private Sub ValidatePhysicalRecord(Record As PhysicalRecordEntry)
 
-            If ExpectedChunkIndex < 0 OrElse ExpectedChunkIndex >= _Index.Count Then Throw New ArgumentOutOfRangeException(NameOf(ExpectedChunkIndex))
+            If Record.RecordId <= SparsePhysicalRecordId Then Throw New InvalidDataException("Invalid physical record id.")
+            If Record.PhysicalOffset < DataStartOffset Then Throw New InvalidDataException($"Invalid physical offset for record {Record.RecordId}.")
+            If Record.PhysicalLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid physical length for record {Record.RecordId}.")
+            If Record.PhysicalOffset + Record.PhysicalLength > _IndexOffset Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond data area.")
+            If Record.PlainLength < 0 Then Throw New InvalidDataException($"Invalid plain length for record {Record.RecordId}.")
+            If Record.RefCount < 0 Then Throw New InvalidDataException($"Invalid refcount for record {Record.RecordId}.")
 
-            Dim Entry = _Index(ExpectedChunkIndex)
+            Dim Buffer(Record.PhysicalLength - 1) As Byte
 
-            If Entry.Offset = 0 AndAlso Entry.RecordLength = 0 Then Return
+            _Fs.Position = Record.PhysicalOffset
+            ReadExactly(_Fs, Buffer, 0, Buffer.Length)
 
-            If Entry.Offset < DataStartOffset Then Throw New InvalidDataException($"Invalid chunk offset for chunk {ExpectedChunkIndex}.")
-            If Entry.RecordLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid chunk length for chunk {ExpectedChunkIndex}.")
-            If Entry.Offset + Entry.RecordLength > _IndexOffset Then Throw New InvalidDataException($"Chunk {ExpectedChunkIndex} extends beyond data area.")
+            Dim StoredRecordId = BitConverter.ToInt64(Buffer, 0)
 
-            Dim Record(Entry.RecordLength - 1) As Byte
-
-            _Fs.Position = Entry.Offset
-            ReadExactly(_Fs, Record, 0, Record.Length)
-
-            Dim ChunkIndex = BitConverter.ToInt64(Record, 0)
-
-            If ChunkIndex <> ExpectedChunkIndex Then
-                Throw New InvalidDataException($"Chunk index mismatch. Expected {ExpectedChunkIndex}, found {ChunkIndex}.")
+            If StoredRecordId <> Record.RecordId Then
+                Throw New InvalidDataException($"Physical record id mismatch. Expected {Record.RecordId}, found {StoredRecordId}.")
             End If
 
-            Dim EncryptionMethod = CType(BitConverter.ToInt32(Record, ChunkEncryptionMethodOffset), ChunkEncryptionMethods)
-            Dim PayloadLength = BitConverter.ToInt32(Record, ChunkPayloadLengthOffset)
-            Dim Flags = CType(BitConverter.ToInt32(Record, ChunkFlagsOffset), ChunkFlags)
-            Dim CompressionEvaluatedPercent = CInt(Record(ChunkCompressionEvaluatedPercentOffset))
+            Dim EncryptionMethod = CType(BitConverter.ToInt32(Buffer, ChunkEncryptionMethodOffset), ChunkEncryptionMethods)
+            Dim PayloadLength = BitConverter.ToInt32(Buffer, ChunkPayloadLengthOffset)
+            Dim Flags = CType(BitConverter.ToInt32(Buffer, ChunkFlagsOffset), ChunkFlags)
+            Dim CompressionEvaluatedPercent = CInt(Buffer(ChunkCompressionEvaluatedPercentOffset))
 
-            If PayloadLength < 0 Then Throw New InvalidDataException("Invalid chunk payload length.")
-            If ChunkRecordDataOffset + PayloadLength + MacSize <> Record.Length Then Throw New InvalidDataException("Invalid chunk record length.")
+            If PayloadLength < 0 Then Throw New InvalidDataException("Invalid physical record payload length.")
+            If ChunkRecordDataOffset + PayloadLength + MacSize <> Buffer.Length Then Throw New InvalidDataException("Invalid physical record length.")
 
             If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then
-                Throw New InvalidDataException($"Unsupported chunk flags for chunk {ExpectedChunkIndex}: {CInt(Flags)}.")
+                Throw New InvalidDataException($"Unsupported chunk flags for physical record {Record.RecordId}: {CInt(Flags)}.")
             End If
 
             If CompressionEvaluatedPercent < MinimumCompressionEvaluatedPercent OrElse
                CompressionEvaluatedPercent > MaximumCompressionEvaluatedPercent Then
 
-                Throw New InvalidDataException($"Invalid compression evaluated percent for chunk {ExpectedChunkIndex}: {CompressionEvaluatedPercent}.")
+                Throw New InvalidDataException($"Invalid compression evaluated percent for physical record {Record.RecordId}: {CompressionEvaluatedPercent}.")
 
             End If
 
@@ -135,19 +120,20 @@ Namespace Streams
                    PublicIntegrityKey)
 
             If RecordMacKey Is Nothing Then
-                Throw New EncryptionMismatchException("Encrypted chunk exists but no file master key is available.")
+                Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
             End If
 
             Using Hmac As New HMACSHA256(RecordMacKey)
-                Dim ExpectedMac = Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
 
-                If Not FixedTimeEquals(ExpectedMac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize) Then
-                    Throw New CryptographicException($"Chunk MAC invalid for chunk {ExpectedChunkIndex}.")
+                Dim ExpectedMac = Hmac.ComputeHash(Buffer, 0, ChunkRecordDataOffset + PayloadLength)
+
+                If FixedTimeEquals(ExpectedMac, 0, Buffer, ChunkRecordDataOffset + PayloadLength, MacSize) = False Then
+                    Throw New CryptographicException($"Physical record MAC invalid for record {Record.RecordId}.")
                 End If
+
             End Using
 
         End Sub
 
     End Class
-
 End Namespace

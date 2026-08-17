@@ -3,59 +3,60 @@
 ' ================================================================================
 '
 ' Purpose
-'   - Physical storage optimisation and chunk-layout maintenance.
+'   - Physical storage optimisation and physical-record layout maintenance.
 '
 ' Supported Modes
 '   - Move
-'       Moves live chunk records into suitable gaps.
+'       Moves later physical records into suitable earlier holes where they fit.
 '
 '   - Sequence
-'       Reorders live chunk records into logical order.
+'       Reorders live physical records into record-id order and packs them from
+'       DataStartOffset using journalled physical-record moves.
 '
 '   - Rebuild
-'       Rewrites all chunks using the current options.
+'       Rewrites the logical stream using the current options, including chunk size,
+'       compression, encryption and sparse policy, then sequences the resulting
+'       physical records.
 '
 ' Design
-'   - Defragmentation operates directly on live chunk records.
-'   - Chunk moves are journalled for crash recovery.
-'   - Rebuild uses checkpoint-style recovery and publishes changes atomically.
+'   - Defragmentation operates directly on live physical records.
+'   - Physical record moves are journalled for crash recovery.
+'   - Rebuild uses rebuild recovery and publishes the rebuilt metadata before
+'     running the final sequence phase.
 '
 ' Notes
 '   - Defragmentation is not permitted while a checkpoint is active.
 '
 ' ================================================================================
-
 Imports System.IO
+Imports System.Linq
 Imports System.Security.Cryptography
 
 Namespace Streams
-
     Partial Class ChunkedStream
 
         ''' <summary>
         ''' Physical storage optimisation strategy used by Defragment.
         ''' </summary>
         Public Enum DefragTypes
-
             ''' <summary>
-            ''' Fast compaction mode. Moves later chunk records into earlier holes where they fit.
+            ''' Fast compaction mode. Moves later physical records into earlier holes where they fit.
             ''' </summary>
             Move = 0
 
             ''' <summary>
-            ''' Reorders live chunk records into logical chunk order.
+            ''' Reorders live physical records into record-id order.
             ''' </summary>
             Sequence = 1
 
             ''' <summary>
-            ''' Fully rewrites all live chunk records using the current compression and sparse settings.
+            ''' Fully rewrites the logical stream using the current options.
             ''' </summary>
             Rebuild = 2
-
         End Enum
 
-        Private Structure DefragLiveEntry
-            Public ChunkIndex As Integer
+        Private Structure DefragLiveRecord
+            Public RecordId As Long
             Public Offset As Long
             Public RecordLength As Integer
         End Structure
@@ -64,6 +65,11 @@ Namespace Streams
             Public Offset As Long
             Public Length As Long
         End Structure
+
+        Private Enum DefragmentSequenceProgressModes
+            Normal
+            RebuildFinalPhase
+        End Enum
 
         ''' <summary>
         ''' Defragments the physical storage layout.
@@ -79,8 +85,7 @@ Namespace Streams
                 ThrowIfDisposed()
 
                 If HasActiveCheckpoint Then
-                    Throw New InvalidOperationException(
-                        "Defragmentation cannot be performed while a checkpoint is active.")
+                    Throw New InvalidOperationException("Defragmentation cannot be performed while a checkpoint is active.")
                 End If
 
                 InvalidateChunkCache()
@@ -90,28 +95,19 @@ Namespace Streams
                 Dim CancellationToken As New CancellationToken()
 
                 Select Case Type
-
                     Case DefragTypes.Move
-
                         DefragmentMove(ProgressCallback, CancellationToken)
 
                     Case DefragTypes.Sequence
-
-                        DefragmentSequence(
-                            DefragmentSequenceProgressModes.Normal,
-                            ProgressCallback,
-                            CancellationToken)
+                        DefragmentSequence(DefragmentSequenceProgressModes.Normal,
+                                           ProgressCallback,
+                                           CancellationToken)
 
                     Case DefragTypes.Rebuild
-
-                        DefragmentRebuild(
-                            ProgressCallback,
-                            CancellationToken)
+                        DefragmentRebuild(ProgressCallback, CancellationToken)
 
                     Case Else
-
                         Throw New ArgumentOutOfRangeException(NameOf(Type))
-
                 End Select
 
                 ClearFreeSpaceMaps()
@@ -126,97 +122,282 @@ Namespace Streams
 
         End Function
 
-        Private Sub MoveChunkRecordJournaled(ChunkIndex As Integer, TargetOffset As Long)
+        Private Function GetDefragStagingOffset() As Long
 
-            Dim Entry = _Index(ChunkIndex)
+            Return Math.Max(_Fs.Length, GetDataEndFromIndex())
 
-            If Entry.Offset = 0 AndAlso Entry.RecordLength = 0 Then Return
-            If Entry.Offset = TargetOffset Then Return
+        End Function
 
-            WriteJournal(JournalStates.Copying,
-                               ChunkIndex,
-                               Entry.Offset,
-                               Entry.RecordLength,
-                               TargetOffset,
-                               Entry.RecordLength)
+        Private Sub StreamCopyRecord(SourceOffset As Long,
+                                     DestinationOffset As Long,
+                                     Length As Integer)
 
-            CopyChunkRecord(Entry.Offset, Entry.RecordLength, TargetOffset)
-            FlushDurable(_Fs)
+            If Length <= 0 Then Return
 
-            If Not IsValidChunkRecordAt(ChunkIndex, TargetOffset, Entry.RecordLength) Then
-                Throw New CryptographicException("Copied chunk record failed validation.")
+            Const CopyBufferSize As Integer = 1024 * 1024
+
+            Dim Buffer(Math.Min(CopyBufferSize, Length) - 1) As Byte
+
+            If DestinationOffset > SourceOffset AndAlso DestinationOffset < SourceOffset + Length Then
+
+                Dim Remaining = Length
+                Dim SourceEnd = SourceOffset + Length
+                Dim DestinationEnd = DestinationOffset + Length
+
+                While Remaining > 0
+
+                    Dim BytesToCopy = Math.Min(Remaining, Buffer.Length)
+
+                    SourceEnd -= BytesToCopy
+                    DestinationEnd -= BytesToCopy
+
+                    _Fs.Position = SourceEnd
+                    ReadExactly(_Fs, Buffer, 0, BytesToCopy)
+
+                    _Fs.Position = DestinationEnd
+                    _Fs.Write(Buffer, 0, BytesToCopy)
+
+                    Remaining -= BytesToCopy
+
+                End While
+
+                Return
+
             End If
 
-            WriteJournal(JournalStates.Copied,
-                               ChunkIndex,
-                               Entry.Offset,
-                               Entry.RecordLength,
-                               TargetOffset,
-                               Entry.RecordLength)
+            Dim ForwardRemaining = Length
+            Dim ReadOffset = SourceOffset
+            Dim WriteOffset = DestinationOffset
 
-            _Index(ChunkIndex) = New ChunkIndexEntry With {
-                .Offset = TargetOffset,
-                .RecordLength = Entry.RecordLength
-            }
+            While ForwardRemaining > 0
 
-            PersistIndexAndHeader(GetDataEndFromIndex(), True)
-            ClearJournal()
+                Dim BytesToCopy = Math.Min(ForwardRemaining, Buffer.Length)
 
-        End Sub
+                _Fs.Position = ReadOffset
+                ReadExactly(_Fs, Buffer, 0, BytesToCopy)
 
-        Private Sub EnsureTargetRangeIsFree(TargetOffset As Long,
-                                            RecordLength As Integer,
-                                            ExceptChunkIndex As Integer)
+                _Fs.Position = WriteOffset
+                _Fs.Write(Buffer, 0, BytesToCopy)
 
-            While True
-                Dim OverlapChunkIndex = FindOverlappingLiveChunk(TargetOffset, RecordLength, ExceptChunkIndex)
+                ReadOffset += BytesToCopy
+                WriteOffset += BytesToCopy
+                ForwardRemaining -= BytesToCopy
 
-                If OverlapChunkIndex < 0 Then Return
-
-                Dim AppendOffset = Math.Max(_Fs.Length, GetDataEndFromIndex())
-                MoveChunkRecordJournaled(OverlapChunkIndex, AppendOffset)
             End While
 
         End Sub
 
-        Private Function FindOverlappingLiveChunk(TargetOffset As Long,
-                                                  RecordLength As Integer,
-                                                  ExceptChunkIndex As Integer) As Integer
+        Private Shared Function RangesOverlap(Offset1 As Long,
+                                              Length1 As Long,
+                                              Offset2 As Long,
+                                              Length2 As Long) As Boolean
 
-            Dim TargetEnd = TargetOffset + RecordLength
-
-            For ChunkIndex = 0 To _Index.Count - 1
-                If ChunkIndex = ExceptChunkIndex Then Continue For
-
-                Dim Entry = _Index(ChunkIndex)
-
-                If Entry.Offset = 0 AndAlso Entry.RecordLength = 0 Then Continue For
-
-                Dim EntryEnd = Entry.Offset + Entry.RecordLength
-
-                If TargetOffset < EntryEnd AndAlso TargetEnd > Entry.Offset Then Return ChunkIndex
-            Next
-
-            Return -1
+            Return Offset1 < Offset2 + Length2 AndAlso Offset2 < Offset1 + Length1
 
         End Function
 
-        Private Function GetLiveEntriesSortedByOffset() As List(Of DefragLiveEntry)
+        Private Function GetRecordAtPhysicalOffset(Offset As Long,
+                                                   Length As Long,
+                                                   Optional ExceptRecordId As Long? = Nothing) As PhysicalRecordEntry?
 
-            Dim Result As New List(Of DefragLiveEntry)()
+            For Each Record In _PhysicalRecords.Values
 
-            For ChunkIndex = 0 To _Index.Count - 1
-                Dim Entry = _Index(ChunkIndex)
+                If Record.RefCount <= 0 Then Continue For
 
-                If Entry.Offset = 0 AndAlso Entry.RecordLength = 0 Then Continue For
-                If Entry.Offset < DataStartOffset Then Throw New InvalidDataException($"Invalid chunk offset for chunk {ChunkIndex}.")
-                If Entry.RecordLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid chunk record length for chunk {ChunkIndex}.")
+                If ExceptRecordId.HasValue AndAlso Record.RecordId = ExceptRecordId.Value Then Continue For
 
-                Result.Add(New DefragLiveEntry With {
-                    .ChunkIndex = ChunkIndex,
-                    .Offset = Entry.Offset,
-                    .RecordLength = Entry.RecordLength
+                If RangesOverlap(Record.PhysicalOffset,
+                                 Record.PhysicalLength,
+                                 Offset,
+                                 Length) Then
+
+                    Return Record
+
+                End If
+
+            Next
+
+            Return Nothing
+
+        End Function
+
+        Private Sub RelocatePhysicalRecord(RecordId As Long,
+                                           NewOffset As Long)
+
+            Dim Record = GetPhysicalRecord(RecordId)
+
+            If Record.PhysicalOffset = NewOffset Then Return
+
+            Dim OldOffset = Record.PhysicalOffset
+            Dim OldLength = Record.PhysicalLength
+
+            WriteJournal(JournalStates.Copying,
+                         Record.RecordId,
+                         OldOffset,
+                         OldLength,
+                         NewOffset,
+                         OldLength)
+
+            StreamCopyRecord(OldOffset, NewOffset, OldLength)
+
+            FlushDurable(_Fs)
+
+            If IsValidPhysicalRecordAt(Record.RecordId, NewOffset, OldLength) = False Then
+                Throw New CryptographicException("Copied physical record failed validation.")
+            End If
+
+            WriteJournal(JournalStates.Copied,
+                         Record.RecordId,
+                         OldOffset,
+                         OldLength,
+                         NewOffset,
+                         OldLength)
+
+            Record.PhysicalOffset = NewOffset
+            _PhysicalRecords(Record.RecordId) = Record
+
+            '
+            ' Only the moved physical record entry changed.
+            ' Extents did not change, and the physical-record count did not change.
+            '
+            MarkPhysicalRecordPageDirty(Record.RecordId)
+
+            '
+            ' Publish the moved record metadata so a later crash does not leave committed
+            ' metadata pointing at a target range that may be reused by subsequent moves.
+            ' The intermediate publish intentionally suppresses hole-directory persistence.
+            '
+            PersistDefragMoveMetadata()
+
+            AddFreeChunkSpaceExcludingRange(OldOffset,
+                                            OldLength,
+                                            NewOffset,
+                                            OldLength)
+
+            ClearJournal()
+
+        End Sub
+
+        Private Sub MarkPhysicalRecordPageDirty(RecordId As Long)
+
+            Dim Ordinal = 0
+
+            For Each record In _PhysicalRecords.Values.OrderBy(Function(x) x.RecordId)
+
+                If record.RecordId = RecordId Then
+                    MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
+                    Return
+                End If
+
+                Ordinal += 1
+
+            Next
+
+            Throw New InvalidDataException($"Physical record {RecordId} was not found while marking metadata dirty.")
+
+        End Sub
+
+        Private Sub PersistDefragMoveMetadata()
+
+            Dim MetadataOffset = Math.Max(_Fs.Length, GetDataEndFromIndex())
+            Dim OriginalHoleDirectoryMode = Options.HoleDirectoryMode
+
+            _CompactMetadataWriteOffset = MetadataOffset
+            _CompactMetadataWriteLimit = Nothing
+
+            Try
+
+                '
+                ' Intermediate defrag move metadata must not persist the hole directory.
+                '
+                ' Persisting the hole directory after every moved physical record can write
+                ' a very large number of metadata pages and causes the stream to grow
+                ' rapidly during defrag. The final defrag checkpoint publish is responsible
+                ' for writing the compacted metadata and, if configured, the hole directory.
+                '
+                Options.HoleDirectoryMode = ChunkedStreamOptions.HoleDirectoryModes.Never
+
+                PersistIndexAndHeader(MetadataOffset, True)
+
+            Finally
+
+                Options.HoleDirectoryMode = OriginalHoleDirectoryMode
+                _CompactMetadataWriteOffset = Nothing
+                _CompactMetadataWriteLimit = Nothing
+
+            End Try
+
+        End Sub
+
+        Private Sub AddFreeChunkSpaceExcludingRange(SourceOffset As Long,
+                                                    SourceLength As Long,
+                                                    ExcludeOffset As Long,
+                                                    ExcludeLength As Long)
+
+            If SourceLength <= 0 Then Return
+
+            Dim SourceEnd = SourceOffset + SourceLength
+            Dim ExcludeEnd = ExcludeOffset + ExcludeLength
+
+            If RangesOverlap(SourceOffset, SourceLength, ExcludeOffset, ExcludeLength) = False Then
+                AddFreeChunkSpace(SourceOffset, SourceLength)
+                Return
+            End If
+
+            If ExcludeOffset > SourceOffset Then
+                AddFreeChunkSpace(SourceOffset, ExcludeOffset - SourceOffset)
+            End If
+
+            If ExcludeEnd < SourceEnd Then
+                AddFreeChunkSpace(ExcludeEnd, SourceEnd - ExcludeEnd)
+            End If
+
+        End Sub
+
+        Private Sub EvacuateTargetRegion(TargetOffset As Long,
+                                         TargetLength As Long,
+                                         Optional ExceptRecordId As Long? = Nothing)
+
+            While True
+
+                Dim BlockingRecord =
+                    GetRecordAtPhysicalOffset(TargetOffset,
+                                              TargetLength,
+                                              ExceptRecordId)
+
+                If BlockingRecord.HasValue = False Then Exit While
+
+                Dim Record = BlockingRecord.Value
+                Dim StagingOffset = GetDefragStagingOffset()
+
+                RelocatePhysicalRecord(Record.RecordId, StagingOffset)
+
+            End While
+
+        End Sub
+
+        Private Function GetLiveRecordsSortedByOffset() As List(Of DefragLiveRecord)
+
+            Dim Result As New List(Of DefragLiveRecord)()
+
+            For Each record In _PhysicalRecords.Values
+
+                If record.RefCount <= 0 Then Continue For
+
+                If record.PhysicalOffset < DataStartOffset Then
+                    Throw New InvalidDataException($"Invalid record offset for record {record.RecordId}.")
+                End If
+
+                If record.PhysicalLength < MinChunkRecordSize Then
+                    Throw New InvalidDataException($"Invalid record length for record {record.RecordId}.")
+                End If
+
+                Result.Add(New DefragLiveRecord With {
+                    .RecordId = record.RecordId,
+                    .Offset = record.PhysicalOffset,
+                    .RecordLength = record.PhysicalLength
                 })
+
             Next
 
             Result.Sort(Function(left, right) left.Offset.CompareTo(right.Offset))
@@ -225,34 +406,41 @@ Namespace Streams
 
         End Function
 
-        Private Function GetDeadHoles(LiveEntries As List(Of DefragLiveEntry)) As List(Of DefragHole)
+        Private Function GetDeadHoles(LiveRecords As List(Of DefragLiveRecord)) As List(Of DefragHole)
 
             Dim Holes As New List(Of DefragHole)()
             Dim Cursor = CLng(DataStartOffset)
 
-            For Each Entry In LiveEntries
-                If Entry.Offset > Cursor Then
+            For Each record In LiveRecords
+
+                If record.Offset > Cursor Then
                     Holes.Add(New DefragHole With {
                         .Offset = Cursor,
-                        .Length = Entry.Offset - Cursor
+                        .Length = record.Offset - Cursor
                     })
                 End If
 
-                Cursor = Math.Max(Cursor, Entry.Offset + CLng(Entry.RecordLength))
+                Cursor = Math.Max(Cursor, record.Offset + CLng(record.RecordLength))
+
             Next
 
             Return Holes
 
         End Function
 
-        Private Function FindLatestLiveEntryThatFitsHole(LiveEntries As List(Of DefragLiveEntry),
-                                                         Hole As DefragHole) As Integer
+        Private Function FindLatestLiveRecordThatFitsHole(LiveRecords As List(Of DefragLiveRecord),
+                                                          Hole As DefragHole) As Integer
 
-            For Index = LiveEntries.Count - 1 To 0 Step -1
-                Dim Entry = LiveEntries(Index)
+            For Index = LiveRecords.Count - 1 To 0 Step -1
 
-                If Entry.Offset <= Hole.Offset Then Exit For
-                If Entry.RecordLength <= Hole.Length Then Return Index
+                Dim Record = LiveRecords(Index)
+
+                If Record.Offset <= Hole.Offset Then Exit For
+
+                If Record.RecordLength <= Hole.Length Then
+                    Return Index
+                End If
+
             Next
 
             Return -1
@@ -263,30 +451,38 @@ Namespace Streams
                                    CancellationToken As CancellationToken)
 
             Const ProgressScale As Long = 1000000
+
+            ReportProgress(ProgressCallback,
+                           0,
+                           ProgressScale,
+                           ProcessUnitTypes.Arbitrary,
+                           CancellationToken)
+
             Dim OriginalFragmentation As Double? = Nothing
 
-            ReportProgress(ProgressCallback, 0, ProgressScale, ProcessUnitTypes.Arbitrary, CancellationToken)
-
             Do
+
                 If CancellationToken.Cancel Then Return
 
-                Dim LiveEntries = GetLiveEntriesSortedByOffset()
-                Dim Holes = GetDeadHoles(LiveEntries)
+                Dim LiveRecords = GetLiveRecordsSortedByOffset()
+                Dim Holes = GetDeadHoles(LiveRecords)
 
                 If Holes.Count = 0 Then Exit Do
 
                 Dim MovedSomething = False
 
                 For Each hole In Holes
+
                     If CancellationToken.Cancel Then Return
 
-                    Dim CandidateIndex = FindLatestLiveEntryThatFitsHole(LiveEntries, hole)
+                    Dim CandidateIndex = FindLatestLiveRecordThatFitsHole(LiveRecords, hole)
 
                     If CandidateIndex < 0 Then Continue For
 
-                    Dim Candidate = LiveEntries(CandidateIndex)
+                    Dim Candidate = LiveRecords(CandidateIndex)
 
-                    MoveChunkRecordJournaled(Candidate.ChunkIndex, hole.Offset)
+                    RelocatePhysicalRecord(Candidate.RecordId, hole.Offset)
+
                     MovedSomething = True
 
                     Dim CurrentFragmentation = GetFragmentation()
@@ -300,34 +496,29 @@ Namespace Streams
                     If CompletedUnits < 0 Then CompletedUnits = 0
                     If CompletedUnits > ProgressScale Then CompletedUnits = ProgressScale
 
-                    ReportProgress(ProgressCallback, CompletedUnits, ProgressScale, ProcessUnitTypes.Arbitrary, CancellationToken)
+                    ReportProgress(ProgressCallback,
+                                   CompletedUnits,
+                                   ProgressScale,
+                                   ProcessUnitTypes.Arbitrary,
+                                   CancellationToken)
+
                     Exit For
+
                 Next
 
                 If MovedSomething = False Then Exit Do
+
             Loop
 
             If CancellationToken.Cancel Then Return
+
             CommitDefragCheckpoint(GetDataEndFromIndex())
-            ReportProgress(ProgressCallback, ProgressScale, ProgressScale, ProcessUnitTypes.Arbitrary, CancellationToken)
 
-        End Sub
-
-        Private Sub CopyChunkRecord(SourceOffset As Long,
-                                    RecordLength As Integer,
-                                    TargetOffset As Long)
-
-            If SourceOffset < DataStartOffset Then Throw New InvalidDataException("Invalid source record offset.")
-            If TargetOffset < DataStartOffset Then Throw New InvalidDataException("Invalid target record offset.")
-            If RecordLength < MinChunkRecordSize Then Throw New InvalidDataException("Invalid record length.")
-
-            Dim Record(RecordLength - 1) As Byte
-
-            _Fs.Position = SourceOffset
-            ReadExactly(_Fs, Record, 0, Record.Length)
-
-            _Fs.Position = TargetOffset
-            _Fs.Write(Record, 0, Record.Length)
+            ReportProgress(ProgressCallback,
+                           ProgressScale,
+                           ProgressScale,
+                           ProcessUnitTypes.Arbitrary,
+                           CancellationToken)
 
         End Sub
 
@@ -362,69 +553,31 @@ Namespace Streams
 
             BuildFreeChunkSpaceMap()
 
-            _IndexPageDescriptors.Clear()
-            _ChunkIndexDirectoryPageDescriptors.Clear()
+            _ExtentPageDescriptors.Clear()
+            _ExtentDirectoryPageDescriptors.Clear()
+            _PhysicalRecordPageDescriptors.Clear()
+            _PhysicalRecordDirectoryPageDescriptors.Clear()
             _HoleDirectoryPageDescriptors.Clear()
-            _DirtyIndexPages.Clear()
 
             _MetadataRootOffset = 0
             _MetadataRootLength = 0
 
-            MarkAllIndexPagesDirty()
+            MarkAllMetadataPagesDirty()
 
             _CompactMetadataWriteOffset = CompactDataEnd
             _CompactMetadataWriteLimit = CompactWriteLimit
 
             Try
-
                 PersistIndexAndHeader(CompactDataEnd, True)
-
             Finally
-
                 _CompactMetadataWriteOffset = Nothing
                 _CompactMetadataWriteLimit = Nothing
-
             End Try
 
-            'We could probably use this as we have called PersistIndexAndHeader(...)
-            '... as the metadata root will be the last live structure:
-            'Dim NewEndOffset = _MetadataRootOffset +CLng(_MetadataRootLength)
-            '...But lets just check everything for saftey:
             Dim NewEndOffset =
                 If(_MetadataRootOffset > 0 AndAlso _MetadataRootLength > 0,
                    _MetadataRootOffset + CLng(_MetadataRootLength),
                    Math.Max(CLng(DataStartOffset), GetDataEndFromIndex()))
-
-            'DEBUG STUFF TO CHECK WE TRUNCATE CORRECTLY:
-            'Dim S = Me.GetStructure()
-            'Debug.Print("Layout")
-            'Debug.Print($"Physical={S.PhysicalLength:N0}")
-            'Debug.Print($"DataAreaEnd={S.DataAreaEndOffset:N0}")
-            'Debug.Print($"LiveDataEnd={S.LiveDataEndOffset:N0}")
-            'Debug.Print($"MetadataRootEnd={S.MetadataRootEndOffset:N0}")
-
-            'For Each R In S.Regions
-            '    Debug.Print(
-            '        $"{R.RegionType,-25} " &
-            '        $"{R.Offset,12:N0} -> {R.EndOffset,12:N0} " &
-            '        $"({R.Length:N0})")
-            'Next
-
-            'Debug.Print("")
-            'Debug.Print("Index Pages")
-
-            'For Each D In _IndexPageDescriptors
-            '    Debug.Print(D.Value.Offset.ToString("N0"))
-            'Next
-
-            'Debug.Print("Hole Directories")
-
-            'For Each D In _HoleDirectoryPageDescriptors
-            '    Debug.Print(D.Value.Offset.ToString("N0"))
-            'Next
-
-            'Debug.Print("")
-            'Debug.Print($"TrimTo={NewEndOffset:N0}")
 
             If NewEndOffset < _Fs.Length Then
                 _Fs.SetLength(NewEndOffset)
@@ -436,21 +589,33 @@ Namespace Streams
 
             Dim Result As Long = Long.MaxValue
 
-            For Each Descriptor In _IndexPageDescriptors.Values
-                If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                    Result = Math.Min(Result, Descriptor.Offset)
+            For Each descriptor In _ExtentPageDescriptors.Values
+                If descriptor.Offset > 0 AndAlso descriptor.Length > 0 Then
+                    Result = Math.Min(Result, descriptor.Offset)
                 End If
             Next
 
-            For Each Descriptor In _ChunkIndexDirectoryPageDescriptors.Values
-                If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                    Result = Math.Min(Result, Descriptor.Offset)
+            For Each descriptor In _ExtentDirectoryPageDescriptors.Values
+                If descriptor.Offset > 0 AndAlso descriptor.Length > 0 Then
+                    Result = Math.Min(Result, descriptor.Offset)
                 End If
             Next
 
-            For Each Descriptor In _HoleDirectoryPageDescriptors.Values
-                If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                    Result = Math.Min(Result, Descriptor.Offset)
+            For Each descriptor In _PhysicalRecordPageDescriptors.Values
+                If descriptor.Offset > 0 AndAlso descriptor.Length > 0 Then
+                    Result = Math.Min(Result, descriptor.Offset)
+                End If
+            Next
+
+            For Each descriptor In _PhysicalRecordDirectoryPageDescriptors.Values
+                If descriptor.Offset > 0 AndAlso descriptor.Length > 0 Then
+                    Result = Math.Min(Result, descriptor.Offset)
+                End If
+            Next
+
+            For Each descriptor In _HoleDirectoryPageDescriptors.Values
+                If descriptor.Offset > 0 AndAlso descriptor.Length > 0 Then
+                    Result = Math.Min(Result, descriptor.Offset)
                 End If
             Next
 
@@ -466,11 +631,6 @@ Namespace Streams
 
         End Function
 
-        Private Enum DefragmentSequenceProgressModes
-            Normal
-            RebuildFinalPhase
-        End Enum
-
         Private Sub DefragmentSequence(ProgressMode As DefragmentSequenceProgressModes,
                                        ProgressCallback As StreamProgressCallback,
                                        CancellationToken As CancellationToken)
@@ -479,13 +639,12 @@ Namespace Streams
             Dim ProgressEnd As Double
 
             Select Case ProgressMode
-                Case DefragmentSequenceProgressModes.RebuildFinalPhase
 
+                Case DefragmentSequenceProgressModes.RebuildFinalPhase
                     ProgressStart = 0.5R
                     ProgressEnd = 1.0R
 
                 Case DefragmentSequenceProgressModes.Normal
-
                     ProgressStart = 0.0R
                     ProgressEnd = 1.0R
 
@@ -494,49 +653,154 @@ Namespace Streams
 
             End Select
 
-            Dim TotalBytes = _Index.Where(Function(entry) entry.Offset > 0 AndAlso entry.RecordLength > 0).
-                       Sum(Function(entry) CLng(entry.RecordLength))
+            PrepareMetadataForSequenceDefrag()
+
+            Dim OrderedRecords =
+                _PhysicalRecords.Values.
+                                 Where(Function(record) record.RefCount > 0).
+                                 OrderBy(Function(record) record.RecordId).
+                                 ToList()
+
+            Dim TotalBytes = OrderedRecords.Sum(Function(record) CLng(record.PhysicalLength))
             Dim ProcessedBytes As Long = 0
             Dim TargetOffset = CLng(DataStartOffset)
 
-            For ChunkIndex = 0 To _Index.Count - 1
+            For Each RecordSnapshot In OrderedRecords
 
                 If CancellationToken.Cancel Then Return
+                If _PhysicalRecords.ContainsKey(RecordSnapshot.RecordId) = False Then Continue For
 
-                Dim Entry = _Index(ChunkIndex)
+                Dim CurrentRecord = GetPhysicalRecord(RecordSnapshot.RecordId)
 
-                If Entry.Offset = 0 AndAlso Entry.RecordLength = 0 Then Continue For
+                If CurrentRecord.PhysicalOffset = TargetOffset Then
 
-                EnsureTargetRangeIsFree(TargetOffset, Entry.RecordLength, ChunkIndex)
+                    ProcessedBytes += CurrentRecord.PhysicalLength
 
-                Entry = _Index(ChunkIndex)
+                    Dim NoMoveRatio =
+                        If(TotalBytes = 0,
+                           1.0R,
+                           ProcessedBytes / CDbl(TotalBytes))
 
-                If ProgressMode = DefragmentSequenceProgressModes.RebuildFinalPhase OrElse Entry.Offset <> TargetOffset Then
-                    MoveChunkRecordJournaled(ChunkIndex, TargetOffset)
+                    Dim NoMoveScaledRatio =
+                        ProgressStart + ((ProgressEnd - ProgressStart) * NoMoveRatio)
+
+                    ReportProgress(ProgressCallback,
+                                   CLng(NoMoveScaledRatio * Math.Max(1L, TotalBytes)),
+                                   Math.Max(1L, TotalBytes),
+                                   ProcessUnitTypes.Bytes,
+                                   CancellationToken)
+
+                    TargetOffset += CurrentRecord.PhysicalLength
+
+                    Continue For
+
                 End If
 
-                ProcessedBytes += Entry.RecordLength
+                If RangesOverlap(CurrentRecord.PhysicalOffset,
+                                 CurrentRecord.PhysicalLength,
+                                 TargetOffset,
+                                 CurrentRecord.PhysicalLength) Then
 
-                Dim Ratio = If(TotalBytes = 0,
+                    RelocatePhysicalRecord(CurrentRecord.RecordId, GetDefragStagingOffset())
+                    CurrentRecord = GetPhysicalRecord(RecordSnapshot.RecordId)
+
+                End If
+
+                EvacuateTargetRegion(TargetOffset,
+                                     CurrentRecord.PhysicalLength,
+                                     CurrentRecord.RecordId)
+
+                CurrentRecord = GetPhysicalRecord(RecordSnapshot.RecordId)
+
+                If ProgressMode = DefragmentSequenceProgressModes.RebuildFinalPhase OrElse
+                   CurrentRecord.PhysicalOffset <> TargetOffset Then
+
+                    RelocatePhysicalRecord(CurrentRecord.RecordId, TargetOffset)
+
+                End If
+
+                CurrentRecord = GetPhysicalRecord(RecordSnapshot.RecordId)
+
+                ProcessedBytes += CurrentRecord.PhysicalLength
+
+                Dim Ratio =
+                    If(TotalBytes = 0,
                        1.0R,
                        ProcessedBytes / CDbl(TotalBytes))
 
-                Dim ScaledRatio = ProgressStart + ((ProgressEnd - ProgressStart) * Ratio)
+                Dim ScaledRatio =
+                    ProgressStart + ((ProgressEnd - ProgressStart) * Ratio)
 
-                ReportProgress(
-                    ProgressCallback,
-                    CLng(ScaledRatio * TotalBytes),
-                    TotalBytes,
-                    ProcessUnitTypes.Bytes,
-                    CancellationToken)
+                ReportProgress(ProgressCallback,
+                               CLng(ScaledRatio * Math.Max(1L, TotalBytes)),
+                               Math.Max(1L, TotalBytes),
+                               ProcessUnitTypes.Bytes,
+                               CancellationToken)
 
-                TargetOffset += Entry.RecordLength
+                TargetOffset += CurrentRecord.PhysicalLength
 
             Next
 
             If CancellationToken.Cancel Then Return
 
             CommitDefragCheckpoint(GetDataEndFromIndex())
+
+        End Sub
+
+        Private Sub PrepareMetadataForSequenceDefrag()
+
+            '
+            ' Move active metadata out of the data-compaction path before Sequence starts.
+            ' This one-time publish may rewrite all metadata pages.
+            '
+            ' Individual record moves after this point publish only the changed
+            ' physical-record metadata page and suppress hole-directory persistence.
+            '
+            ClearFreeSpaceMaps()
+            MarkAllMetadataPagesDirty()
+            PersistDefragMoveMetadata()
+            ClearFreeSpaceMaps()
+
+        End Sub
+
+        Private Sub RestoreFailedRebuildState(OriginalPhysicalLength As Long,
+                                              OriginalIndexOffset As Long,
+                                              OriginalHeaderFlags As HeaderFlags,
+                                              OriginalNextPhysicalRecordId As Long,
+                                              OriginalChunkSize As Integer,
+                                              OriginalIndexPageEntryCount As Integer,
+                                              OriginalIndexDirectoryEntryCount As Integer,
+                                              OriginalChunkPlain As Byte(),
+                                              OriginalCachedChunkPlain As Byte(),
+                                              OriginalExtents As List(Of ExtentIndexEntry),
+                                              OriginalPhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry))
+
+            _IndexOffset = OriginalIndexOffset
+            _HeaderFlags = OriginalHeaderFlags
+            _NextPhysicalRecordId = OriginalNextPhysicalRecordId
+            _ChunkSize = OriginalChunkSize
+            _IndexPageEntryCount = OriginalIndexPageEntryCount
+            _IndexDirectoryEntryCount = OriginalIndexDirectoryEntryCount
+            _ChunkPlain = OriginalChunkPlain
+            _CachedChunkPlain = OriginalCachedChunkPlain
+
+            _Extents.Clear()
+            _Extents.AddRange(OriginalExtents)
+
+            _PhysicalRecords.Clear()
+
+            For Each pair In OriginalPhysicalRecords
+                _PhysicalRecords(pair.Key) = pair.Value
+            Next
+
+            ClearFreeSpaceMaps()
+            DiscardPendingPhysicalRecordReclaims()
+            InvalidateChunkCache()
+            MarkAllMetadataPagesDirty()
+
+            If _Fs.Length > OriginalPhysicalLength Then
+                _Fs.SetLength(OriginalPhysicalLength)
+            End If
 
         End Sub
 
@@ -556,247 +820,161 @@ Namespace Streams
             End If
 
             Dim OriginalPhysicalLength = _Fs.Length
+            Dim OriginalIndexOffset = _IndexOffset
+            Dim OriginalHeaderFlags = _HeaderFlags
+            Dim OriginalNextPhysicalRecordId = _NextPhysicalRecordId
             Dim OriginalChunkSize = _ChunkSize
+            Dim OriginalIndexPageEntryCount = _IndexPageEntryCount
+            Dim OriginalIndexDirectoryEntryCount = _IndexDirectoryEntryCount
             Dim OriginalChunkPlain = _ChunkPlain
+            Dim OriginalCachedChunkPlain = _CachedChunkPlain
+            Dim OriginalExtents = New List(Of ExtentIndexEntry)(_Extents)
+            Dim OriginalPhysicalRecords = _PhysicalRecords.ToDictionary(Function(pair) pair.Key, Function(pair) pair.Value)
+            Dim PublishedRebuild = False
 
             WriteChunkSizeRebuildRecoveryState(OriginalPhysicalLength)
 
-            Dim TargetChunkSize = Options.ChunkSize
+            Try
 
-            Dim TargetChunkCount =
-                If(_Length <= 0,
-                   0,
-                   CInt(((_Length - 1) \ TargetChunkSize) + 1))
+                ClearFreeSpaceMaps()
 
-            Dim NewIndex As New List(Of ChunkIndexEntry)(TargetChunkCount)
-            Dim TargetBuffer(TargetChunkSize - 1) As Byte
+                Dim TargetChunkSize = Options.ChunkSize
+                Dim NewExtents As New List(Of ExtentIndexEntry)()
+                Dim NewPhysicalRecordIds As New HashSet(Of Long)()
+                Dim LogicalOffset As Long = 0
+                Dim ProcessedBytes As Long = 0
+                Dim TotalBytes = Math.Max(1L, _Length)
 
-            ' Phase 1 writes the rebuilt chunk records after the current committed stream.
-            ' This preserves the old committed layout until the rebuilt index is published.
-            Dim PhysicalOffset =
-                Math.Max(_Fs.Length,
-                         GetDataEndFromIndex())
+                While LogicalOffset < _Length
 
-            Dim ProcessedBytes As Long = 0
-            Dim TotalBytes = Math.Max(1L, _Length)
+                    If CancellationToken.Cancel Then
+                        RestoreFailedRebuildState(OriginalPhysicalLength,
+                                                  OriginalIndexOffset,
+                                                  OriginalHeaderFlags,
+                                                  OriginalNextPhysicalRecordId,
+                                                  OriginalChunkSize,
+                                                  OriginalIndexPageEntryCount,
+                                                  OriginalIndexDirectoryEntryCount,
+                                                  OriginalChunkPlain,
+                                                  OriginalCachedChunkPlain,
+                                                  OriginalExtents,
+                                                  OriginalPhysicalRecords)
 
-            For TargetChunkIndex = 0 To TargetChunkCount - 1
+                        ClearRecoveryState()
+                        Return
+                    End If
 
-                If CancellationToken.Cancel Then
-                    _ChunkSize = OriginalChunkSize
-                    _ChunkPlain = OriginalChunkPlain
-                    Return
-                End If
+                    Dim SegmentLength = CInt(Math.Min(CLng(TargetChunkSize), _Length - LogicalOffset))
+                    Dim Buffer(SegmentLength - 1) As Byte
 
-                Array.Clear(TargetBuffer, 0, TargetBuffer.Length)
+                    Read(LogicalOffset, Buffer, 0, SegmentLength)
 
-                Dim LogicalOffset = CLng(TargetChunkIndex) * TargetChunkSize
+                    Dim SegmentExtents = BuildExtentsFromBuffer(Buffer, 0, SegmentLength)
 
-                Dim PlainLength =
-                    CInt(Math.Min(CLng(TargetChunkSize),
-                                  _Length - LogicalOffset))
+                    For Each extent In SegmentExtents
 
-                If PlainLength > 0 Then
+                        Dim NewExtent = extent
+                        NewExtent.LogicalOffset = LogicalOffset
 
-                    Dim ReadBuffer(PlainLength - 1) As Byte
+                        NewExtents.Add(NewExtent)
 
-                    Read(LogicalOffset, ReadBuffer)
+                        If NewExtent.PhysicalRecordId <> SparsePhysicalRecordId Then
+                            NewPhysicalRecordIds.Add(NewExtent.PhysicalRecordId)
+                        End If
 
-                    Buffer.BlockCopy(ReadBuffer,
-                                     0,
-                                     TargetBuffer,
-                                     0,
-                                     PlainLength)
+                        LogicalOffset += NewExtent.LogicalLength
 
-                End If
+                    Next
 
-                Dim Entry =
-                    WriteChunkRecordForRebuild(TargetChunkIndex,
-                                               TargetBuffer,
-                                               PlainLength,
-                                               PhysicalOffset)
+                    ProcessedBytes += SegmentLength
 
-                NewIndex.Add(Entry)
+                    Dim FirstPhaseUnits =
+                        CLng((Math.Min(ProcessedBytes, TotalBytes) / CDbl(TotalBytes)) * (TotalBytes / 2.0R))
 
-                If Entry.Offset > 0 AndAlso Entry.RecordLength > 0 Then
-                    PhysicalOffset = Entry.Offset + Entry.RecordLength
-                End If
+                    ReportProgress(ProgressCallback,
+                                   FirstPhaseUnits,
+                                   TotalBytes,
+                                   ProcessUnitTypes.Bytes,
+                                   CancellationToken)
 
-                ProcessedBytes += PlainLength
+                End While
 
-                Dim FirstPhaseUnits =
-                    CLng((Math.Min(ProcessedBytes, TotalBytes) / CDbl(TotalBytes)) *
-                         (TotalBytes / 2.0R))
+                Dim NewPhysicalRecords As New Dictionary(Of Long, PhysicalRecordEntry)()
+
+                For Each recordId In NewPhysicalRecordIds
+                    Dim Record = GetPhysicalRecord(recordId)
+                    NewPhysicalRecords(recordId) = Record
+                Next
+
+                _Extents.Clear()
+                _Extents.AddRange(NewExtents)
+
+                _PhysicalRecords.Clear()
+
+                For Each pair In NewPhysicalRecords
+                    _PhysicalRecords(pair.Key) = pair.Value
+                Next
+
+                _ChunkSize = TargetChunkSize
+                _IndexPageEntryCount = Options.IndexPageEntryCount
+                _IndexDirectoryEntryCount = Options.IndexDirectoryEntryCount
+                _ChunkPlain = New Byte(_ChunkSize - 1) {}
+                _CachedChunkPlain = New Byte(_ChunkSize - 1) {}
+
+                _ExtentPageDescriptors.Clear()
+                _ExtentDirectoryPageDescriptors.Clear()
+                _PhysicalRecordPageDescriptors.Clear()
+                _PhysicalRecordDirectoryPageDescriptors.Clear()
+                _HoleDirectoryPageDescriptors.Clear()
+
+                InvalidateChunkCache()
+                ClearFreeSpaceMaps()
+                DiscardPendingPhysicalRecordReclaims()
+                MarkAllMetadataPagesDirty()
+
+                ClearRecoveryAreaInMemory()
+
+                PersistIndexAndHeader(GetDataEndFromIndex(), True)
+
+                PublishedRebuild = True
+
+                If CancellationToken.Cancel Then Return
+
+                DefragmentSequence(DefragmentSequenceProgressModes.RebuildFinalPhase,
+                                   ProgressCallback,
+                                   CancellationToken)
+
+                If CancellationToken.Cancel Then Return
 
                 ReportProgress(ProgressCallback,
-                               FirstPhaseUnits,
+                               TotalBytes,
                                TotalBytes,
                                ProcessUnitTypes.Bytes,
                                CancellationToken)
 
-            Next
+            Catch
 
-            If CancellationToken.Cancel Then
-                _ChunkSize = OriginalChunkSize
-                _ChunkPlain = OriginalChunkPlain
-                Return
-            End If
+                If PublishedRebuild = False Then
+                    RestoreFailedRebuildState(OriginalPhysicalLength,
+                                              OriginalIndexOffset,
+                                              OriginalHeaderFlags,
+                                              OriginalNextPhysicalRecordId,
+                                              OriginalChunkSize,
+                                              OriginalIndexPageEntryCount,
+                                              OriginalIndexDirectoryEntryCount,
+                                              OriginalChunkPlain,
+                                              OriginalCachedChunkPlain,
+                                              OriginalExtents,
+                                              OriginalPhysicalRecords)
 
-            _Index.Clear()
-            _Index.AddRange(NewIndex)
+                    ClearRecoveryState()
+                End If
 
-            _IndexPageDescriptors.Clear()
-            _ChunkIndexDirectoryPageDescriptors.Clear()
-            _HoleDirectoryPageDescriptors.Clear()
-            _DirtyIndexPages.Clear()
+                Throw
 
-            _ChunkSize = TargetChunkSize
-            _IndexPageEntryCount = Options.IndexPageEntryCount
-            _IndexDirectoryEntryCount = Options.IndexDirectoryEntryCount
-
-            _ChunkPlain = New Byte(_ChunkSize - 1) {}
-            _CachedChunkPlain = New Byte(_ChunkSize - 1) {}
-
-            InvalidateChunkCache()
-            ClearFreeSpaceMaps()
-            ClearRecoveryAreaInMemory()
-            MarkAllIndexPagesDirty()
-
-            ' Publish the rebuilt appended layout first. After this point the rebuilt
-            ' chunks are the committed state, so the old pre-rebuild physical area can
-            ' safely be overwritten by the journalled sequence phase.
-            PersistIndexAndHeader(PhysicalOffset, True)
-
-            If CancellationToken.Cancel Then Return
-
-            ' Phase 2 compacts the newly rebuilt live chunks back to the start of the
-            ' data area using the existing journalled move path, then performs the final
-            ' compact metadata repack and tail trim through CommitDefragCheckpoint.
-            DefragmentSequence(DefragmentSequenceProgressModes.RebuildFinalPhase,
-                               ProgressCallback,
-                               CancellationToken)
-
-            If CancellationToken.Cancel Then Return
-
-            ReportProgress(ProgressCallback,
-                           TotalBytes,
-                           TotalBytes,
-                           ProcessUnitTypes.Bytes,
-                           CancellationToken)
+            End Try
 
         End Sub
 
-        Private Function WriteChunkRecordForRebuild(ChunkIndex As Long,
-                                                    Plain As Byte(),
-                                                    PlainLength As Integer,
-                                                    PhysicalOffset As Long) As ChunkIndexEntry
-
-            If ChunkIndex < 0 OrElse ChunkIndex > Integer.MaxValue Then Throw New ArgumentOutOfRangeException(NameOf(ChunkIndex))
-            If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
-            If PlainLength < 0 OrElse PlainLength > Options.ChunkSize Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
-
-            Dim CompressionRatioThreshold = Options.CompressionRatioThreshold
-
-            If CompressionRatioThreshold < MinimumCompressionRatioThreshold Then CompressionRatioThreshold = MinimumCompressionRatioThreshold
-            If CompressionRatioThreshold > MaximumCompressionRatioThreshold Then CompressionRatioThreshold = MaximumCompressionRatioThreshold
-
-            Dim PlaintextAllZero = PlainLength = 0 OrElse IsAllZero(Plain, PlainLength)
-
-            If PlainLength = 0 OrElse (Options.StoreSparseChunks = False AndAlso PlaintextAllZero) Then
-                _HeaderFlags = _HeaderFlags Or HeaderFlags.StoreSparseChunks
-                Return New ChunkIndexEntry()
-            End If
-
-            Dim Payload As Byte() = Plain
-            Dim PayloadLength = PlainLength
-            Dim StoredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None
-            Dim CompressionEvaluatedMethod = ChunkedStreamOptions.CompressionMethods.None
-            Dim CompressionEvaluatedPercent As Byte = 100
-
-            If Options.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None AndAlso PlainLength > 0 Then
-
-                Dim Compressed = CompressPayload(Options.CompressionMethod, Plain, PlainLength)
-
-                CompressionEvaluatedMethod = Options.CompressionMethod
-                CompressionEvaluatedPercent = GetCompressionEvaluatedPercent(PlainLength, Compressed.Length)
-
-                If CompressionEvaluatedPercent / 100.0R <= CompressionRatioThreshold Then
-                    Payload = Compressed
-                    PayloadLength = Compressed.Length
-                    StoredCompressionMethod = Options.CompressionMethod
-                    MarkCompressionFlag(StoredCompressionMethod)
-                End If
-
-            End If
-
-            Dim EncryptionMethod =
-                        If(_CurrentWriteEncryptionEnabled,
-                           ChunkEncryptionMethods.AesCtrFileMasterKey,
-                           ChunkEncryptionMethods.None)
-
-            Dim Flags = ChunkFlags.None
-
-            If PlaintextAllZero Then
-                Flags = Flags Or ChunkFlags.PlaintextAllZero
-            End If
-
-            Dim RecordLength = ChunkRecordDataOffset + PayloadLength + MacSize
-            Dim Record(RecordLength - 1) As Byte
-
-            System.Buffer.BlockCopy(BitConverter.GetBytes(ChunkIndex), 0, Record, 0, 8)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(StoredCompressionMethod)), 0, Record, ChunkCompressionMethodOffset, 4)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(EncryptionMethod)), 0, Record, ChunkEncryptionMethodOffset, 4)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(PlainLength), 0, Record, ChunkPlainLengthOffset, 4)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(PayloadLength), 0, Record, ChunkPayloadLengthOffset, 4)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(Flags)), 0, Record, ChunkFlagsOffset, 4)
-            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(CompressionEvaluatedMethod)), 0, Record, ChunkCompressionEvaluatedMethodOffset, 4)
-            Record(ChunkCompressionEvaluatedPercentOffset) = CompressionEvaluatedPercent
-
-            _Rng.GetBytes(_Counter)
-            System.Buffer.BlockCopy(_Counter, 0, Record, ChunkRecordIvOffset, IvSize)
-
-            Select Case EncryptionMethod
-
-                Case ChunkEncryptionMethods.None
-
-                    If PayloadLength > 0 Then
-                        System.Buffer.BlockCopy(Payload, 0, Record, ChunkRecordDataOffset, PayloadLength)
-                    End If
-
-                Case ChunkEncryptionMethods.AesCtrFileMasterKey
-
-                    If _ChunkEncryptionKey Is Nothing Then
-                        Throw New EncryptionMismatchException("Encryption is enabled but no file master key is available.")
-                    End If
-
-                    CryptPayload(Payload, 0, PayloadLength, Record, ChunkRecordDataOffset, _ChunkEncryptionKey)
-
-                Case Else
-
-                    Throw New InvalidDataException($"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
-
-            End Select
-
-            Dim RecordMacKey =
-                        If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey,
-                           _ChunkMacKey,
-                           PublicIntegrityKey)
-
-            Using Hmac As New HMACSHA256(RecordMacKey)
-                Dim Mac = Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
-                System.Buffer.BlockCopy(Mac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize)
-            End Using
-
-            _Fs.Position = PhysicalOffset
-            _Fs.Write(Record, 0, Record.Length)
-
-            Return New ChunkIndexEntry With {
-                        .Offset = PhysicalOffset,
-                        .RecordLength = Record.Length
-                    }
-
-        End Function
-
     End Class
-
 End Namespace

@@ -7,12 +7,12 @@
 '
 ' Design
 '   - Produces a read-only snapshot of logical and physical structure.
-'   - Reads chunk record headers only.
-'   - Does not read plaintext chunk payloads.
-'   - Does not decrypt or decompress chunk contents.
+'   - Reads physical record headers only.
+'   - Does not read plaintext physical record payloads.
+'   - Does not decrypt or decompress physical record contents.
 '
 ' Features
-'   - Chunk metadata inspection.
+'   - Extent metadata inspection.
 '   - Physical-region inspection.
 '   - Compression and encryption statistics.
 '   - Fragmentation analysis.
@@ -36,6 +36,8 @@ Namespace Streams
             Public LogicalEndOffset As Long
             Public PlainLength As Integer
             Public IsAllocated As Boolean
+            Public PhysicalRecordId As Long
+            Public PhysicalRecordOffset As Integer
             Public PhysicalOffset As Long
             Public PhysicalLength As Integer
             Public CompressionMethod As ChunkedStreamOptions.CompressionMethods
@@ -46,7 +48,21 @@ Namespace Streams
             Public ChunkFlags As ChunkFlags
         End Structure
 
-        Private Structure ChunkHeaderSnapshot
+        Private Structure PhysicalRecordStructureBuildInfo
+            Public RecordId As Long
+            Public PhysicalOffset As Long
+            Public PhysicalLength As Integer
+            Public PlainLength As Integer
+            Public PayloadLength As Integer
+            Public RefCount As Integer
+            Public CompressionMethod As ChunkedStreamOptions.CompressionMethods
+            Public CompressionEvaluatedMethod As ChunkedStreamOptions.CompressionMethods
+            Public CompressionEvaluatedPercent As Integer
+            Public EncryptionMethod As ChunkEncryptionMethods
+            Public ChunkFlags As ChunkFlags
+        End Structure
+
+        Friend Structure ChunkHeaderSnapshot
             Public CompressionMethod As ChunkedStreamOptions.CompressionMethods
             Public CompressionEvaluatedMethod As ChunkedStreamOptions.CompressionMethods
             Public CompressionEvaluatedPercent As Integer
@@ -69,7 +85,35 @@ Namespace Streams
 
                 ThrowIfDisposed()
 
-                Dim BuildInfos As New List(Of StructureChunkBuildInfo)(_Index.Count)
+                Dim PhysicalRecordHeaders As New Dictionary(Of Long, ChunkHeaderSnapshot)
+                Dim PhysicalRecordBuildInfos As New List(Of PhysicalRecordStructureBuildInfo)
+
+                For Each Record In _PhysicalRecords.Values.OrderBy(Function(x) x.RecordId)
+
+                    If Record.RefCount <= 0 Then Continue For
+
+                    Dim Header = ReadPhysicalRecordHeaderSnapshot(Record)
+
+                    PhysicalRecordHeaders(Record.RecordId) = Header
+
+                    PhysicalRecordBuildInfos.Add(
+                        New PhysicalRecordStructureBuildInfo With {
+                            .RecordId = Record.RecordId,
+                            .PhysicalOffset = Record.PhysicalOffset,
+                            .PhysicalLength = Record.PhysicalLength,
+                            .PlainLength = Header.PlainLength,
+                            .PayloadLength = Header.PayloadLength,
+                            .RefCount = Record.RefCount,
+                            .CompressionMethod = Header.CompressionMethod,
+                            .CompressionEvaluatedMethod = Header.CompressionEvaluatedMethod,
+                            .CompressionEvaluatedPercent = Header.CompressionEvaluatedPercent,
+                            .EncryptionMethod = Header.EncryptionMethod,
+                            .ChunkFlags = Header.ChunkFlags
+                        })
+
+                Next
+
+                Dim BuildInfos As New List(Of StructureChunkBuildInfo)(_Extents.Count)
 
                 Dim AllocatedChunkCount = 0
                 Dim SparseChunkCount = 0
@@ -85,70 +129,31 @@ Namespace Streams
                 Dim EncryptedLogicalBytes As Long = 0
                 Dim CompressedLogicalBytes As Long = 0
 
-                For ChunkIndex = 0 To _Index.Count - 1
+                PhysicalChunkRecordBytes =
+                    PhysicalRecordBuildInfos.Sum(Function(record) CLng(record.PhysicalLength))
 
-                    Dim Entry = _Index(ChunkIndex)
+                PhysicalPayloadBytes =
+                    PhysicalRecordBuildInfos.Sum(Function(record) CLng(record.PayloadLength))
 
-                    Dim LogicalOffset = CLng(ChunkIndex) * _ChunkSize
-                    Dim LogicalPlainLength = GetLogicalPlainLengthForChunk(ChunkIndex)
+                For ExtentIndex = 0 To _Extents.Count - 1
 
-                    If Entry.Offset <> 0 AndAlso Entry.RecordLength > 0 Then
+                    Dim Extent = _Extents(ExtentIndex)
 
-                        Dim Header = ReadChunkHeaderSnapshot(ChunkIndex, Entry)
+                    LogicalPayloadBytes += Extent.LogicalLength
 
-                        AllocatedChunkCount += 1
-
-                        PhysicalChunkRecordBytes += Entry.RecordLength
-                        PhysicalPayloadBytes += Header.PayloadLength
-
-                        LogicalPayloadBytes += Header.PlainLength
-
-                        If Header.EncryptionMethod <> ChunkEncryptionMethods.None Then
-
-                            EncryptedChunkCount += 1
-                            EncryptedLogicalBytes += Header.PlainLength
-
-                        Else
-
-                            UnencryptedChunkCount += 1
-
-                        End If
-
-                        If Header.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None Then
-
-                            CompressedChunkCount += 1
-                            CompressedLogicalBytes += Header.PlainLength
-
-                        End If
-
-                        BuildInfos.Add(
-                            New StructureChunkBuildInfo With {
-                                .Index = ChunkIndex,
-                                .LogicalOffset = LogicalOffset,
-                                .LogicalEndOffset = LogicalOffset + LogicalPlainLength,
-                                .PlainLength = Header.PlainLength,
-                                .IsAllocated = True,
-                                .PhysicalOffset = Entry.Offset,
-                                .PhysicalLength = Entry.RecordLength,
-                                .CompressionMethod = Header.CompressionMethod,
-                                .CompressionEvaluatedMethod = Header.CompressionEvaluatedMethod,
-                                .CompressionEvaluatedPercent = Header.CompressionEvaluatedPercent,
-                                .EncryptionMethod = Header.EncryptionMethod,
-                                .PayloadLength = Header.PayloadLength,
-                                .ChunkFlags = Header.ChunkFlags
-                            })
-
-                    Else
+                    If Extent.PhysicalRecordId = SparsePhysicalRecordId Then
 
                         SparseChunkCount += 1
 
                         BuildInfos.Add(
                             New StructureChunkBuildInfo With {
-                                .Index = ChunkIndex,
-                                .LogicalOffset = LogicalOffset,
-                                .LogicalEndOffset = LogicalOffset + LogicalPlainLength,
-                                .PlainLength = LogicalPlainLength,
+                                .Index = ExtentIndex,
+                                .LogicalOffset = Extent.LogicalOffset,
+                                .LogicalEndOffset = Extent.LogicalOffset + Extent.LogicalLength,
+                                .PlainLength = Extent.LogicalLength,
                                 .IsAllocated = False,
+                                .PhysicalRecordId = SparsePhysicalRecordId,
+                                .PhysicalRecordOffset = 0,
                                 .PhysicalOffset = 0,
                                 .PhysicalLength = 0,
                                 .CompressionMethod = ChunkedStreamOptions.CompressionMethods.None,
@@ -159,101 +164,142 @@ Namespace Streams
                                 .ChunkFlags = ChunkFlags.PlaintextAllZero
                             })
 
+                        Continue For
+
                     End If
 
-                Next
+                    Dim Record = GetPhysicalRecord(Extent.PhysicalRecordId)
+                    Dim Header = PhysicalRecordHeaders(Extent.PhysicalRecordId)
 
-                Dim PreviousGapByChunkIndex As New Dictionary(Of Integer, Long)
-                Dim NextGapByChunkIndex As New Dictionary(Of Integer, Long)
-                Dim PhysicalOrderByChunkIndex As New Dictionary(Of Integer, Integer)
+                    AllocatedChunkCount += 1
 
-                Dim ContiguousWithPreviousByChunkIndex As New Dictionary(Of Integer, Boolean)
-                Dim ContiguousWithNextByChunkIndex As New Dictionary(Of Integer, Boolean)
+                    If Header.EncryptionMethod <> ChunkEncryptionMethods.None Then
 
-                Dim InLogicalOrderByChunkIndex As New Dictionary(Of Integer, Boolean)
-
-                Dim AllocatedInPhysicalOrder =
-                    BuildInfos.
-                    Where(Function(x) x.IsAllocated).
-                    OrderBy(Function(x) x.PhysicalOffset).
-                    ToList()
-
-                For PhysicalOrder = 0 To AllocatedInPhysicalOrder.Count - 1
-
-                    Dim Current = AllocatedInPhysicalOrder(PhysicalOrder)
-
-                    PhysicalOrderByChunkIndex(Current.Index) = PhysicalOrder
-
-                    If PhysicalOrder = 0 Then
-
-                        PreviousGapByChunkIndex(Current.Index) =
-                            Math.Max(0L, Current.PhysicalOffset - DataStartOffset)
-
-                        ContiguousWithPreviousByChunkIndex(Current.Index) =
-                            Current.PhysicalOffset = DataStartOffset
-
-                        InLogicalOrderByChunkIndex(Current.Index) = True
+                        EncryptedChunkCount += 1
+                        EncryptedLogicalBytes += Extent.LogicalLength
 
                     Else
 
-                        Dim Previous = AllocatedInPhysicalOrder(PhysicalOrder - 1)
+                        UnencryptedChunkCount += 1
+
+                    End If
+
+                    If Header.CompressionMethod <> ChunkedStreamOptions.CompressionMethods.None Then
+
+                        CompressedChunkCount += 1
+                        CompressedLogicalBytes += Extent.LogicalLength
+
+                    End If
+
+                    BuildInfos.Add(
+                        New StructureChunkBuildInfo With {
+                            .Index = ExtentIndex,
+                            .LogicalOffset = Extent.LogicalOffset,
+                            .LogicalEndOffset = Extent.LogicalOffset + Extent.LogicalLength,
+                            .PlainLength = Extent.LogicalLength,
+                            .IsAllocated = True,
+                            .PhysicalRecordId = Extent.PhysicalRecordId,
+                            .PhysicalRecordOffset = Extent.PhysicalRecordOffset,
+                            .PhysicalOffset = Record.PhysicalOffset,
+                            .PhysicalLength = Record.PhysicalLength,
+                            .CompressionMethod = Header.CompressionMethod,
+                            .CompressionEvaluatedMethod = Header.CompressionEvaluatedMethod,
+                            .CompressionEvaluatedPercent = Header.CompressionEvaluatedPercent,
+                            .EncryptionMethod = Header.EncryptionMethod,
+                            .PayloadLength = Header.PayloadLength,
+                            .ChunkFlags = Header.ChunkFlags
+                        })
+
+                Next
+
+                Dim PreviousGapByRecordId As New Dictionary(Of Long, Long)
+                Dim NextGapByRecordId As New Dictionary(Of Long, Long)
+                Dim PhysicalOrderByRecordId As New Dictionary(Of Long, Integer)
+
+                Dim ContiguousWithPreviousByRecordId As New Dictionary(Of Long, Boolean)
+                Dim ContiguousWithNextByRecordId As New Dictionary(Of Long, Boolean)
+
+                Dim InPhysicalRecordOrderByRecordId As New Dictionary(Of Long, Boolean)
+
+                Dim AllocatedRecordsInPhysicalOrder =
+                    PhysicalRecordBuildInfos.
+                    OrderBy(Function(record) record.PhysicalOffset).
+                    ThenBy(Function(record) record.RecordId).
+                    ToList()
+
+                For PhysicalOrder = 0 To AllocatedRecordsInPhysicalOrder.Count - 1
+
+                    Dim Current = AllocatedRecordsInPhysicalOrder(PhysicalOrder)
+
+                    PhysicalOrderByRecordId(Current.RecordId) = PhysicalOrder
+
+                    If PhysicalOrder = 0 Then
+
+                        PreviousGapByRecordId(Current.RecordId) =
+                            Math.Max(0L, Current.PhysicalOffset - DataStartOffset)
+
+                        ContiguousWithPreviousByRecordId(Current.RecordId) =
+                            Current.PhysicalOffset = DataStartOffset
+
+                        InPhysicalRecordOrderByRecordId(Current.RecordId) = True
+
+                    Else
+
+                        Dim Previous = AllocatedRecordsInPhysicalOrder(PhysicalOrder - 1)
 
                         Dim PreviousEnd =
                             Previous.PhysicalOffset +
                             Previous.PhysicalLength
 
                         Dim PreviousGap =
-                            Math.Max(0L,
-                                     Current.PhysicalOffset - PreviousEnd)
+                            Math.Max(0L, Current.PhysicalOffset - PreviousEnd)
 
-                        Dim IsInLogicalOrder =
-                            Previous.Index < Current.Index
+                        Dim IsInPhysicalRecordOrder =
+                            Previous.RecordId < Current.RecordId
 
-                        PreviousGapByChunkIndex(Current.Index) = PreviousGap
+                        PreviousGapByRecordId(Current.RecordId) = PreviousGap
 
-                        ContiguousWithPreviousByChunkIndex(Current.Index) =
+                        ContiguousWithPreviousByRecordId(Current.RecordId) =
                             PreviousGap = 0
 
-                        InLogicalOrderByChunkIndex(Current.Index) =
-                            IsInLogicalOrder
+                        InPhysicalRecordOrderByRecordId(Current.RecordId) =
+                            IsInPhysicalRecordOrder
 
-                        If IsInLogicalOrder = False Then
+                        If IsInPhysicalRecordOrder = False Then
                             OutOfOrderChunkCount += 1
                         End If
 
                     End If
 
-                    If PhysicalOrder = AllocatedInPhysicalOrder.Count - 1 Then
+                    If PhysicalOrder = AllocatedRecordsInPhysicalOrder.Count - 1 Then
 
                         Dim CurrentEnd =
                             Current.PhysicalOffset +
                             Current.PhysicalLength
 
                         Dim NextGap =
-                            Math.Max(0L,
-                                     GetLivePhysicalEndOffset() - CurrentEnd)
+                            Math.Max(0L, GetLivePhysicalEndOffset() - CurrentEnd)
 
-                        NextGapByChunkIndex(Current.Index) = NextGap
+                        NextGapByRecordId(Current.RecordId) = NextGap
 
-                        ContiguousWithNextByChunkIndex(Current.Index) =
+                        ContiguousWithNextByRecordId(Current.RecordId) =
                             NextGap = 0
 
                     Else
 
                         Dim NextEntry =
-                            AllocatedInPhysicalOrder(PhysicalOrder + 1)
+                            AllocatedRecordsInPhysicalOrder(PhysicalOrder + 1)
 
                         Dim CurrentEnd =
                             Current.PhysicalOffset +
                             Current.PhysicalLength
 
                         Dim NextGap =
-                            Math.Max(0L,
-                                     NextEntry.PhysicalOffset - CurrentEnd)
+                            Math.Max(0L, NextEntry.PhysicalOffset - CurrentEnd)
 
-                        NextGapByChunkIndex(Current.Index) = NextGap
+                        NextGapByRecordId(Current.RecordId) = NextGap
 
-                        ContiguousWithNextByChunkIndex(Current.Index) =
+                        ContiguousWithNextByRecordId(Current.RecordId) =
                             NextGap = 0
 
                     End If
@@ -273,6 +319,10 @@ Namespace Streams
                     Dim PreviousPhysicalGap As Long? = Nothing
                     Dim NextPhysicalGap As Long? = Nothing
 
+                    Dim IsPhysicallyContiguousWithPrevious = False
+                    Dim IsPhysicallyContiguousWithNext = False
+                    Dim IsInLogicalOrder = False
+
                     If BuildInfo.IsAllocated Then
 
                         PhysicalOffset = BuildInfo.PhysicalOffset
@@ -283,13 +333,22 @@ Namespace Streams
                             BuildInfo.PhysicalLength
 
                         PhysicalOrder =
-                            PhysicalOrderByChunkIndex(BuildInfo.Index)
+                            PhysicalOrderByRecordId(BuildInfo.PhysicalRecordId)
 
                         PreviousPhysicalGap =
-                            PreviousGapByChunkIndex(BuildInfo.Index)
+                            PreviousGapByRecordId(BuildInfo.PhysicalRecordId)
 
                         NextPhysicalGap =
-                            NextGapByChunkIndex(BuildInfo.Index)
+                            NextGapByRecordId(BuildInfo.PhysicalRecordId)
+
+                        IsPhysicallyContiguousWithPrevious =
+                            ContiguousWithPreviousByRecordId(BuildInfo.PhysicalRecordId)
+
+                        IsPhysicallyContiguousWithNext =
+                            ContiguousWithNextByRecordId(BuildInfo.PhysicalRecordId)
+
+                        IsInLogicalOrder =
+                            InPhysicalRecordOrderByRecordId(BuildInfo.PhysicalRecordId)
 
                     End If
 
@@ -313,12 +372,11 @@ Namespace Streams
                             ChunkFlags:=BuildInfo.ChunkFlags,
                             PreviousPhysicalGap:=PreviousPhysicalGap,
                             NextPhysicalGap:=NextPhysicalGap,
-                            IsPhysicallyContiguousWithPrevious:=BuildInfo.IsAllocated AndAlso
-                                                                 ContiguousWithPreviousByChunkIndex(BuildInfo.Index),
-                            IsPhysicallyContiguousWithNext:=BuildInfo.IsAllocated AndAlso
-                                                             ContiguousWithNextByChunkIndex(BuildInfo.Index),
-                            IsInLogicalOrder:=BuildInfo.IsAllocated AndAlso
-                                               InLogicalOrderByChunkIndex(BuildInfo.Index)))
+                            IsPhysicallyContiguousWithPrevious:=BuildInfo.IsAllocated AndAlso IsPhysicallyContiguousWithPrevious,
+                            IsPhysicallyContiguousWithNext:=BuildInfo.IsAllocated AndAlso IsPhysicallyContiguousWithNext,
+                            IsInLogicalOrder:=BuildInfo.IsAllocated AndAlso IsInLogicalOrder,
+                            PhysicalRecordId:=BuildInfo.PhysicalRecordId,
+                            PhysicalRecordOffset:=BuildInfo.PhysicalRecordOffset))
 
                 Next
 
@@ -332,7 +390,7 @@ Namespace Streams
 
                 Dim FragmentedBytes =
                     CalculateFragmentedBytes(
-                        AllocatedInPhysicalOrder,
+                        AllocatedRecordsInPhysicalOrder,
                         MetadataRegions)
 
                 Dim PhysicalChunkOverheadBytes =
@@ -342,37 +400,37 @@ Namespace Streams
 
                 Dim MetadataRootBytes =
                     MetadataRegions.
-                    Where(Function(x)
-                              Return x.RegionType =
+                    Where(Function(region)
+                              Return region.RegionType =
                                      ChunkedStreamStructure.RegionTypes.MetadataRoot
                           End Function).
-                    Sum(Function(x) x.Length)
+                    Sum(Function(region) region.Length)
 
                 Dim IndexPageBytes =
                     MetadataRegions.
-                    Where(Function(x)
-                              Return x.RegionType =
+                    Where(Function(region)
+                              Return region.RegionType =
                                      ChunkedStreamStructure.RegionTypes.IndexPage
                           End Function).
-                    Sum(Function(x) x.Length)
+                    Sum(Function(region) region.Length)
 
                 Dim DirectoryPageBytes =
                     MetadataRegions.
-                    Where(Function(x)
-                              Return x.RegionType =
+                    Where(Function(region)
+                              Return region.RegionType =
                                          ChunkedStreamStructure.RegionTypes.ChunkIndexDirectoryPage OrElse
-                                     x.RegionType =
+                                     region.RegionType =
                                          ChunkedStreamStructure.RegionTypes.HoleDirectoryPage
                           End Function).
-                    Sum(Function(x) x.Length)
+                    Sum(Function(region) region.Length)
 
                 Dim HoleDirectoryBytes =
                     MetadataRegions.
-                    Where(Function(x)
-                              Return x.RegionType =
+                    Where(Function(region)
+                              Return region.RegionType =
                                      ChunkedStreamStructure.RegionTypes.HoleDirectoryPage
                           End Function).
-                    Sum(Function(x) x.Length)
+                    Sum(Function(region) region.Length)
 
                 Dim PhysicalMetadataBytes =
                     MetadataRootBytes +
@@ -386,14 +444,14 @@ Namespace Streams
 
                 Dim Regions =
                     BuildPhysicalRegions(
-                        AllocatedInPhysicalOrder,
+                        AllocatedRecordsInPhysicalOrder,
                         Chunks,
                         MetadataRegions)
 
                 Dim HoleRegions =
                     Regions.
-                    Where(Function(x)
-                              Return x.RegionType =
+                    Where(Function(region)
+                              Return region.RegionType =
                                      ChunkedStreamStructure.RegionTypes.Hole
                           End Function).
                     ToList()
@@ -403,12 +461,12 @@ Namespace Streams
                 Dim LargestHoleBytes =
                     If(HoleCount = 0,
                        0L,
-                       HoleRegions.Max(Function(x) x.Length))
+                       HoleRegions.Max(Function(region) region.Length))
 
                 Dim AverageHoleBytes =
                     If(HoleCount = 0,
                        0L,
-                       CLng(HoleRegions.Average(Function(x) CDbl(x.Length))))
+                       CLng(HoleRegions.Average(Function(region) CDbl(region.Length))))
 
                 Dim WrapMode =
                     CType(BitConverter.ToInt32(
@@ -425,7 +483,7 @@ Namespace Streams
                     LogicalLength:=_Length,
                     PhysicalLength:=_Fs.Length,
                     ChunkSize:=_ChunkSize,
-                    ChunkCount:=_Index.Count,
+                    ChunkCount:=_Extents.Count,
                     AllocatedChunkCount:=AllocatedChunkCount,
                     SparseChunkCount:=SparseChunkCount,
                     EncryptedChunkCount:=EncryptedChunkCount,
@@ -475,100 +533,100 @@ Namespace Streams
 
         End Function
 
-        Private Function GetLogicalPlainLengthForChunk(ChunkIndex As Integer) As Integer
-            Dim LogicalOffset = CLng(ChunkIndex) * _ChunkSize
-            Dim Remaining = _Length - LogicalOffset
+        Private Function ReadPhysicalRecordHeaderSnapshot(Record As PhysicalRecordEntry) As ChunkHeaderSnapshot
 
-            If Remaining <= 0 Then
-                Return 0
+            If Record.RecordId <= SparsePhysicalRecordId Then
+                Throw New InvalidDataException("Invalid physical record id.")
             End If
 
-            Return CInt(Math.Min(CLng(_ChunkSize), Remaining))
-        End Function
-
-        Private Function ReadChunkHeaderSnapshot(ExpectedChunkIndex As Integer, Entry As ChunkIndexEntry) As ChunkHeaderSnapshot
-            If Entry.Offset < DataStartOffset Then
-                Throw New InvalidDataException($"Invalid chunk offset for chunk {ExpectedChunkIndex}.")
+            If Record.PhysicalOffset < DataStartOffset Then
+                Throw New InvalidDataException($"Invalid physical record offset for record {Record.RecordId}.")
             End If
 
-            If Entry.RecordLength < MinChunkRecordSize Then
-                Throw New InvalidDataException($"Invalid chunk record length for chunk {ExpectedChunkIndex}.")
+            If Record.PhysicalLength < MinChunkRecordSize Then
+                Throw New InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
             End If
 
-            If Entry.Offset + Entry.RecordLength > _Fs.Length Then
-                Throw New InvalidDataException($"Chunk {ExpectedChunkIndex} extends beyond the backing stream.")
+            If Record.PhysicalOffset + Record.PhysicalLength > _Fs.Length Then
+                Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
             End If
 
             Dim Header(ChunkRecordHeaderSize - 1) As Byte
 
-            _Fs.Position = Entry.Offset
+            _Fs.Position = Record.PhysicalOffset
             ReadExactly(_Fs, Header, 0, Header.Length)
 
             If IsKnownMetadataMagic(Header) Then
-                Throw New InvalidDataException($"Chunk index entry {ExpectedChunkIndex} points at metadata instead of a chunk record.")
+                Throw New InvalidDataException($"Physical record {Record.RecordId} points at metadata instead of a physical record.")
             End If
 
-            Dim StoredChunkIndex = BitConverter.ToInt64(Header, 0)
+            Dim StoredRecordId = BitConverter.ToInt64(Header, 0)
 
-            If StoredChunkIndex <> ExpectedChunkIndex Then
-                Throw New InvalidDataException($"Chunk index mismatch. Expected {ExpectedChunkIndex}, found {StoredChunkIndex}.")
+            If StoredRecordId <> Record.RecordId Then
+                Throw New InvalidDataException($"Physical record id mismatch. Expected {Record.RecordId}, found {StoredRecordId}.")
             End If
 
             Dim CompressionMethod =
-                    CType(BitConverter.ToInt32(Header, ChunkCompressionMethodOffset),
-                            ChunkedStreamOptions.CompressionMethods)
+                CType(BitConverter.ToInt32(Header, ChunkCompressionMethodOffset),
+                      ChunkedStreamOptions.CompressionMethods)
 
             Dim CompressionEvaluatedMethod =
-                    CType(BitConverter.ToInt32(Header, ChunkCompressionEvaluatedMethodOffset),
-                            ChunkedStreamOptions.CompressionMethods)
+                CType(BitConverter.ToInt32(Header, ChunkCompressionEvaluatedMethodOffset),
+                      ChunkedStreamOptions.CompressionMethods)
 
             Dim CompressionEvaluatedPercent =
-                    CInt(Header(ChunkCompressionEvaluatedPercentOffset))
+                CInt(Header(ChunkCompressionEvaluatedPercentOffset))
 
             Dim EncryptionMethod =
-                    CType(BitConverter.ToInt32(Header, ChunkEncryptionMethodOffset),
-                            ChunkEncryptionMethods)
+                CType(BitConverter.ToInt32(Header, ChunkEncryptionMethodOffset),
+                      ChunkEncryptionMethods)
 
             Dim PlainLength = BitConverter.ToInt32(Header, ChunkPlainLengthOffset)
             Dim PayloadLength = BitConverter.ToInt32(Header, ChunkPayloadLengthOffset)
 
             Dim Flags =
-                    CType(BitConverter.ToInt32(Header, ChunkFlagsOffset),
-                            ChunkFlags)
+                CType(BitConverter.ToInt32(Header, ChunkFlagsOffset),
+                      ChunkFlags)
 
-            If PlainLength < 0 OrElse PlainLength > _ChunkSize Then
-                Throw New InvalidDataException($"Invalid plain length for chunk {ExpectedChunkIndex}.")
+            If PlainLength < 0 Then
+                Throw New InvalidDataException($"Invalid plain length for physical record {Record.RecordId}.")
+            End If
+
+            If PlainLength <> Record.PlainLength Then
+                Throw New InvalidDataException($"Physical record plain length mismatch for record {Record.RecordId}.")
             End If
 
             If PayloadLength < 0 Then
-                Throw New InvalidDataException($"Invalid payload length for chunk {ExpectedChunkIndex}.")
+                Throw New InvalidDataException($"Invalid payload length for physical record {Record.RecordId}.")
             End If
 
-            If ChunkRecordDataOffset + PayloadLength + MacSize <> Entry.RecordLength Then
-                Throw New InvalidDataException($"Invalid chunk record length for chunk {ExpectedChunkIndex}.")
+            If ChunkRecordDataOffset + PayloadLength + MacSize <> Record.PhysicalLength Then
+                Throw New InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
             End If
 
             If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then
-                Throw New InvalidDataException($"Unsupported chunk flags for chunk {ExpectedChunkIndex}: {CInt(Flags)}.")
+                Throw New InvalidDataException($"Unsupported physical record flags for record {Record.RecordId}: {CInt(Flags)}.")
             End If
 
             If CompressionEvaluatedPercent < MinimumCompressionEvaluatedPercent OrElse
-                    CompressionEvaluatedPercent > MaximumCompressionEvaluatedPercent Then
-                Throw New InvalidDataException($"Invalid compression evaluated percent for chunk {ExpectedChunkIndex}: {CompressionEvaluatedPercent}.")
+               CompressionEvaluatedPercent > MaximumCompressionEvaluatedPercent Then
+                Throw New InvalidDataException($"Invalid compression evaluated percent for physical record {Record.RecordId}: {CompressionEvaluatedPercent}.")
             End If
 
             Return New ChunkHeaderSnapshot With {
-                    .CompressionMethod = CompressionMethod,
-                    .CompressionEvaluatedMethod = CompressionEvaluatedMethod,
-                    .CompressionEvaluatedPercent = CompressionEvaluatedPercent,
-                    .EncryptionMethod = EncryptionMethod,
-                    .PlainLength = PlainLength,
-                    .PayloadLength = PayloadLength,
-                    .ChunkFlags = Flags
-                }
+                .CompressionMethod = CompressionMethod,
+                .CompressionEvaluatedMethod = CompressionEvaluatedMethod,
+                .CompressionEvaluatedPercent = CompressionEvaluatedPercent,
+                .EncryptionMethod = EncryptionMethod,
+                .PlainLength = PlainLength,
+                .PayloadLength = PayloadLength,
+                .ChunkFlags = Flags
+            }
+
         End Function
 
         Private Function IsKnownMetadataMagic(Header As Byte()) As Boolean
+
             If Header Is Nothing OrElse Header.Length < 8 Then Return False
 
             If FixedTimeEquals(IndexPageMagic, 0, Header, 0, IndexPageMagic.Length) Then Return True
@@ -576,6 +634,7 @@ Namespace Streams
             If FixedTimeEquals(MetadataRootMagic, 0, Header, 0, MetadataRootMagic.Length) Then Return True
 
             Return False
+
         End Function
 
         ''' <summary>
@@ -585,7 +644,7 @@ Namespace Streams
 
             Dim Result As New List(Of MetadataRegionBuildInfo)
 
-            For Each Descriptor In _IndexPageDescriptors.Values
+            For Each Descriptor In _ExtentPageDescriptors.Values
 
                 If Descriptor.Offset <= 0 OrElse Descriptor.Length <= 0 Then Continue For
 
@@ -593,12 +652,25 @@ Namespace Streams
                     .Offset = Descriptor.Offset,
                     .Length = Descriptor.Length,
                     .RegionType = ChunkedStreamStructure.RegionTypes.IndexPage,
-                    .Description = $"Chunk Index Page {Descriptor.PageNumber}"
+                    .Description = $"Extent Page {Descriptor.PageNumber}"
                 })
 
             Next
 
-            For Each Descriptor In _ChunkIndexDirectoryPageDescriptors.Values
+            For Each Descriptor In _PhysicalRecordPageDescriptors.Values
+
+                If Descriptor.Offset <= 0 OrElse Descriptor.Length <= 0 Then Continue For
+
+                Result.Add(New MetadataRegionBuildInfo With {
+                    .Offset = Descriptor.Offset,
+                    .Length = Descriptor.Length,
+                    .RegionType = ChunkedStreamStructure.RegionTypes.IndexPage,
+                    .Description = $"Physical Record Page {Descriptor.PageNumber}"
+                })
+
+            Next
+
+            For Each Descriptor In _ExtentDirectoryPageDescriptors.Values
 
                 If Descriptor.Offset <= 0 OrElse Descriptor.Length <= 0 Then Continue For
 
@@ -606,7 +678,20 @@ Namespace Streams
                     .Offset = Descriptor.Offset,
                     .Length = Descriptor.Length,
                     .RegionType = ChunkedStreamStructure.RegionTypes.ChunkIndexDirectoryPage,
-                    .Description = $"Chunk Index Directory Page {Descriptor.PageNumber}"
+                    .Description = $"Extent Directory Page {Descriptor.PageNumber}"
+                })
+
+            Next
+
+            For Each Descriptor In _PhysicalRecordDirectoryPageDescriptors.Values
+
+                If Descriptor.Offset <= 0 OrElse Descriptor.Length <= 0 Then Continue For
+
+                Result.Add(New MetadataRegionBuildInfo With {
+                    .Offset = Descriptor.Offset,
+                    .Length = Descriptor.Length,
+                    .RegionType = ChunkedStreamStructure.RegionTypes.ChunkIndexDirectoryPage,
+                    .Description = $"Physical Record Directory Page {Descriptor.PageNumber}"
                 })
 
             Next
@@ -642,6 +727,7 @@ Namespace Streams
         End Function
 
         Private Function GetLivePhysicalEndOffset() As Long
+
             Dim Result = GetDataEndFromIndex()
 
             For Each MetadataRegion In GetMetadataRegionBuildInfos()
@@ -649,10 +735,11 @@ Namespace Streams
             Next
 
             Return Math.Max(Result, CLng(DataStartOffset))
+
         End Function
 
-        Private Function CalculateFragmentedBytes(AllocatedInPhysicalOrder As IList(Of StructureChunkBuildInfo),
-                                                        MetadataRegions As IList(Of MetadataRegionBuildInfo)) As Long
+        Private Function CalculateFragmentedBytes(AllocatedInPhysicalOrder As IList(Of PhysicalRecordStructureBuildInfo),
+                                                  MetadataRegions As IList(Of MetadataRegionBuildInfo)) As Long
 
             Dim UsedBytes As Long = 0
 
@@ -667,82 +754,105 @@ Namespace Streams
             Dim PhysicalDataAreaBytes = Math.Max(0L, GetLivePhysicalEndOffset() - DataStartOffset)
 
             Return Math.Max(0L, PhysicalDataAreaBytes - UsedBytes)
+
         End Function
 
-        Private Function BuildPhysicalRegions(AllocatedInPhysicalOrder As IList(Of StructureChunkBuildInfo),
-                                                    Chunks As IList(Of ChunkedStreamStructure.Chunk),
-                                                    MetadataRegions As IList(Of MetadataRegionBuildInfo)) As List(Of ChunkedStreamStructure.Region)
+        Private Function BuildPhysicalRegions(AllocatedInPhysicalOrder As IList(Of PhysicalRecordStructureBuildInfo),
+                                              Chunks As IList(Of ChunkedStreamStructure.Chunk),
+                                              MetadataRegions As IList(Of MetadataRegionBuildInfo)) As List(Of ChunkedStreamStructure.Region)
 
             Dim Regions As New List(Of ChunkedStreamStructure.Region)
-            Dim ChunkLookup = Chunks.ToDictionary(Function(chunk) chunk.Index)
+
+            Dim ChunkLookup =
+                Chunks.
+                Where(Function(chunk) chunk.IsAllocated AndAlso chunk.PhysicalRecordId.HasValue).
+                GroupBy(Function(chunk) chunk.PhysicalRecordId.Value).
+                ToDictionary(Function(group) group.Key, Function(group) group.First())
 
             Regions.Add(New ChunkedStreamStructure.Region(Offset:=0,
-                                                                Length:=HeaderSize,
-                                                                RegionType:=ChunkedStreamStructure.RegionTypes.Header,
-                                                                Chunk:=Nothing,
-                                                                Description:="Header A"))
+                                                          Length:=HeaderSize,
+                                                          RegionType:=ChunkedStreamStructure.RegionTypes.Header,
+                                                          Chunk:=Nothing,
+                                                          Description:="Header A"))
 
             Regions.Add(New ChunkedStreamStructure.Region(Offset:=HeaderSize,
-                                                                Length:=HeaderSize,
-                                                                RegionType:=ChunkedStreamStructure.RegionTypes.Header,
-                                                                Chunk:=Nothing,
-                                                                Description:="Header B"))
+                                                          Length:=HeaderSize,
+                                                          RegionType:=ChunkedStreamStructure.RegionTypes.Header,
+                                                          Chunk:=Nothing,
+                                                          Description:="Header B"))
 
             Dim PhysicalSegments As New List(Of ChunkedStreamStructure.Region)()
 
             For Each Entry In AllocatedInPhysicalOrder
+
+                Dim Chunk As ChunkedStreamStructure.Chunk = Nothing
+                ChunkLookup.TryGetValue(Entry.RecordId, Chunk)
+
                 PhysicalSegments.Add(New ChunkedStreamStructure.Region(Offset:=Entry.PhysicalOffset,
-                                                                            Length:=Entry.PhysicalLength,
-                                                                            RegionType:=ChunkedStreamStructure.RegionTypes.Chunk,
-                                                                            Chunk:=ChunkLookup(Entry.Index),
-                                                                            Description:=$"Chunk {Entry.Index}"))
+                                                                       Length:=Entry.PhysicalLength,
+                                                                       RegionType:=ChunkedStreamStructure.RegionTypes.Chunk,
+                                                                       Chunk:=Chunk,
+                                                                       Description:=$"Physical Record {Entry.RecordId}"))
+
             Next
 
             For Each MetadataRegion In MetadataRegions
+
                 PhysicalSegments.Add(New ChunkedStreamStructure.Region(Offset:=MetadataRegion.Offset,
-                                                                            Length:=MetadataRegion.Length,
-                                                                            RegionType:=MetadataRegion.RegionType,
-                                                                            Chunk:=Nothing,
-                                                                            Description:=MetadataRegion.Description))
+                                                                       Length:=MetadataRegion.Length,
+                                                                       RegionType:=MetadataRegion.RegionType,
+                                                                       Chunk:=Nothing,
+                                                                       Description:=MetadataRegion.Description))
+
             Next
 
             PhysicalSegments = PhysicalSegments.
-                                    OrderBy(Function(region) region.Offset).
-                                    ThenBy(Function(region) region.EndOffset).
-                                    ToList()
+                               OrderBy(Function(region) region.Offset).
+                               ThenBy(Function(region) region.EndOffset).
+                               ToList()
 
             Dim Cursor = CLng(DataStartOffset)
 
             For Each Segment In PhysicalSegments
+
                 If Segment.Offset > Cursor Then
+
                     Regions.Add(New ChunkedStreamStructure.Region(Offset:=Cursor,
-                                                                        Length:=Segment.Offset - Cursor,
-                                                                        RegionType:=ChunkedStreamStructure.RegionTypes.Hole,
-                                                                        Chunk:=Nothing,
-                                                                        Description:="Unreferenced data area"))
+                                                                  Length:=Segment.Offset - Cursor,
+                                                                  RegionType:=ChunkedStreamStructure.RegionTypes.Hole,
+                                                                  Chunk:=Nothing,
+                                                                  Description:="Unreferenced data area"))
+
                 ElseIf Segment.Offset < Cursor Then
+
                     Regions.Add(New ChunkedStreamStructure.Region(Offset:=Segment.Offset,
-                                                                        Length:=Segment.Length,
-                                                                        RegionType:=ChunkedStreamStructure.RegionTypes.Unknown,
-                                                                        Chunk:=Nothing,
-                                                                        Description:=$"Overlapping region: {Segment.Description}"))
+                                                                  Length:=Segment.Length,
+                                                                  RegionType:=ChunkedStreamStructure.RegionTypes.Unknown,
+                                                                  Chunk:=Nothing,
+                                                                  Description:=$"Overlapping region: {Segment.Description}"))
+
                     Cursor = Math.Max(Cursor, Segment.EndOffset)
                     Continue For
+
                 End If
 
                 Regions.Add(Segment)
                 Cursor = Math.Max(Cursor, Segment.EndOffset)
+
             Next
 
             If _Fs.Length > Cursor Then
+
                 Regions.Add(New ChunkedStreamStructure.Region(Offset:=Cursor,
-                                                                    Length:=_Fs.Length - Cursor,
-                                                                    RegionType:=ChunkedStreamStructure.RegionTypes.Unused,
-                                                                    Chunk:=Nothing,
-                                                                    Description:="Unused trailing space"))
+                                                              Length:=_Fs.Length - Cursor,
+                                                              RegionType:=ChunkedStreamStructure.RegionTypes.Unused,
+                                                              Chunk:=Nothing,
+                                                              Description:="Unused trailing space"))
+
             End If
 
             Return Regions
+
         End Function
 
     End Class
@@ -763,7 +873,7 @@ Namespace Streams
             Header = 0
 
             ''' <summary>
-            ''' Live chunk record referenced by the current chunk index.
+            ''' Live physical record referenced by the current extent table.
             ''' </summary>
             Chunk = 1
 
@@ -784,12 +894,12 @@ Namespace Streams
             Unused = 4
 
             ''' <summary>
-            ''' Authenticated chunk-index metadata page.
+            ''' Authenticated extent or physical-record metadata page.
             ''' </summary>
             IndexPage = 5
 
             ''' <summary>
-            ''' Authenticated chunk-index directory page.
+            ''' Authenticated extent or physical-record directory page.
             ''' </summary>
             ChunkIndexDirectoryPage = 6
 
@@ -930,42 +1040,43 @@ Namespace Streams
         Public ReadOnly Property PhysicalLength As Long
 
         ''' <summary>
-        ''' Logical chunk size used by the stream.
+        ''' Preferred logical segment size used by the stream for newly written physical records.
+        ''' Existing extents and physical records are not required to match this size.
         ''' </summary>
         Public ReadOnly Property ChunkSize As Integer
 
         ''' <summary>
-        ''' Number of logical index entries.
+        ''' Number of logical extent entries.
         ''' </summary>
         Public ReadOnly Property ChunkCount As Integer
 
         ''' <summary>
-        ''' Number of chunks with physical records.
+        ''' Number of logical extents with physical records.
         ''' </summary>
         Public ReadOnly Property AllocatedChunkCount As Integer
 
         ''' <summary>
-        ''' Number of sparse or unallocated chunks.
+        ''' Number of sparse or unallocated logical extents.
         ''' </summary>
         Public ReadOnly Property SparseChunkCount As Integer
 
         ''' <summary>
-        ''' Number of allocated chunks whose payload is encrypted.
+        ''' Number of allocated logical extents whose referenced payload is encrypted.
         ''' </summary>
         Public ReadOnly Property EncryptedChunkCount As Integer
 
         ''' <summary>
-        ''' Number of allocated chunks whose payload is not encrypted.
+        ''' Number of allocated logical extents whose referenced payload is not encrypted.
         ''' </summary>
         Public ReadOnly Property UnencryptedChunkCount As Integer
 
         ''' <summary>
-        ''' Number of allocated chunks whose payload is compressed.
+        ''' Number of allocated logical extents whose referenced payload is compressed.
         ''' </summary>
         Public ReadOnly Property CompressedChunkCount As Integer
 
         ''' <summary>
-        ''' Number of allocated chunks that are not physically ordered after the previous allocated chunk.
+        ''' Number of allocated physical records that are not physically ordered after the previous allocated physical record.
         ''' </summary>
         Public ReadOnly Property OutOfOrderChunkCount As Integer
 
@@ -975,42 +1086,42 @@ Namespace Streams
         Public ReadOnly Property PhysicalHeaderBytes As Long
 
         ''' <summary>
-        ''' Physical bytes in the data area before the index table.
+        ''' Physical bytes in the data area before metadata.
         ''' </summary>
         Public ReadOnly Property PhysicalDataAreaBytes As Long
 
         ''' <summary>
-        ''' Physical bytes occupied by live chunk records.
+        ''' Physical bytes occupied by live physical records.
         ''' </summary>
         Public ReadOnly Property PhysicalChunkRecordBytes As Long
 
         ''' <summary>
-        ''' Physical bytes occupied by live chunk payloads only.
+        ''' Physical bytes occupied by live physical record payloads only.
         ''' </summary>
         Public ReadOnly Property PhysicalPayloadBytes As Long
 
         ''' <summary>
-        ''' Physical bytes occupied by chunk record overhead such as record headers, IVs and MACs.
+        ''' Physical bytes occupied by physical record overhead such as record headers, IVs and MACs.
         ''' </summary>
         Public ReadOnly Property PhysicalChunkOverheadBytes As Long
 
         ''' <summary>
-        ''' Physical bytes in the data area that are not referenced by the current index.
+        ''' Physical bytes in the data area that are not referenced by the current metadata.
         ''' </summary>
         Public ReadOnly Property FragmentedBytes As Long
 
         ''' <summary>
-        ''' Logical bytes represented by allocated chunk records.
+        ''' Logical bytes represented by allocated logical extents.
         ''' </summary>
         Public ReadOnly Property LogicalPayloadBytes As Long
 
         ''' <summary>
-        ''' Logical bytes represented by encrypted allocated chunks.
+        ''' Logical bytes represented by encrypted allocated extents.
         ''' </summary>
         Public ReadOnly Property EncryptedLogicalBytes As Long
 
         ''' <summary>
-        ''' Logical bytes represented by compressed allocated chunks.
+        ''' Logical bytes represented by compressed allocated extents.
         ''' </summary>
         Public ReadOnly Property CompressedLogicalBytes As Long
 
@@ -1050,22 +1161,22 @@ Namespace Streams
         Public ReadOnly Property IsFileMasterKeyUserWrapped As Boolean
 
         ''' <summary>
-        ''' True when newly written chunks are currently encrypted.
+        ''' True when newly written physical records are currently encrypted.
         ''' </summary>
         Public ReadOnly Property IsEncryptionEnabledForNewWrites As Boolean
 
         ''' <summary>
-        ''' Compression method currently configured for newly written chunks.
+        ''' Compression method currently configured for newly written physical records.
         ''' </summary>
         Public ReadOnly Property CurrentCompressionMethod As ChunkedStream.ChunkedStreamOptions.CompressionMethods
 
         ''' <summary>
-        ''' Maximum compressed-size ratio currently allowed before storing a newly written chunk compressed.
+        ''' Maximum compressed-size ratio currently allowed before storing a newly written physical record compressed.
         ''' </summary>
         Public ReadOnly Property CurrentCompressionRatioThreshold As Double
 
         ''' <summary>
-        ''' True when newly written all-zero chunks are stored physically instead of being sparse.
+        ''' True when newly written all-zero logical ranges are stored physically instead of being sparse.
         ''' </summary>
         Public ReadOnly Property CurrentStoreSparseChunks As Boolean
 
@@ -1080,7 +1191,7 @@ Namespace Streams
         Public ReadOnly Property ActiveHeaderCopy As Integer
 
         ''' <summary>
-        ''' Physical offset at which chunk records may begin.
+        ''' Physical offset at which physical records may begin.
         ''' </summary>
         Public ReadOnly Property DataStartOffset As Long
 
@@ -1090,14 +1201,13 @@ Namespace Streams
         Public ReadOnly Property DataAreaEndOffset As Long
 
         ''' <summary>
-        ''' Physical end offset of the highest referenced live chunk record.
+        ''' Physical end offset of the highest referenced live physical record.
         ''' </summary>
         Public ReadOnly Property LiveDataEndOffset As Long
 
-        'TODO:XML COMMENTS
         ''' <summary>
         ''' Total physical bytes occupied by persisted metadata structures.
-        ''' This includes metadata roots, index pages and directory pages.
+        ''' This includes metadata roots, extent pages, physical-record pages and directory pages.
         ''' </summary>
         Public ReadOnly Property PhysicalMetadataBytes As Long
 
@@ -1107,13 +1217,13 @@ Namespace Streams
         Public ReadOnly Property MetadataRootBytes As Long
 
         ''' <summary>
-        ''' Physical bytes occupied by chunk-index metadata pages.
+        ''' Physical bytes occupied by extent and physical-record metadata pages.
         ''' </summary>
         Public ReadOnly Property IndexPageBytes As Long
 
         ''' <summary>
         ''' Physical bytes occupied by all metadata directory pages.
-        ''' This includes chunk-index directory pages and hole-directory pages.
+        ''' This includes extent directory pages, physical-record directory pages and hole-directory pages.
         ''' </summary>
         Public ReadOnly Property DirectoryPageBytes As Long
 
@@ -1126,7 +1236,7 @@ Namespace Streams
         ''' <summary>
         ''' Total structural overhead bytes.
         ''' This includes fixed headers, persisted metadata structures and
-        ''' per-chunk record overhead
+        ''' per-physical-record overhead.
         ''' </summary>
         Public ReadOnly Property TotalStructuralOverheadBytes As Long
 
@@ -1141,12 +1251,12 @@ Namespace Streams
         Public ReadOnly Property MetadataRootEndOffset As Long
 
         ''' <summary>
-        ''' Chunk-data fragmentation as a ratio of the live chunk-data area.
+        ''' Physical-record fragmentation as a ratio of the live physical-record data area.
         ''' This uses the same definition as ChunkedStream.GetFragmentation().
         ''' </summary>
         ''' <remarks>
         ''' This value measures unused space between DataStartOffset and LiveDataEndOffset
-        ''' using live chunk-record bytes only. Metadata layout holes are still exposed
+        ''' using live physical-record bytes only. Metadata layout holes are still exposed
         ''' through FragmentedBytes, HoleCount, LargestHoleBytes and Regions.
         ''' </remarks>
         Public ReadOnly Property FragmentationRatio As Double
@@ -1246,8 +1356,8 @@ Namespace Streams
         End Property
 
         ''' <summary>
-        ''' Live chunk record bytes divided by logical payload bytes.
-        ''' This includes per-chunk headers, IVs and MACs but excludes global headers, the index table and holes.
+        ''' Live physical-record bytes divided by logical payload bytes.
+        ''' This includes per-record headers, IVs and MACs but excludes global headers, metadata and holes.
         ''' </summary>
         Public ReadOnly Property ChunkRecordCompressionRatio As Double
             Get
@@ -1258,7 +1368,7 @@ Namespace Streams
 
         ''' <summary>
         ''' Physical stream length divided by logical stream length.
-        ''' This includes headers, index bytes, chunk overhead and fragmentation.
+        ''' This includes headers, metadata bytes, physical-record overhead and fragmentation.
         ''' </summary>
         Public ReadOnly Property PhysicalToLogicalRatio As Double
             Get
@@ -1279,7 +1389,7 @@ Namespace Streams
         End Property
 
         ''' <summary>
-        ''' Physical payload bytes as a ratio of live chunk record bytes.
+        ''' Physical payload bytes as a ratio of live physical-record bytes.
         ''' </summary>
         Public ReadOnly Property PayloadDensityRatio As Double
             Get
@@ -1290,8 +1400,8 @@ Namespace Streams
 
         ''' <summary>
         ''' Structural overhead bytes as a ratio of the physical backing stream length.
-        ''' This includes fixed headers, persisted metadata structures and per-chunk
-        ''' record overhead.
+        ''' This includes fixed headers, persisted metadata structures and per-record
+        ''' overhead.
         ''' </summary>
         Public ReadOnly Property StructuralOverheadRatio As Double
             Get
@@ -1365,7 +1475,9 @@ Namespace Streams
                            NextPhysicalGap As Long?,
                            IsPhysicallyContiguousWithPrevious As Boolean,
                            IsPhysicallyContiguousWithNext As Boolean,
-                           IsInLogicalOrder As Boolean)
+                           IsInLogicalOrder As Boolean,
+                           Optional PhysicalRecordId As Long? = Nothing,
+                           Optional PhysicalRecordOffset As Integer? = Nothing)
 
                 Me.Index = Index
                 Me.LogicalOffset = LogicalOffset
@@ -1388,6 +1500,8 @@ Namespace Streams
                 Me.IsPhysicallyContiguousWithPrevious = IsPhysicallyContiguousWithPrevious
                 Me.IsPhysicallyContiguousWithNext = IsPhysicallyContiguousWithNext
                 Me.IsInLogicalOrder = IsInLogicalOrder
+                Me.PhysicalRecordId = PhysicalRecordId
+                Me.PhysicalRecordOffset = PhysicalRecordOffset
 
             End Sub
 
@@ -1407,6 +1521,15 @@ Namespace Streams
             Public ReadOnly Property LogicalEndOffset As Long
 
             ''' <summary>
+            ''' Logical length represented by the chunk.
+            ''' </summary>
+            Public ReadOnly Property LogicalLength As Long
+                Get
+                    Return LogicalEndOffset - LogicalOffset
+                End Get
+            End Property
+
+            ''' <summary>
             ''' Plain logical bytes represented by the chunk.
             ''' </summary>
             Public ReadOnly Property PlainLength As Integer
@@ -1420,6 +1543,16 @@ Namespace Streams
             ''' True when the chunk has a physical record.
             ''' </summary>
             Public ReadOnly Property IsAllocated As Boolean
+
+            ''' <summary>
+            ''' Physical record id, or Nothing for sparse chunks.
+            ''' </summary>
+            Public ReadOnly Property PhysicalRecordId As Long?
+
+            ''' <summary>
+            ''' Offset within the physical record plaintext, or Nothing for sparse chunks.
+            ''' </summary>
+            Public ReadOnly Property PhysicalRecordOffset As Integer?
 
             ''' <summary>
             ''' Physical chunk record start offset, or Nothing for sparse chunks.
@@ -1490,7 +1623,8 @@ Namespace Streams
             ''' </summary>
             Public ReadOnly Property IsPlaintextAllZero As Boolean
                 Get
-                    Return (ChunkFlags And ChunkedStream.ChunkFlags.PlaintextAllZero) = ChunkedStream.ChunkFlags.PlaintextAllZero
+                    If IsSparse Then Return True
+                    Return ChunkFlags.HasFlag(ChunkedStream.ChunkFlags.PlaintextAllZero)
                 End Get
             End Property
 
@@ -1542,7 +1676,7 @@ Namespace Streams
             ''' </summary>
             Public ReadOnly Property PhysicalOverheadBytes As Long
                 Get
-                    If Not PhysicalLength.HasValue Then Return 0
+                    If PhysicalLength.HasValue = False Then Return 0
                     Return Math.Max(0L, CLng(PhysicalLength.Value) - PayloadLength)
                 End Get
             End Property
@@ -1552,7 +1686,7 @@ Namespace Streams
             ''' </summary>
             Public ReadOnly Property PhysicalOverheadRatio As Double
                 Get
-                    If Not PhysicalLength.HasValue OrElse PhysicalLength.Value <= 0 Then Return 0
+                    If PhysicalLength.HasValue = False OrElse PhysicalLength.Value <= 0 Then Return 0
                     Return PhysicalOverheadBytes / CDbl(PhysicalLength.Value)
                 End Get
             End Property
@@ -1562,6 +1696,7 @@ Namespace Streams
             ''' </summary>
             Public ReadOnly Property PayloadSpaceSavedBytes As Long
                 Get
+                    If IsSparse Then Return PlainLength
                     Return Math.Max(0L, CLng(PlainLength) - PayloadLength)
                 End Get
             End Property
@@ -1605,6 +1740,7 @@ Namespace Streams
                     If(CompressionEvaluatedMethod <> ChunkedStream.ChunkedStreamOptions.CompressionMethods.None,
                        $", evaluated {CompressionEvaluatedMethod} {CompressionEvaluatedRatio:P2}",
                        "")
+
                 Dim ZeroText = If(IsPlaintextAllZero, ", zero", "")
 
                 Return $"Chunk {Index} [{PlainLength.FormatFileSizeFromBytes()} -> {PayloadLength.FormatFileSizeFromBytes()}{CompressionText}{EvaluatedCompressionText}{EncryptionText}{ZeroText}]"

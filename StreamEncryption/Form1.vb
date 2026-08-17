@@ -84,11 +84,11 @@ Public Class Form1
         Dim Options As New Streams.ChunkedStream.ChunkedStreamOptions() With
         {
             .CompressionRatioThreshold = 1,
-            .CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
-            .EncryptionInfo = New Streams.ChunkedStream.EncryptionInfo("MySecretPassword"),
-            .NewIndexPageWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.Append,
-            .NewChunkWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.Append
+            .CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
+            .NewIndexPageWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
+            .NewChunkWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles
         }
+        '.EncryptionInfo = New Streams.ChunkedStream.EncryptionInfo("MySecretPassword"),
 
 
         Using frmProgress As New i00CodeLib.frmProgress(
@@ -324,6 +324,21 @@ Public Class Form1
                     End Using
 
 
+                    'Dim Ss = Enc.GetStructure()
+
+                    'Debug.Print($"Chunks={Ss.ChunkCount:N0}")
+                    'Debug.Print($"Allocated={Ss.AllocatedChunkCount:N0}")
+                    'Debug.Print($"Sparse={Ss.SparseChunkCount:N0}")
+
+                    'Debug.Print($"PhysicalPayload={Ss.PhysicalPayloadBytes:N0}")
+                    'Debug.Print($"PhysicalRecords={Ss.PhysicalChunkRecordBytes:N0}")
+                    'Debug.Print($"Overhead={Ss.PhysicalChunkOverheadBytes:N0}")
+
+                    'Debug.Print($"Metadata={Ss.PhysicalMetadataBytes:N0}")
+
+                    'Debug.Print($"Fragmented={Ss.FragmentedBytes:N0}")
+                    'Debug.Print($"Fragmentation={Ss.FragmentationRatio:P2}")
+
                     ' -----------------------------------------------------------------
                     ' Defrag
                     ' -----------------------------------------------------------------
@@ -459,7 +474,8 @@ Public Class Form1
                           {"Decryption Speed", $"{OutputMBps:0.00} MB/s"},
                           {"Encrypted Fragmentation", $"{EncryptedFragmentation:P0}"},
                           {"Defragged Fragmentation", $"{DefraggedFragmentation:P0}"},
-                          {"Defragged Saved", $"{ReclaimedBytes.FormatFileSizeFromBytes}"}
+                          {"Defragged Saved", $"{ReclaimedBytes.FormatFileSizeFromBytes}"},
+                          {"Compression Method", $"{Options.CompressionMethod}"}
                       }
 
                     i00CodeLib.MsgBox(

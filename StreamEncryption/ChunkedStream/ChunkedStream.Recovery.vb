@@ -32,8 +32,8 @@ Namespace Streams
 
             None = 0
 
-            CopyingChunk = 1
-            ChunkCopied = 2
+            CopyingPhysicalRecord = 1
+            PhysicalRecordCopied = 2
 
             CheckpointActive = 100
 
@@ -47,8 +47,8 @@ Namespace Streams
         Private Enum JournalStates As Integer
 
             None = RecoveryStates.None
-            Copying = RecoveryStates.CopyingChunk
-            Copied = RecoveryStates.ChunkCopied
+            Copying = RecoveryStates.CopyingPhysicalRecord
+            Copied = RecoveryStates.PhysicalRecordCopied
 
         End Enum
 
@@ -70,10 +70,9 @@ Namespace Streams
 
                     RecoverChunkSizeRebuild()
 
-                Case RecoveryStates.CopyingChunk,
-                     RecoveryStates.ChunkCopied
+                Case RecoveryStates.CopyingPhysicalRecord, RecoveryStates.PhysicalRecordCopied
 
-                    RecoverChunkMove(State)
+                    RecoverPhysicalRecordMove(State)
 
                 Case Else
 
@@ -178,78 +177,107 @@ Namespace Streams
 
         End Sub
 
-        Private Sub RecoverChunkMove(State As RecoveryStates)
+        Private Sub RecoverPhysicalRecordMove(State As RecoveryStates)
 
-            Dim ChunkIndex = BitConverter.ToInt64(_Header, JournalChunkIndexOffset)
-            Dim OldOffset = BitConverter.ToInt64(_Header, JournalOldOffsetOffset)
-            Dim OldLength = BitConverter.ToInt32(_Header, JournalOldLengthOffset)
-            Dim NewOffset = BitConverter.ToInt64(_Header, JournalNewOffsetOffset)
-            Dim NewLength = BitConverter.ToInt32(_Header, JournalNewLengthOffset)
+            Dim RecordId =
+                BitConverter.ToInt64(
+                    _Header,
+                    JournalChunkIndexOffset)
 
-            If ChunkIndex < 0 OrElse ChunkIndex > Integer.MaxValue Then
-                Throw New InvalidDataException("Invalid recovery journal chunk index.")
+            Dim OldOffset =
+                BitConverter.ToInt64(
+                    _Header,
+                    JournalOldOffsetOffset)
+
+            Dim OldLength =
+                BitConverter.ToInt32(
+                    _Header,
+                    JournalOldLengthOffset)
+
+            Dim NewOffset =
+                BitConverter.ToInt64(
+                    _Header,
+                    JournalNewOffsetOffset)
+
+            Dim NewLength =
+                BitConverter.ToInt32(
+                    _Header,
+                    JournalNewLengthOffset)
+
+            If RecordId <= SparsePhysicalRecordId Then
+                Throw New InvalidDataException("Invalid recovery journal record id.")
             End If
 
-            EnsureIndexSize(CInt(ChunkIndex + 1))
+            Dim Record As PhysicalRecordEntry = Nothing
+
+            If _PhysicalRecords.TryGetValue(RecordId, Record) = False Then
+                Throw New InvalidDataException($"Recovery journal refers to unknown physical record {RecordId}.")
+            End If
 
             Select Case State
 
-                Case RecoveryStates.CopyingChunk
+                Case RecoveryStates.CopyingPhysicalRecord
 
-                    If IsValidChunkRecordAt(CInt(ChunkIndex), OldOffset, OldLength) Then
+                    If IsValidPhysicalRecordAt(RecordId,
+                                               OldOffset,
+                                               OldLength) Then
 
-                        _Index(CInt(ChunkIndex)) =
-                            New ChunkIndexEntry With {
-                                .Offset = OldOffset,
-                                .RecordLength = OldLength
-                            }
+                        Record.PhysicalOffset = OldOffset
+                        Record.PhysicalLength = OldLength
+
+                        _PhysicalRecords(RecordId) = Record
 
                         PersistIndexAndHeader(GetDataEndFromIndex())
+
                         ClearRecoveryState()
 
                         Return
 
                     End If
 
-                    Throw New CryptographicException("Recovery failed. Old chunk record is invalid.")
+                    Throw New CryptographicException("Recovery failed. Original physical record is invalid.")
 
-                Case RecoveryStates.ChunkCopied
+                Case RecoveryStates.PhysicalRecordCopied
 
-                    If IsValidChunkRecordAt(CInt(ChunkIndex), NewOffset, NewLength) Then
+                    If IsValidPhysicalRecordAt(RecordId,
+                                               NewOffset,
+                                               NewLength) Then
 
-                        _Index(CInt(ChunkIndex)) =
-                            New ChunkIndexEntry With {
-                                .Offset = NewOffset,
-                                .RecordLength = NewLength
-                            }
+                        Record.PhysicalOffset = NewOffset
+                        Record.PhysicalLength = NewLength
+
+                        _PhysicalRecords(RecordId) = Record
 
                         PersistIndexAndHeader(GetDataEndFromIndex())
+
                         ClearRecoveryState()
 
                         Return
 
                     End If
 
-                    If IsValidChunkRecordAt(CInt(ChunkIndex), OldOffset, OldLength) Then
+                    If IsValidPhysicalRecordAt(RecordId,
+                                               OldOffset,
+                                               OldLength) Then
 
-                        _Index(CInt(ChunkIndex)) =
-                            New ChunkIndexEntry With {
-                                .Offset = OldOffset,
-                                .RecordLength = OldLength
-                            }
+                        Record.PhysicalOffset = OldOffset
+                        Record.PhysicalLength = OldLength
+
+                        _PhysicalRecords(RecordId) = Record
 
                         PersistIndexAndHeader(GetDataEndFromIndex())
+
                         ClearRecoveryState()
 
                         Return
 
                     End If
 
-                    Throw New CryptographicException("Recovery failed. Neither old nor new chunk record is valid.")
+                    Throw New CryptographicException("Recovery failed. Neither version of the physical record is valid.")
 
                 Case Else
 
-                    Throw New InvalidDataException($"Unsupported chunk move recovery state: {CInt(State)}.")
+                    Throw New InvalidDataException($"Unsupported recovery state: {CInt(State)}.")
 
             End Select
 
@@ -302,15 +330,15 @@ Namespace Streams
         End Sub
 
         Private Sub WriteJournal(State As JournalStates,
-                                 ChunkIndex As Long,
+                                 RecordId As Long,
                                  OldOffset As Long,
                                  OldLength As Integer,
                                  NewOffset As Long,
                                  NewLength As Integer)
 
-            WriteChunkMoveRecoveryState(
+            WritePhysicalRecordMoveRecoveryState(
                 CType(State, RecoveryStates),
-                ChunkIndex,
+                RecordId,
                 OldOffset,
                 OldLength,
                 NewOffset,
@@ -318,64 +346,66 @@ Namespace Streams
 
         End Sub
 
-        Private Sub WriteChunkMoveRecoveryState(State As RecoveryStates,
-                                                ChunkIndex As Long,
-                                                OldOffset As Long,
-                                                OldLength As Integer,
-                                                NewOffset As Long,
-                                                NewLength As Integer)
+        Private Sub WritePhysicalRecordMoveRecoveryState(State As RecoveryStates,
+                                                         RecordId As Long,
+                                                         OldOffset As Long,
+                                                         OldLength As Integer,
+                                                         NewOffset As Long,
+                                                         NewLength As Integer)
 
             Select Case State
 
-                Case RecoveryStates.CopyingChunk,
-                     RecoveryStates.ChunkCopied
-
-                    ' Valid chunk move recovery state.
+                Case RecoveryStates.CopyingPhysicalRecord,
+                     RecoveryStates.PhysicalRecordCopied
 
                 Case Else
 
-                    Throw New ArgumentOutOfRangeException(NameOf(State), $"Unsupported chunk move recovery state: {CInt(State)}.")
+                    Throw New ArgumentOutOfRangeException(
+                        NameOf(State),
+                        $"Unsupported physical-record recovery state: {CInt(State)}.")
 
             End Select
 
-            Array.Clear(_Header, RecoveryAreaOffset, RecoveryAreaLength)
+            Array.Clear(_Header,
+                        RecoveryAreaOffset,
+                        RecoveryAreaLength)
 
-            System.Buffer.BlockCopy(
+            Buffer.BlockCopy(
                 BitConverter.GetBytes(CInt(State)),
                 0,
                 _Header,
                 RecoveryStateOffset,
                 4)
 
-            System.Buffer.BlockCopy(
-                BitConverter.GetBytes(ChunkIndex),
+            Buffer.BlockCopy(
+                BitConverter.GetBytes(RecordId),
                 0,
                 _Header,
                 JournalChunkIndexOffset,
                 8)
 
-            System.Buffer.BlockCopy(
+            Buffer.BlockCopy(
                 BitConverter.GetBytes(OldOffset),
                 0,
                 _Header,
                 JournalOldOffsetOffset,
                 8)
 
-            System.Buffer.BlockCopy(
+            Buffer.BlockCopy(
                 BitConverter.GetBytes(OldLength),
                 0,
                 _Header,
                 JournalOldLengthOffset,
                 4)
 
-            System.Buffer.BlockCopy(
+            Buffer.BlockCopy(
                 BitConverter.GetBytes(NewOffset),
                 0,
                 _Header,
                 JournalNewOffsetOffset,
                 8)
 
-            System.Buffer.BlockCopy(
+            Buffer.BlockCopy(
                 BitConverter.GetBytes(NewLength),
                 0,
                 _Header,
@@ -399,11 +429,16 @@ Namespace Streams
 
         End Sub
 
-        Private Function IsValidChunkRecordAt(ChunkIndex As Integer,
-                                              Offset As Long,
-                                              RecordLength As Integer) As Boolean
+        Private Function IsValidPhysicalRecordAt(RecordId As Long,
+                                                 Offset As Long,
+                                                 RecordLength As Integer) As Boolean
 
-            If Offset < DataStartOffset OrElse RecordLength < MinChunkRecordSize Then Return False
+            If RecordId <= SparsePhysicalRecordId Then Return False
+
+            If Offset < DataStartOffset Then Return False
+
+            If RecordLength < MinChunkRecordSize Then Return False
+
             If Offset + RecordLength > _Fs.Length Then Return False
 
             Try
@@ -411,11 +446,28 @@ Namespace Streams
                 Dim Record(RecordLength - 1) As Byte
 
                 _Fs.Position = Offset
-                ReadExactly(_Fs, Record, 0, Record.Length)
 
-                Array.Clear(_ChunkPlain, 0, _ChunkPlain.Length)
+                ReadExactly(_Fs,
+                            Record,
+                            0,
+                            Record.Length)
 
-                DecryptChunkRecord(ChunkIndex, Record, _ChunkPlain)
+                Dim HeaderRecordId =
+                    BitConverter.ToInt64(Record, 0)
+
+                If HeaderRecordId <> RecordId Then
+                    Return False
+                End If
+
+                Dim PhysicalRecord =
+                    New PhysicalRecordEntry With {
+                        .RecordId = RecordId,
+                        .PhysicalOffset = Offset,
+                        .PhysicalLength = RecordLength,
+                        .PlainLength = BitConverter.ToInt32(Record, ChunkPlainLengthOffset)
+                    }
+
+                ReadPhysicalRecordPlain(PhysicalRecord)
 
                 Return True
 

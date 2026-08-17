@@ -402,28 +402,28 @@ Namespace Streams
 
         Private Function HasEncryptedChunks() As Boolean
 
-            For ChunkIndex = 0 To _Index.Count - 1
+            For Each pair In _PhysicalRecords
 
-                Dim Entry = _Index(ChunkIndex)
+                Dim Record = pair.Value
 
-                If Entry.Offset = 0 OrElse Entry.RecordLength = 0 Then Continue For
-
-                If Entry.Offset < DataStartOffset OrElse Entry.RecordLength < MinChunkRecordSize Then
-                    Throw New InvalidDataException($"Invalid chunk index entry for chunk {ChunkIndex}.")
-                End If
-
-                If Entry.Offset + Entry.RecordLength > _IndexOffset Then
-                    Throw New InvalidDataException($"Chunk {ChunkIndex} record extends beyond data area.")
-                End If
+                If Record.RefCount <= 0 Then Continue For
+                If Record.PhysicalOffset < DataStartOffset OrElse Record.PhysicalLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid physical record entry for record {Record.RecordId}.")
+                If Record.PhysicalOffset + Record.PhysicalLength > _IndexOffset Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond data area.")
 
                 Dim Header(ChunkRecordHeaderSize - 1) As Byte
 
-                _Fs.Position = Entry.Offset
+                _Fs.Position = Record.PhysicalOffset
                 ReadExactly(_Fs, Header, 0, Header.Length)
 
+                Dim StoredRecordId = BitConverter.ToInt64(Header, 0)
+
+                If StoredRecordId <> Record.RecordId Then
+                    Throw New InvalidDataException($"Physical record id mismatch. Expected {Record.RecordId}, found {StoredRecordId}.")
+                End If
+
                 Dim EncryptionMethod =
-            CType(BitConverter.ToInt32(Header, ChunkEncryptionMethodOffset),
-                  ChunkEncryptionMethods)
+                    CType(BitConverter.ToInt32(Header, ChunkEncryptionMethodOffset),
+                          ChunkEncryptionMethods)
 
                 If EncryptionMethod <> ChunkEncryptionMethods.None Then
                     Return True
@@ -435,14 +435,16 @@ Namespace Streams
 
         End Function
 
-        Private Sub DecryptChunkRecord(ExpectedChunkIndex As Long, Record As Byte(), Plain As Byte())
+        Private Sub DecryptPhysicalRecord(ExpectedRecordId As Long, Record As Byte(), Plain As Byte())
 
-            If Record.Length < MinChunkRecordSize Then Throw New InvalidDataException("Chunk record is too small.")
+            If Record Is Nothing Then Throw New ArgumentNullException(NameOf(Record))
+            If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
+            If Record.Length < MinChunkRecordSize Then Throw New InvalidDataException("Physical record is too small.")
 
-            Dim ChunkIndex = BitConverter.ToInt64(Record, 0)
+            Dim RecordId = BitConverter.ToInt64(Record, 0)
 
-            If ChunkIndex <> ExpectedChunkIndex Then
-                Throw New InvalidDataException($"Chunk index mismatch. Expected {ExpectedChunkIndex}, found {ChunkIndex}.")
+            If RecordId <> ExpectedRecordId Then
+                Throw New InvalidDataException($"Physical record id mismatch. Expected {ExpectedRecordId}, found {RecordId}.")
             End If
 
             Dim CompressionMethod =
@@ -467,16 +469,16 @@ Namespace Streams
             Dim CompressionEvaluatedPercent =
                 CInt(Record(ChunkCompressionEvaluatedPercentOffset))
 
-            If PlainLength < 0 OrElse PlainLength > _ChunkSize Then
-                Throw New InvalidDataException("Invalid chunk plain length.")
+            If PlainLength < 0 OrElse PlainLength > Plain.Length Then
+                Throw New InvalidDataException("Invalid physical record plain length.")
             End If
 
             If PayloadLength < 0 OrElse ChunkRecordDataOffset + PayloadLength + MacSize <> Record.Length Then
-                Throw New InvalidDataException("Invalid chunk payload length.")
+                Throw New InvalidDataException("Invalid physical record payload length.")
             End If
 
             If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then
-                Throw New InvalidDataException($"Unsupported chunk flags: {CInt(Flags)}.")
+                Throw New InvalidDataException($"Unsupported physical record flags: {CInt(Flags)}.")
             End If
 
             If CompressionEvaluatedPercent < MinimumCompressionEvaluatedPercent OrElse
@@ -486,9 +488,7 @@ Namespace Streams
 
             End If
 
-            If [Enum].IsDefined(GetType(ChunkedStreamOptions.CompressionMethods), CompressionEvaluatedMethod) Then
-                ' Valid
-            Else
+            If [Enum].IsDefined(GetType(ChunkedStreamOptions.CompressionMethods), CompressionEvaluatedMethod) = False Then
                 Throw New InvalidDataException($"Unsupported evaluated compression method: {CInt(CompressionEvaluatedMethod)}.")
             End If
 
@@ -498,15 +498,15 @@ Namespace Streams
                    PublicIntegrityKey)
 
             If RecordMacKey Is Nothing Then
-                Throw New EncryptionMismatchException("Encrypted chunk exists but no file master key is available.")
+                Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
             End If
 
             Using Hmac As New HMACSHA256(RecordMacKey)
 
                 Dim ExpectedMac = Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
 
-                If Not FixedTimeEquals(ExpectedMac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize) Then
-                    Throw New CryptographicException("Chunk MAC invalid.")
+                If FixedTimeEquals(ExpectedMac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize) = False Then
+                    Throw New CryptographicException("Physical record MAC invalid.")
                 End If
 
             End Using
@@ -521,16 +521,17 @@ Namespace Streams
                 Case ChunkEncryptionMethods.None
 
                     If PayloadLength > 0 Then
-                        System.Buffer.BlockCopy(Record, ChunkRecordDataOffset, Payload, 0, PayloadLength)
+                        Buffer.BlockCopy(Record, ChunkRecordDataOffset, Payload, 0, PayloadLength)
                     End If
 
                 Case ChunkEncryptionMethods.AesCtrFileMasterKey
 
                     If _ChunkEncryptionKey Is Nothing Then
-                        Throw New EncryptionMismatchException("Encrypted chunk exists but no file master key is available.")
+                        Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
                     End If
 
-                    System.Buffer.BlockCopy(Record, ChunkRecordIvOffset, _Counter, 0, IvSize)
+                    Buffer.BlockCopy(Record, ChunkRecordIvOffset, _Counter, 0, IvSize)
+
                     CryptPayload(Record, ChunkRecordDataOffset, PayloadLength, Payload, 0, _ChunkEncryptionKey)
 
                 Case Else
@@ -542,11 +543,11 @@ Namespace Streams
             Dim Restored = DecompressPayload(CompressionMethod, Payload, PlainLength)
 
             If Restored.Length <> PlainLength Then
-                Throw New InvalidDataException("Chunk decompressed/plain length mismatch.")
+                Throw New InvalidDataException("Physical record decompressed/plain length mismatch.")
             End If
 
             If PlainLength > 0 Then
-                System.Buffer.BlockCopy(Restored, 0, Plain, 0, PlainLength)
+                Buffer.BlockCopy(Restored, 0, Plain, 0, PlainLength)
             End If
 
         End Sub
