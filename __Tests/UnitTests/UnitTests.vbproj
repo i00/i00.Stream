@@ -97,6 +97,7 @@
     <Compile Include="Tests\Checkpoints.vb" />
     <Compile Include="Tests\CompressionAndEncryption.vb" />
     <Compile Include="Tests\Extents.vb" />
+    <Compile Include="Tests\Developer confidence\Hardening.vb" />
     <Compile Include="Tests\Recovery.vb" />
     <Compile Include="Tests\_Core.vb" />
   </ItemGroup>

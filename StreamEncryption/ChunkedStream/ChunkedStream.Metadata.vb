@@ -78,19 +78,55 @@ Namespace Streams
             Dim Offset As Long
 
             If TryGetCompactMetadataWriteOffset(Length, Offset) Then
+
+                If IsRangeSafeForMetadata(Offset, Length) = False Then
+                    Throw New InvalidOperationException(
+                        $"Compact index page allocation overlaps live physical data. Offset={Offset}, Length={Length}.")
+                End If
+
                 Return Offset
+
             End If
 
             Select Case Options.NewIndexPageWriteLocationPolicy
+
                 Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
                      ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
 
-                    If _FreeIndexPageSpaces.TryAllocate(Length, Offset) Then
+                    If TryAllocateSafeMetadataSpace(_FreeIndexPageSpaces, Length, Offset) Then
                         Return Offset
                     End If
+
             End Select
 
             Return Math.Max(_Fs.Length, GetDataEndFromIndex())
+
+        End Function
+
+        Private Function TryAllocateSafeMetadataSpace(Allocator As FreeSpaceAllocator,
+                                                      Length As Integer,
+                                                      ByRef Offset As Long) As Boolean
+
+            If Allocator Is Nothing Then Throw New ArgumentNullException(NameOf(Allocator))
+            If Length <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
+
+            Dim CandidateOffset As Long
+
+            While Allocator.TryAllocate(Length, CandidateOffset)
+
+                If IsRangeSafeForMetadata(CandidateOffset, Length) Then
+                    Offset = CandidateOffset
+                    Return True
+                End If
+
+                '
+                ' Stale hole. Discard it and keep looking.
+                '
+
+            End While
+
+            Offset = -1
+            Return False
 
         End Function
 
@@ -101,16 +137,25 @@ Namespace Streams
             Dim Offset As Long
 
             If TryGetCompactMetadataWriteOffset(Length, Offset) Then
+
+                If IsRangeSafeForMetadata(Offset, Length) = False Then
+                    Throw New InvalidOperationException(
+                        $"Compact directory page allocation overlaps live physical data. Offset={Offset}, Length={Length}.")
+                End If
+
                 Return Offset
+
             End If
 
             Select Case Options.NewIndexDirectoryPageWriteLocationPolicy
+
                 Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
                      ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
 
-                    If _FreeIndexDirectoryPageSpaces.TryAllocate(Length, Offset) Then
+                    If TryAllocateSafeMetadataSpace(_FreeIndexDirectoryPageSpaces, Length, Offset) Then
                         Return Offset
                     End If
+
             End Select
 
             Return Math.Max(_Fs.Length, GetDataEndFromIndex())

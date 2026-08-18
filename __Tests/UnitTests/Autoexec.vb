@@ -11,7 +11,7 @@ Public Class Autoexec
 
         'Test()
 
-        'Tests.StreamChunked.Core.PartialOverwritePreservesUnaffectedBytes()
+        'Tests.StreamChunked.Hardening.ModelBasedRandomOperationsMatchByteArrayModel()
 
         Return UnitTester.Autoexec.Main()
     End Function

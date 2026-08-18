@@ -191,17 +191,35 @@ Namespace Streams
 
             Dim Extent = _Extents(ExtentIndex)
 
-            If LogicalOffset = Extent.LogicalOffset OrElse LogicalOffset = GetExtentEnd(Extent) Then Return
+            If LogicalOffset = Extent.LogicalOffset OrElse
+               LogicalOffset = GetExtentEnd(Extent) Then
+                Return
+            End If
 
             Dim LeftLength = CInt(LogicalOffset - Extent.LogicalOffset)
             Dim RightLength = Extent.LogicalLength - LeftLength
+
+            Dim LeftPhysicalRecordOffset As Integer
+            Dim RightPhysicalRecordOffset As Integer
+
+            If Extent.PhysicalRecordId = SparsePhysicalRecordId Then
+
+                LeftPhysicalRecordOffset = 0
+                RightPhysicalRecordOffset = 0
+
+            Else
+
+                LeftPhysicalRecordOffset = Extent.PhysicalRecordOffset
+                RightPhysicalRecordOffset = Extent.PhysicalRecordOffset + LeftLength
+
+            End If
 
             Dim LeftExtent =
                 New ExtentIndexEntry With {
                     .LogicalOffset = Extent.LogicalOffset,
                     .LogicalLength = LeftLength,
                     .PhysicalRecordId = Extent.PhysicalRecordId,
-                    .PhysicalRecordOffset = Extent.PhysicalRecordOffset
+                    .PhysicalRecordOffset = LeftPhysicalRecordOffset
                 }
 
             Dim RightExtent =
@@ -209,20 +227,19 @@ Namespace Streams
                     .LogicalOffset = LogicalOffset,
                     .LogicalLength = RightLength,
                     .PhysicalRecordId = Extent.PhysicalRecordId,
-                    .PhysicalRecordOffset = Extent.PhysicalRecordOffset + LeftLength
+                    .PhysicalRecordOffset = RightPhysicalRecordOffset
                 }
 
             _Extents(ExtentIndex) = LeftExtent
             _Extents.Insert(ExtentIndex + 1, RightExtent)
 
             '
-            ' Splitting one extent into two creates one additional extent reference
-            ' to the same physical record.
+            ' Splitting one extent into two creates one additional extent
+            ' reference to the same physical record.
             '
-            ' RefCount is the number of extents referencing the physical record, so
-            ' a successful split must increment the physical record refcount.
-            '
-            IncrementPhysicalRecordRefCount(Extent.PhysicalRecordId)
+            If Extent.PhysicalRecordId <> SparsePhysicalRecordId Then
+                IncrementPhysicalRecordRefCount(Extent.PhysicalRecordId)
+            End If
 
             MarkAllMetadataPagesDirty()
 
@@ -339,32 +356,43 @@ Namespace Streams
             SplitExtentAt(LogicalOffset)
 
             Dim InsertIndex = FindExtentInsertIndex(LogicalOffset)
-            Dim InsertLength As Long = NewExtents.Sum(Function(extent) CLng(extent.LogicalLength))
-
-            For Index = InsertIndex To _Extents.Count - 1
-                Dim Extent = _Extents(Index)
-                Extent.LogicalOffset += InsertLength
-                _Extents(Index) = Extent
-            Next
-
-            Dim CurrentLogicalOffset = LogicalOffset
+            Dim InsertLength As Long = 0
             Dim Materialised As New List(Of ExtentIndexEntry)(NewExtents.Count)
 
             For Each extent In NewExtents
 
                 If extent.LogicalLength <= 0 Then Continue For
 
-                Dim NewExtent = extent
+                ValidateExtentReference(extent)
 
-                NewExtent.LogicalOffset = CurrentLogicalOffset
+                Dim NewExtent = extent
+                NewExtent.LogicalOffset = 0
 
                 Materialised.Add(NewExtent)
-
-                CurrentLogicalOffset += NewExtent.LogicalLength
+                InsertLength += NewExtent.LogicalLength
 
             Next
 
-            _Extents.InsertRange(InsertIndex, Materialised)
+            If Materialised.Count = 0 Then Return
+            If InsertLength <= 0 Then Return
+
+            Dim NewLayout As New List(Of ExtentIndexEntry)(_Extents.Count + Materialised.Count)
+
+            For Index = 0 To InsertIndex - 1
+                NewLayout.Add(_Extents(Index))
+            Next
+
+            NewLayout.AddRange(Materialised)
+
+            For Index = InsertIndex To _Extents.Count - 1
+                NewLayout.Add(_Extents(Index))
+            Next
+
+            RebaseExtentLogicalOffsets(NewLayout)
+
+            _Extents.Clear()
+            _Extents.AddRange(NewLayout)
+
             _Length += InsertLength
 
             MarkAllMetadataPagesDirty()
@@ -423,7 +451,7 @@ Namespace Streams
 
                     BoundaryReplacement =
                         New ExtentIndexEntry With {
-                            .LogicalOffset = LeftExtent.LogicalOffset,
+                            .LogicalOffset = 0,
                             .LogicalLength = CombinedLength,
                             .PhysicalRecordId = Record.RecordId,
                             .PhysicalRecordOffset = 0
@@ -435,60 +463,73 @@ Namespace Streams
 
             End If
 
+            Dim NewLayout As New List(Of ExtentIndexEntry)(_Extents.Count)
+
             If MaterialiseBoundaries Then
 
-                Dim RightExtent = _Extents(RightBoundaryIndex)
-                Dim LeftExtent = _Extents(LeftBoundaryIndex)
+                For Index = 0 To LeftBoundaryIndex - 1
+                    NewLayout.Add(_Extents(Index))
+                Next
 
-                DecrementPhysicalRecordRefCount(LeftExtent.PhysicalRecordId)
-                DecrementPhysicalRecordRefCount(RightExtent.PhysicalRecordId)
+                NewLayout.Add(BoundaryReplacement.Value)
 
-                Dim RemoveStart = LeftBoundaryIndex
-                Dim RemoveCount = RightBoundaryIndex - LeftBoundaryIndex + 1
+                For Index = RightBoundaryIndex + 1 To _Extents.Count - 1
+                    NewLayout.Add(_Extents(Index))
+                Next
+
+                For Index = LeftBoundaryIndex To RightBoundaryIndex
+                    Dim RemovedExtent = _Extents(Index)
+                    DecrementPhysicalRecordRefCount(RemovedExtent.PhysicalRecordId)
+                Next
+
+            Else
+
+                For Index = 0 To StartIndex - 1
+                    NewLayout.Add(_Extents(Index))
+                Next
+
+                For Index = EndIndex To _Extents.Count - 1
+                    NewLayout.Add(_Extents(Index))
+                Next
 
                 For Index = StartIndex To EndIndex - 1
                     Dim RemovedExtent = _Extents(Index)
                     DecrementPhysicalRecordRefCount(RemovedExtent.PhysicalRecordId)
                 Next
 
-                _Extents.RemoveRange(RemoveStart, RemoveCount)
-                _Extents.Insert(RemoveStart, BoundaryReplacement.Value)
-
-                Dim ShiftStartIndex = RemoveStart + 1
-                Dim ShiftAmount = ActualLength
-
-                For Index = ShiftStartIndex To _Extents.Count - 1
-                    Dim Extent = _Extents(Index)
-                    Extent.LogicalOffset -= ShiftAmount
-                    _Extents(Index) = Extent
-                Next
-
-                _Length -= ActualLength
-
-                MarkAllMetadataPagesDirty()
-
-                Return
-
             End If
 
-            For Index = StartIndex To EndIndex - 1
-                Dim RemovedExtent = _Extents(Index)
-                DecrementPhysicalRecordRefCount(RemovedExtent.PhysicalRecordId)
-            Next
+            RebaseExtentLogicalOffsets(NewLayout)
 
-            If EndIndex > StartIndex Then
-                _Extents.RemoveRange(StartIndex, EndIndex - StartIndex)
-            End If
-
-            For Index = StartIndex To _Extents.Count - 1
-                Dim Extent = _Extents(Index)
-                Extent.LogicalOffset -= ActualLength
-                _Extents(Index) = Extent
-            Next
+            _Extents.Clear()
+            _Extents.AddRange(NewLayout)
 
             _Length -= ActualLength
 
             MarkAllMetadataPagesDirty()
+
+        End Sub
+
+        Private Shared Sub RebaseExtentLogicalOffsets(Extents As IList(Of ExtentIndexEntry))
+
+            If Extents Is Nothing Then Throw New ArgumentNullException(NameOf(Extents))
+
+            Dim LogicalOffset As Long = 0
+
+            For Index = 0 To Extents.Count - 1
+
+                Dim Extent = Extents(Index)
+
+                If Extent.LogicalLength <= 0 Then
+                    Throw New InvalidDataException("Extent has an invalid logical length.")
+                End If
+
+                Extent.LogicalOffset = LogicalOffset
+                Extents(Index) = Extent
+
+                LogicalOffset += Extent.LogicalLength
+
+            Next
 
         End Sub
 
@@ -504,6 +545,7 @@ Namespace Streams
 
             Dim SourceEndOffset = SourceLogicalOffset + Length
             Dim CurrentOffset = SourceLogicalOffset
+
             Dim Segments As New List(Of ExtentIndexEntry)()
 
             While CurrentOffset < SourceEndOffset
@@ -518,10 +560,18 @@ Namespace Streams
                 Dim OffsetInsideExtent = CInt(CurrentOffset - Extent.LogicalOffset)
                 Dim SegmentLength = CInt(Math.Min(CLng(Extent.LogicalLength - OffsetInsideExtent), SourceEndOffset - CurrentOffset))
 
+                Dim SegmentPhysicalRecordOffset As Integer
+
+                If Extent.PhysicalRecordId = SparsePhysicalRecordId Then
+                    SegmentPhysicalRecordOffset = 0
+                Else
+                    SegmentPhysicalRecordOffset = Extent.PhysicalRecordOffset + OffsetInsideExtent
+                End If
+
                 Segments.Add(New ExtentIndexEntry With {
                     .LogicalLength = SegmentLength,
                     .PhysicalRecordId = Extent.PhysicalRecordId,
-                    .PhysicalRecordOffset = Extent.PhysicalRecordOffset + OffsetInsideExtent
+                    .PhysicalRecordOffset = SegmentPhysicalRecordOffset
                 })
 
                 CurrentOffset += SegmentLength
@@ -549,31 +599,39 @@ Namespace Streams
 
             End If
 
-            For Each segment In Segments
+            For Each Segment In Segments
 
-                If segment.PhysicalRecordId = SparsePhysicalRecordId Then
-                    Result.Add(segment)
-                    Continue For
-                End If
-
-                If Options.BisectLimit > 0 AndAlso segment.LogicalLength < Options.BisectLimit Then
-
-                    Dim Buffer(segment.LogicalLength - 1) As Byte
-
-                    ReadExtentBytes(segment, 0, Buffer, 0, segment.LogicalLength)
-
-                    Dim Record = WritePhysicalRecord(Buffer, segment.LogicalLength)
+                If Segment.PhysicalRecordId = SparsePhysicalRecordId Then
 
                     Result.Add(New ExtentIndexEntry With {
-                        .LogicalLength = segment.LogicalLength,
+                        .LogicalLength = Segment.LogicalLength,
+                        .PhysicalRecordId = SparsePhysicalRecordId,
+                        .PhysicalRecordOffset = 0
+                    })
+
+                    Continue For
+
+                End If
+
+                If Options.BisectLimit > 0 AndAlso Segment.LogicalLength < Options.BisectLimit Then
+
+                    Dim Buffer(Segment.LogicalLength - 1) As Byte
+
+                    ReadExtentBytes(Segment, 0, Buffer, 0, Segment.LogicalLength)
+
+                    Dim Record = WritePhysicalRecord(Buffer, Segment.LogicalLength)
+
+                    Result.Add(New ExtentIndexEntry With {
+                        .LogicalLength = Segment.LogicalLength,
                         .PhysicalRecordId = Record.RecordId,
                         .PhysicalRecordOffset = 0
                     })
 
                 Else
 
-                    IncrementPhysicalRecordRefCount(segment.PhysicalRecordId)
-                    Result.Add(segment)
+                    IncrementPhysicalRecordRefCount(Segment.PhysicalRecordId)
+
+                    Result.Add(Segment)
 
                 End If
 
@@ -590,19 +648,9 @@ Namespace Streams
             For Each extent In _Extents
 
                 If extent.LogicalOffset < 0 Then Throw New InvalidDataException("Extent has a negative logical offset.")
-                If extent.LogicalLength <= 0 Then Throw New InvalidDataException("Extent has an invalid logical length.")
                 If extent.LogicalOffset <> ExpectedOffset Then Throw New InvalidDataException($"Extent layout contains a gap or overlap at logical offset {ExpectedOffset}.")
-                If extent.PhysicalRecordOffset < 0 Then Throw New InvalidDataException("Extent has a negative physical record offset.")
 
-                If extent.PhysicalRecordId <> SparsePhysicalRecordId Then
-
-                    Dim Record = GetPhysicalRecord(extent.PhysicalRecordId)
-
-                    If extent.PhysicalRecordOffset + extent.LogicalLength > Record.PlainLength Then
-                        Throw New InvalidDataException($"Extent references beyond physical record {extent.PhysicalRecordId}.")
-                    End If
-
-                End If
+                ValidateExtentReference(extent)
 
                 ExpectedOffset = extent.LogicalOffset + CLng(extent.LogicalLength)
 
@@ -610,6 +658,34 @@ Namespace Streams
 
             If ExpectedOffset <> _Length Then
                 Throw New InvalidDataException($"Extent logical length mismatch. Expected {_Length}, found {ExpectedOffset}.")
+            End If
+
+        End Sub
+
+        Private Sub ValidateExtentReference(Extent As ExtentIndexEntry)
+
+            If Extent.LogicalLength <= 0 Then
+                Throw New InvalidDataException("Extent has an invalid logical length.")
+            End If
+
+            If Extent.PhysicalRecordOffset < 0 Then
+                Throw New InvalidDataException("Extent has a negative physical record offset.")
+            End If
+
+            If Extent.PhysicalRecordId = SparsePhysicalRecordId Then
+
+                If Extent.PhysicalRecordOffset <> 0 Then
+                    Throw New InvalidDataException("Sparse extent has a non-zero physical record offset.")
+                End If
+
+                Return
+
+            End If
+
+            Dim Record = GetPhysicalRecord(Extent.PhysicalRecordId)
+
+            If Extent.PhysicalRecordOffset + Extent.LogicalLength > Record.PlainLength Then
+                Throw New InvalidDataException($"Extent references beyond physical record {Extent.PhysicalRecordId}.")
             End If
 
         End Sub

@@ -504,7 +504,16 @@ Namespace Streams
 
             Public PhysicalRecordId As Long
 
-            Public PhysicalRecordOffset As Integer
+            Dim _PhysicalRecordOffset As Integer
+            Public Property PhysicalRecordOffset As Integer
+                Get
+                    Return _PhysicalRecordOffset
+                End Get
+                Set
+                    _PhysicalRecordOffset = Value
+                End Set
+            End Property
+
 
         End Structure
 

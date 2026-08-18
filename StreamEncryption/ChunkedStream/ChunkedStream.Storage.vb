@@ -99,28 +99,153 @@ Namespace Streams
         End Sub
 
         Private Sub AddFreeChunkSpace(Offset As Long,
-                                      Length As Long)
+                              Length As Long)
 
             If Offset < DataStartOffset Then Return
             If Length <= 0 Then Return
+            If IsRangeSafeForPhysicalRecord(Offset, Length) = False Then Return
 
             _FreeChunkSpaces.Add(Offset, Length)
 
         End Sub
 
-        Private Sub AddFreeIndexPageSpace(Offset As Long, Length As Long)
+        Private Shared Function StorageRangesOverlap(Offset1 As Long,
+                                                     Length1 As Long,
+                                                     Offset2 As Long,
+                                                     Length2 As Long) As Boolean
+
+            Return Offset1 < Offset2 + Length2 AndAlso Offset2 < Offset1 + Length1
+
+        End Function
+
+        Private Function GetActiveMetadataRanges() As List(Of Tuple(Of Long, Long))
+
+            Dim Result As New List(Of Tuple(Of Long, Long))()
+
+            For Each Descriptor In _ExtentPageDescriptors.Values
+                If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                    Result.Add(Tuple.Create(Descriptor.Offset, Descriptor.Offset + CLng(Descriptor.Length)))
+                End If
+            Next
+
+            For Each Descriptor In _ExtentDirectoryPageDescriptors.Values
+                If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                    Result.Add(Tuple.Create(Descriptor.Offset, Descriptor.Offset + CLng(Descriptor.Length)))
+                End If
+            Next
+
+            For Each Descriptor In _PhysicalRecordPageDescriptors.Values
+                If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                    Result.Add(Tuple.Create(Descriptor.Offset, Descriptor.Offset + CLng(Descriptor.Length)))
+                End If
+            Next
+
+            For Each Descriptor In _PhysicalRecordDirectoryPageDescriptors.Values
+                If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                    Result.Add(Tuple.Create(Descriptor.Offset, Descriptor.Offset + CLng(Descriptor.Length)))
+                End If
+            Next
+
+            For Each Descriptor In _HoleDirectoryPageDescriptors.Values
+                If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                    Result.Add(Tuple.Create(Descriptor.Offset, Descriptor.Offset + CLng(Descriptor.Length)))
+                End If
+            Next
+
+            If _MetadataRootOffset > 0 AndAlso _MetadataRootLength > 0 Then
+                Result.Add(Tuple.Create(_MetadataRootOffset, _MetadataRootOffset + CLng(_MetadataRootLength)))
+            End If
+
+            Return Result
+
+        End Function
+
+        Private Function RangeOverlapsLivePhysicalRecord(Offset As Long,
+                                                         Length As Long) As Boolean
+
+            If Length <= 0 Then Return False
+
+            For Each Record In _PhysicalRecords.Values
+
+                If Record.RefCount <= 0 Then Continue For
+
+                If StorageRangesOverlap(Offset,
+                                        Length,
+                                        Record.PhysicalOffset,
+                                        Record.PhysicalLength) Then
+
+                    Return True
+
+                End If
+
+            Next
+
+            Return False
+
+        End Function
+
+        Private Function RangeOverlapsActiveMetadata(Offset As Long,
+                                                     Length As Long) As Boolean
+
+            If Length <= 0 Then Return False
+
+            For Each Range In GetActiveMetadataRanges()
+
+                If StorageRangesOverlap(Offset,
+                                        Length,
+                                        Range.Item1,
+                                        Range.Item2 - Range.Item1) Then
+
+                    Return True
+
+                End If
+
+            Next
+
+            Return False
+
+        End Function
+
+        Private Function IsRangeSafeForPhysicalRecord(Offset As Long,
+                                                      Length As Long) As Boolean
+
+            If Offset < DataStartOffset Then Return False
+            If Length <= 0 Then Return False
+            If RangeOverlapsLivePhysicalRecord(Offset, Length) Then Return False
+            If RangeOverlapsActiveMetadata(Offset, Length) Then Return False
+
+            Return True
+
+        End Function
+
+        Private Function IsRangeSafeForMetadata(Offset As Long,
+                                                Length As Long) As Boolean
+
+            If Offset < DataStartOffset Then Return False
+            If Length <= 0 Then Return False
+            If RangeOverlapsLivePhysicalRecord(Offset, Length) Then Return False
+
+            Return True
+
+        End Function
+
+        Private Sub AddFreeIndexPageSpace(Offset As Long,
+                                          Length As Long)
 
             If Offset < DataStartOffset Then Return
             If Length <= 0 Then Return
+            If IsRangeSafeForMetadata(Offset, Length) = False Then Return
 
             _FreeIndexPageSpaces.Add(Offset, Length)
 
         End Sub
 
-        Private Sub AddFreeIndexDirectoryPageSpace(Offset As Long, Length As Long)
+        Private Sub AddFreeIndexDirectoryPageSpace(Offset As Long,
+                                                   Length As Long)
 
             If Offset < DataStartOffset Then Return
             If Length <= 0 Then Return
+            If IsRangeSafeForMetadata(Offset, Length) = False Then Return
 
             _FreeIndexDirectoryPageSpaces.Add(Offset, Length)
 
@@ -142,18 +267,27 @@ Namespace Streams
 
             If Records Is Nothing Then Return
 
-            For Each record In Records
+            For Each Record In Records
 
-                Select Case record.SpaceType
+                Select Case Record.SpaceType
 
                     Case HoleSpaceTypes.ChunkRecord
-                        _FreeChunkSpaces.Add(record.Offset, record.Length)
+
+                        If IsRangeSafeForPhysicalRecord(Record.Offset, Record.Length) Then
+                            _FreeChunkSpaces.Add(Record.Offset, Record.Length)
+                        End If
 
                     Case HoleSpaceTypes.IndexPage
-                        _FreeIndexPageSpaces.Add(record.Offset, record.Length)
+
+                        If IsRangeSafeForMetadata(Record.Offset, Record.Length) Then
+                            _FreeIndexPageSpaces.Add(Record.Offset, Record.Length)
+                        End If
 
                     Case HoleSpaceTypes.DirectoryPage
-                        _FreeIndexDirectoryPageSpaces.Add(record.Offset, record.Length)
+
+                        If IsRangeSafeForMetadata(Record.Offset, Record.Length) Then
+                            _FreeIndexDirectoryPageSpaces.Add(Record.Offset, Record.Length)
+                        End If
 
                 End Select
 
@@ -400,27 +534,52 @@ Namespace Streams
 
             _FreeChunkSpaces.Clear()
 
-            Dim LiveRanges =
-                _PhysicalRecords.Values.
-                                 Where(Function(record) record.RefCount > 0).
-                                 Select(Function(record) Tuple.Create(record.PhysicalOffset, record.PhysicalOffset + CLng(record.PhysicalLength))).
-                                 OrderBy(Function(range) range.Item1).
-                                 ToList()
+            Dim ReservedRanges As New List(Of Tuple(Of Long, Long))()
 
-            Dim Cursor = CLng(DataStartOffset)
+            For Each Record In _PhysicalRecords.Values
 
-            For Each liveRange In LiveRanges
+                If Record.RefCount <= 0 Then Continue For
 
-                If liveRange.Item1 > Cursor Then
-                    AddFreeChunkSpace(Cursor, liveRange.Item1 - Cursor)
-                End If
-
-                Cursor = Math.Max(Cursor, liveRange.Item2)
+                ReservedRanges.Add(
+                    Tuple.Create(
+                        Record.PhysicalOffset,
+                        Record.PhysicalOffset + CLng(Record.PhysicalLength)))
 
             Next
 
-            If _IndexOffset > Cursor Then
-                AddFreeChunkSpace(Cursor, _IndexOffset - Cursor)
+            ReservedRanges.AddRange(GetActiveMetadataRanges())
+
+            ReservedRanges =
+                ReservedRanges.
+                Where(Function(range) range.Item2 > DataStartOffset AndAlso range.Item2 > range.Item1).
+                OrderBy(Function(range) range.Item1).
+                ToList()
+
+            Dim ScanEnd = Math.Max(_IndexOffset, GetDataEndFromIndex())
+
+            For Each Range In ReservedRanges
+                ScanEnd = Math.Max(ScanEnd, Range.Item2)
+            Next
+
+            Dim Cursor = CLng(DataStartOffset)
+
+            For Each Range In ReservedRanges
+
+                Dim RangeStart = Math.Max(CLng(DataStartOffset), Range.Item1)
+                Dim RangeEnd = Range.Item2
+
+                If RangeEnd <= RangeStart Then Continue For
+
+                If RangeStart > Cursor Then
+                    AddFreeChunkSpace(Cursor, RangeStart - Cursor)
+                End If
+
+                Cursor = Math.Max(Cursor, RangeEnd)
+
+            Next
+
+            If ScanEnd > Cursor Then
+                AddFreeChunkSpace(Cursor, ScanEnd - Cursor)
             End If
 
         End Sub

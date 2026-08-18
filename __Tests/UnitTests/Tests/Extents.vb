@@ -117,6 +117,581 @@ Namespace Tests
 
 
 
+            ''' <summary>
+            ''' Verifies that a clone created inside a checkpoint is fully discarded by rollback,
+            ''' including the associated shared physical-record references.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CloneRollbackRestoresRefCounts()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo("Hello"),
+                        .ChunkSize = 1024
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Original =
+                            GenerateRandomData(
+                                Options.ChunkSize * 3,
+                                8)
+
+                        Cs.Write(0, Original)
+
+                        Using cp = Cs.CreateCheckpoint()
+                            Cs.Clone(
+                                0,
+                                Original.Length,
+                                Original.Length)
+
+                            Dim DuringClone = Cs.GetStructure()
+
+                            AssertEqual(
+                                6,
+                                DuringClone.Chunks.Count,
+                                "Expected cloned extents during checkpoint.")
+
+                        End Using
+
+                        Dim AfterRollback = Cs.GetStructure()
+
+                        AssertEqual(
+                            3,
+                            AfterRollback.Chunks.Count,
+                            "Rollback should remove cloned extents.")
+
+                        Dim Patch =
+                            GenerateRandomData(
+                                Options.ChunkSize,
+                                99)
+
+                        Cs.Write(
+                            Options.ChunkSize,
+                            Patch)
+
+                        Dim Expected =
+                            DirectCast(Original.Clone(), Byte())
+
+                        Buffer.BlockCopy(
+                            Patch,
+                            0,
+                            Expected,
+                            Options.ChunkSize,
+                            Patch.Length)
+
+                        AssertBytesEqual(
+                            Expected,
+                            Cs.ToArray(),
+                            "Rollback failed to restore original shared-reference state.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+
+
+
+
+            ''' <summary>
+            ''' Verifies that shrinking the stream via SetLength removes cloned extents and
+            ''' updates shared physical-record references correctly.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub SetLengthShrinkRemovesSharedCloneExtents()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo("Hello"),
+                        .ChunkSize = 1024
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Data =
+                            GenerateRandomData(
+                                Options.ChunkSize * 4,
+                                8)
+
+                        Cs.Write(0, Data)
+
+                        Cs.Clone(
+                            Options.ChunkSize,
+                            Options.ChunkSize * 2,
+                            Data.Length)
+
+                        Cs.SetLength(Data.Length)
+
+                        AssertBytesEqual(
+                            Data,
+                            Cs.ToArray(),
+                            "SetLength removed original data when truncating clone area.")
+
+                        Dim Patch =
+                            GenerateRandomData(
+                                Options.ChunkSize,
+                                88)
+
+                        Cs.Write(
+                            Options.ChunkSize,
+                            Patch)
+
+                        Dim Expected =
+                            DirectCast(Data.Clone(), Byte())
+
+                        Buffer.BlockCopy(
+                            Patch,
+                            0,
+                            Expected,
+                            Options.ChunkSize,
+                            Patch.Length)
+
+                        AssertBytesEqual(
+                            Expected,
+                            Cs.ToArray(),
+                            "SetLength failed to release cloned shared references correctly.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+
+            ''' <summary>
+            ''' Verifies that SetLength performed inside a checkpoint correctly restores
+            ''' shared physical-record references after rollback.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub SetLengthRollbackRestoresSharedReferences()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo("Hello"),
+                        .ChunkSize = 1024
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Data =
+                            GenerateRandomData(
+                                Options.ChunkSize * 4,
+                                8)
+
+                        Cs.Write(0, Data)
+
+                        Cs.Clone(
+                            Options.ChunkSize,
+                            Options.ChunkSize,
+                            Data.Length)
+
+                        Dim ClonedLength = Cs.Length
+
+                        Using cp = Cs.CreateCheckpoint()
+
+                            Cs.SetLength(Data.Length)
+
+                            AssertEqual(
+                                CLng(Data.Length),
+                                Cs.Length,
+                                "Expected clone to be truncated during checkpoint.")
+
+                        End Using
+
+
+                        AssertEqual(
+                            ClonedLength,
+                            Cs.Length,
+                            "Rollback should restore truncated cloned extent.")
+
+                        Dim Expected =
+                            New Byte(Data.Length + Options.ChunkSize - 1) {}
+
+                        Buffer.BlockCopy(
+                            Data,
+                            0,
+                            Expected,
+                            0,
+                            Data.Length)
+
+                        Buffer.BlockCopy(
+                            Data,
+                            Options.ChunkSize,
+                            Expected,
+                            Data.Length,
+                            Options.ChunkSize)
+
+                        AssertBytesEqual(
+                            Expected,
+                            Cs.ToArray(),
+                            "Rollback failed to restore shared cloned extent.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+
+            ''' <summary>
+            ''' Verifies that a clone created inside a checkpoint is discarded by checkpoint rollback,
+            ''' including the shared physical-record references created by the clone.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CloneCheckpointRollbackRestoresRefCounts()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo("Hello"),
+                        .ChunkSize = 1024
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Data = GenerateRandomData(Options.ChunkSize * 3, 8)
+
+                        Cs.Write(0, Data)
+
+                        Dim Before = Cs.GetStructure()
+                        Dim BBefore = Before.Chunks.Single(Function(chunk) chunk.LogicalOffset = Options.ChunkSize)
+
+                        AssertTrue(BBefore.PhysicalRecordId.HasValue,
+                                   "Original B extent should have a physical record id before checkpoint clone.")
+
+                        Dim BRecordId = BBefore.PhysicalRecordId.Value
+
+                        AssertEqual(1,
+                                    Before.Chunks.Where(Function(chunk) chunk.PhysicalRecordId.HasValue AndAlso chunk.PhysicalRecordId.Value = BRecordId).Count,
+                                    "Before checkpoint clone, B physical record should have exactly one visible extent reference.")
+
+                        Using Checkpoint = Cs.CreateCheckpoint()
+
+                            Cs.Clone(0, Data.Length, Data.Length)
+
+                            Dim DuringClone = Cs.GetStructure()
+
+                            AssertEqual(6,
+                                        DuringClone.Chunks.Count,
+                                        "Checkpoint clone should create three additional cloned extents.")
+
+                            AssertEqual(2,
+                                        DuringClone.Chunks.Where(Function(chunk) chunk.PhysicalRecordId.HasValue AndAlso chunk.PhysicalRecordId.Value = BRecordId).Count,
+                                        "During checkpoint clone, B physical record should have two visible extent references.")
+
+                            Cs.Validate()
+
+                        End Using
+
+                        Dim AfterRollback = Cs.GetStructure()
+
+                        AssertEqual(3,
+                                    AfterRollback.Chunks.Count,
+                                    "Disposing the checkpoint should roll back the cloned extents.")
+
+                        AssertEqual(1,
+                                    AfterRollback.Chunks.Where(Function(chunk) chunk.PhysicalRecordId.HasValue AndAlso chunk.PhysicalRecordId.Value = BRecordId).Count,
+                                    "After checkpoint rollback, B physical record should have exactly one visible extent reference.")
+
+                        AssertBytesEqual(Data,
+                                         Cs.ToArray(),
+                                         "Checkpoint rollback after clone corrupted original data.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that removing a cloned range decrements the shared physical-record references
+            ''' and leaves the original source range readable.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub RemoveSharedCloneUpdatesRefCounts()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo("Hello"),
+                        .ChunkSize = 1024
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Data = GenerateRandomData(Options.ChunkSize * 4, 8)
+
+                        Cs.Write(0, Data)
+
+                        Dim SourceOffset = CLng(Options.ChunkSize)
+                        Dim CloneLength = Options.ChunkSize * 2
+                        Dim CloneOffset = CLng(Data.Length)
+
+                        Cs.Clone(SourceOffset, CloneLength, CloneOffset)
+
+                        Dim AfterClone = Cs.GetStructure()
+                        Dim SourceB = AfterClone.Chunks.Single(Function(chunk) chunk.LogicalOffset = SourceOffset)
+
+                        AssertTrue(SourceB.PhysicalRecordId.HasValue,
+                                   "Source B extent should have a physical record id after clone.")
+
+                        Dim SourceBRecordId = SourceB.PhysicalRecordId.Value
+
+                        AssertEqual(2,
+                                    AfterClone.Chunks.Where(Function(chunk) chunk.PhysicalRecordId.HasValue AndAlso chunk.PhysicalRecordId.Value = SourceBRecordId).Count,
+                                    "After clone, source B physical record should have two visible extent references.")
+
+                        Cs.Remove(CloneOffset, CloneLength)
+
+                        Dim AfterRemove = Cs.GetStructure()
+
+                        AssertEqual(1,
+                                    AfterRemove.Chunks.Where(Function(chunk) chunk.PhysicalRecordId.HasValue AndAlso chunk.PhysicalRecordId.Value = SourceBRecordId).Count,
+                                    "After removing the clone, source B physical record should have exactly one visible extent reference.")
+
+                        AssertBytesEqual(Data,
+                                         Cs.ToArray(),
+                                         "Removing cloned shared range damaged original data.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that shrinking away a cloned range with SetLength decrements shared
+            ''' physical-record references and leaves the original data intact.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub SetLengthShrinkSharedCloneUpdatesRefCounts()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                    .EncryptionInfo = New ChunkedStream.EncryptionInfo("Hello"),
+                    .ChunkSize = 1024
+                }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Data = GenerateRandomData(Options.ChunkSize * 4, 8)
+
+                        Cs.Write(0, Data)
+
+                        Dim SourceOffset = CLng(Options.ChunkSize)
+                        Dim CloneLength = Options.ChunkSize * 2
+                        Dim CloneOffset = CLng(Data.Length)
+
+                        Cs.Clone(SourceOffset, CloneLength, CloneOffset)
+
+                        Dim AfterClone = Cs.GetStructure()
+                        Dim SourceB = AfterClone.Chunks.Single(Function(chunk) chunk.LogicalOffset = SourceOffset)
+
+                        AssertTrue(SourceB.PhysicalRecordId.HasValue,
+                               "Source B extent should have a physical record id after clone.")
+
+                        Dim SourceBRecordId = SourceB.PhysicalRecordId.Value
+
+                        AssertEqual(2,
+                                AfterClone.Chunks.Where(Function(chunk) chunk.PhysicalRecordId.HasValue AndAlso chunk.PhysicalRecordId.Value = SourceBRecordId).Count,
+                                "After clone, source B physical record should have two visible extent references.")
+
+                        Cs.SetLength(Data.Length)
+
+                        Dim AfterSetLength = Cs.GetStructure()
+
+                        AssertEqual(1,
+                                AfterSetLength.Chunks.Where(Function(chunk) chunk.PhysicalRecordId.HasValue AndAlso chunk.PhysicalRecordId.Value = SourceBRecordId).Count,
+                                "After SetLength removes the clone, source B physical record should have exactly one visible extent reference.")
+
+                        AssertBytesEqual(Data,
+                                     Cs.ToArray(),
+                                     "SetLength shrink removed or damaged original data.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that removing a shared clone inside a checkpoint is undone by checkpoint rollback,
+            ''' including restoration of the shared physical-record references.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub RemoveSharedCloneCheckpointRollbackRestoresRefCounts()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo("Hello"),
+                        .ChunkSize = 1024
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Data = GenerateRandomData(Options.ChunkSize * 4, 8)
+
+                        Cs.Write(0, Data)
+
+                        Dim SourceOffset = CLng(Options.ChunkSize)
+                        Dim CloneLength = Options.ChunkSize
+                        Dim CloneOffset = CLng(Data.Length)
+
+                        Cs.Clone(SourceOffset, CloneLength, CloneOffset)
+
+                        Dim AfterClone = Cs.GetStructure()
+                        Dim SourceB = AfterClone.Chunks.Single(Function(chunk) chunk.LogicalOffset = SourceOffset)
+
+                        AssertTrue(SourceB.PhysicalRecordId.HasValue,
+                                   "Source B extent should have a physical record id after clone.")
+
+                        Dim SourceBRecordId = SourceB.PhysicalRecordId.Value
+
+                        AssertEqual(2,
+                                    AfterClone.Chunks.Where(Function(chunk) chunk.PhysicalRecordId.HasValue AndAlso chunk.PhysicalRecordId.Value = SourceBRecordId).Count,
+                                    "After clone, source B physical record should have two visible extent references.")
+
+                        Using Checkpoint = Cs.CreateCheckpoint()
+
+                            Cs.Remove(CloneOffset, CloneLength)
+
+                            Dim DuringRemove = Cs.GetStructure()
+
+                            AssertEqual(1,
+                                        DuringRemove.Chunks.Where(Function(chunk) chunk.PhysicalRecordId.HasValue AndAlso chunk.PhysicalRecordId.Value = SourceBRecordId).Count,
+                                        "During checkpoint remove, source B physical record should have one visible extent reference.")
+
+                            Cs.Validate()
+
+                        End Using
+
+                        Dim AfterRollback = Cs.GetStructure()
+
+                        AssertEqual(2,
+                                    AfterRollback.Chunks.Where(Function(chunk) chunk.PhysicalRecordId.HasValue AndAlso chunk.PhysicalRecordId.Value = SourceBRecordId).Count,
+                                    "After checkpoint rollback, removed clone reference should be restored.")
+
+                        Dim Expected = New Byte(Data.Length + CloneLength - 1) {}
+                        Buffer.BlockCopy(Data, 0, Expected, 0, Data.Length)
+                        Buffer.BlockCopy(Data, CInt(SourceOffset), Expected, CInt(CloneOffset), CloneLength)
+
+                        AssertBytesEqual(Expected,
+                                         Cs.ToArray(),
+                                         "Checkpoint rollback after remove failed to restore cloned data.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that shrinking away a shared clone inside a checkpoint is undone by checkpoint rollback,
+            ''' including restoration of the shared physical-record references.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub SetLengthSharedCloneCheckpointRollbackRestoresRefCounts()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo("Hello"),
+                        .ChunkSize = 1024
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Data = GenerateRandomData(Options.ChunkSize * 4, 8)
+
+                        Cs.Write(0, Data)
+
+                        Dim SourceOffset = CLng(Options.ChunkSize)
+                        Dim CloneLength = Options.ChunkSize
+                        Dim CloneOffset = CLng(Data.Length)
+
+                        Cs.Clone(SourceOffset, CloneLength, CloneOffset)
+
+                        Dim AfterClone = Cs.GetStructure()
+                        Dim SourceB = AfterClone.Chunks.Single(Function(chunk) chunk.LogicalOffset = SourceOffset)
+
+                        AssertTrue(SourceB.PhysicalRecordId.HasValue,
+                                   "Source B extent should have a physical record id after clone.")
+
+                        Dim SourceBRecordId = SourceB.PhysicalRecordId.Value
+                        Dim ClonedLength = Cs.Length
+
+                        AssertEqual(2,
+                                    AfterClone.Chunks.Where(Function(chunk) chunk.PhysicalRecordId.HasValue AndAlso chunk.PhysicalRecordId.Value = SourceBRecordId).Count,
+                                    "After clone, source B physical record should have two visible extent references.")
+
+                        Using Checkpoint = Cs.CreateCheckpoint()
+
+                            Cs.SetLength(Data.Length)
+
+                            Dim DuringSetLength = Cs.GetStructure()
+
+                            AssertEqual(CLng(Data.Length),
+                                        Cs.Length,
+                                        "During checkpoint SetLength, logical length should be truncated.")
+
+                            AssertEqual(1,
+                                        DuringSetLength.Chunks.Where(Function(chunk) chunk.PhysicalRecordId.HasValue AndAlso chunk.PhysicalRecordId.Value = SourceBRecordId).Count,
+                                        "During checkpoint SetLength, source B physical record should have one visible extent reference.")
+
+                            Cs.Validate()
+
+                        End Using
+
+                        Dim AfterRollback = Cs.GetStructure()
+
+                        AssertEqual(ClonedLength,
+                                    Cs.Length,
+                                    "Checkpoint rollback should restore the cloned logical length.")
+
+                        AssertEqual(2,
+                                    AfterRollback.Chunks.Where(Function(chunk) chunk.PhysicalRecordId.HasValue AndAlso chunk.PhysicalRecordId.Value = SourceBRecordId).Count,
+                                    "After checkpoint rollback, SetLength should restore the cloned shared reference.")
+
+                        Dim Expected = New Byte(Data.Length + CloneLength - 1) {}
+                        Buffer.BlockCopy(Data, 0, Expected, 0, Data.Length)
+                        Buffer.BlockCopy(Data, CInt(SourceOffset), Expected, CInt(CloneOffset), CloneLength)
+
+                        AssertBytesEqual(Expected,
+                                         Cs.ToArray(),
+                                         "Checkpoint rollback after SetLength failed to restore cloned data.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+
+
+
 
 
 
