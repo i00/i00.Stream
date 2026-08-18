@@ -106,9 +106,108 @@ Namespace Streams
             Record.RefCount += 1
             _PhysicalRecords(RecordId) = Record
 
-            MarkAllMetadataPagesDirty()
+            MarkPhysicalRecordDirty(RecordId)
 
         End Sub
+
+        Private Sub MarkExtentPageRangeDirty(FirstExtentIndex As Integer,
+                                             LastExtentIndex As Integer)
+
+            If _IndexPageEntryCount <= 0 Then Return
+            If _Extents.Count = 0 Then Return
+
+            Dim FirstIndex = Math.Max(0, FirstExtentIndex)
+            Dim LastIndex = Math.Min(_Extents.Count - 1, LastExtentIndex)
+
+            If LastIndex < FirstIndex Then Return
+
+            Dim FirstPage = FirstIndex \ _IndexPageEntryCount
+            Dim LastPage = LastIndex \ _IndexPageEntryCount
+
+            For PageNumber = FirstPage To LastPage
+                _DirtyExtentPages.Add(PageNumber)
+            Next
+
+        End Sub
+
+        Private Sub MarkExtentPagesDirtyFromIndex(ExtentIndex As Integer)
+
+            If _IndexPageEntryCount <= 0 Then Return
+            If _Extents.Count = 0 Then Return
+
+            MarkExtentPageRangeDirty(ExtentIndex, _Extents.Count - 1)
+
+        End Sub
+
+        Private Sub MarkExtentPagesDirtyForReplacement(StartIndex As Integer,
+                                                       RemovedExtentCount As Integer,
+                                                       InsertedExtentCount As Integer)
+
+            If _IndexPageEntryCount <= 0 Then Return
+            If _Extents.Count = 0 Then Return
+
+            Dim SafeStartIndex = Math.Max(0, Math.Min(StartIndex, _Extents.Count - 1))
+
+            If RemovedExtentCount = InsertedExtentCount Then
+
+                Dim DirtyCount = Math.Max(1, InsertedExtentCount)
+                MarkExtentPageRangeDirty(SafeStartIndex, SafeStartIndex + DirtyCount - 1)
+                Return
+
+            End If
+
+            '
+            ' If the extent count changed, every later ordinal can shift to a different
+            ' page. With the current dense ordinal metadata format, pages from the change
+            ' point onward must be rewritten.
+            '
+            MarkExtentPagesDirtyFromIndex(SafeStartIndex)
+
+        End Sub
+
+        Private Function GetPhysicalRecordOrdinal(RecordId As Long) As Integer
+
+            Dim Ordinal = 0
+
+            For Each record In _PhysicalRecords.Values.OrderBy(Function(x) x.RecordId)
+
+                If record.RecordId = RecordId Then
+                    Return Ordinal
+                End If
+
+                Ordinal += 1
+
+            Next
+
+            Throw New InvalidDataException($"Physical record {RecordId} was not found.")
+
+        End Function
+
+        Private Sub MarkPhysicalRecordDirty(RecordId As Long)
+
+            If RecordId = SparsePhysicalRecordId Then Return
+
+            MarkPhysicalRecordPageDirtyByOrdinal(GetPhysicalRecordOrdinal(RecordId))
+
+        End Sub
+
+        Private Sub MarkPhysicalRecordPagesDirtyFromOrdinal(Ordinal As Integer)
+
+            If _IndexPageEntryCount <= 0 Then Return
+            If Ordinal < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Ordinal))
+            If _PhysicalRecords.Count = 0 Then Return
+
+            Dim FirstPage = Math.Max(0, Ordinal \ _IndexPageEntryCount)
+            Dim PageCount = GetIndexPageCount(_PhysicalRecords.Count, _IndexPageEntryCount)
+
+            If PageCount <= 0 Then Return
+
+            For PageNumber = FirstPage To PageCount - 1
+                _DirtyPhysicalRecordPages.Add(PageNumber)
+            Next
+
+        End Sub
+
 
         Private Sub DecrementPhysicalRecordRefCount(RecordId As Long)
 
@@ -123,7 +222,7 @@ Namespace Streams
             Record.RefCount -= 1
             _PhysicalRecords(RecordId) = Record
 
-            MarkAllMetadataPagesDirty()
+            MarkPhysicalRecordDirty(RecordId)
 
             If Record.RefCount <> 0 Then Return
 
@@ -140,6 +239,7 @@ Namespace Streams
 
             If RecordId = SparsePhysicalRecordId Then Return
 
+            Dim RemovedOrdinal = GetPhysicalRecordOrdinal(RecordId)
             Dim Record = GetPhysicalRecord(RecordId)
 
             If Record.RefCount <> 0 Then
@@ -147,9 +247,14 @@ Namespace Streams
             End If
 
             AddFreeChunkSpace(Record.PhysicalOffset, Record.PhysicalLength)
+
             _PhysicalRecords.Remove(RecordId)
 
-            MarkAllMetadataPagesDirty()
+            '
+            ' Physical-record pages are stored by RecordId order. Removing one entry shifts
+            ' every later physical-record entry left by one ordinal.
+            '
+            MarkPhysicalRecordPagesDirtyFromOrdinal(RemovedOrdinal)
 
         End Sub
 
@@ -191,8 +296,7 @@ Namespace Streams
 
             Dim Extent = _Extents(ExtentIndex)
 
-            If LogicalOffset = Extent.LogicalOffset OrElse
-               LogicalOffset = GetExtentEnd(Extent) Then
+            If LogicalOffset = Extent.LogicalOffset OrElse LogicalOffset = GetExtentEnd(Extent) Then
                 Return
             End If
 
@@ -203,15 +307,11 @@ Namespace Streams
             Dim RightPhysicalRecordOffset As Integer
 
             If Extent.PhysicalRecordId = SparsePhysicalRecordId Then
-
                 LeftPhysicalRecordOffset = 0
                 RightPhysicalRecordOffset = 0
-
             Else
-
                 LeftPhysicalRecordOffset = Extent.PhysicalRecordOffset
                 RightPhysicalRecordOffset = Extent.PhysicalRecordOffset + LeftLength
-
             End If
 
             Dim LeftExtent =
@@ -233,15 +333,15 @@ Namespace Streams
             _Extents(ExtentIndex) = LeftExtent
             _Extents.Insert(ExtentIndex + 1, RightExtent)
 
-            '
-            ' Splitting one extent into two creates one additional extent
-            ' reference to the same physical record.
-            '
             If Extent.PhysicalRecordId <> SparsePhysicalRecordId Then
                 IncrementPhysicalRecordRefCount(Extent.PhysicalRecordId)
             End If
 
-            MarkAllMetadataPagesDirty()
+            '
+            ' Splitting inserts one extent into the dense extent table, so later extent
+            ' ordinals can shift. Only pages from the split point onward are affected.
+            '
+            MarkExtentPagesDirtyFromIndex(ExtentIndex)
 
         End Sub
 
@@ -353,6 +453,8 @@ Namespace Streams
             If NewExtents Is Nothing Then Throw New ArgumentNullException(NameOf(NewExtents))
             If NewExtents.Count = 0 Then Return
 
+            Dim OldExtentCount = _Extents.Count
+
             SplitExtentAt(LogicalOffset)
 
             Dim InsertIndex = FindExtentInsertIndex(LogicalOffset)
@@ -395,7 +497,11 @@ Namespace Streams
 
             _Length += InsertLength
 
-            MarkAllMetadataPagesDirty()
+            '
+            ' Appends dirty only the new tail pages. True middle inserts shift later
+            ' extents and therefore dirty pages from the insertion point onward.
+            '
+            MarkExtentPagesDirtyForReplacement(InsertIndex, 0, Materialised.Count)
 
         End Sub
 
@@ -464,8 +570,15 @@ Namespace Streams
             End If
 
             Dim NewLayout As New List(Of ExtentIndexEntry)(_Extents.Count)
+            Dim DirtyStartIndex As Integer
+            Dim RemovedExtentCount As Integer
+            Dim InsertedExtentCount As Integer
 
             If MaterialiseBoundaries Then
+
+                DirtyStartIndex = LeftBoundaryIndex
+                RemovedExtentCount = RightBoundaryIndex - LeftBoundaryIndex + 1
+                InsertedExtentCount = 1
 
                 For Index = 0 To LeftBoundaryIndex - 1
                     NewLayout.Add(_Extents(Index))
@@ -483,6 +596,10 @@ Namespace Streams
                 Next
 
             Else
+
+                DirtyStartIndex = StartIndex
+                RemovedExtentCount = EndIndex - StartIndex
+                InsertedExtentCount = 0
 
                 For Index = 0 To StartIndex - 1
                     NewLayout.Add(_Extents(Index))
@@ -506,7 +623,88 @@ Namespace Streams
 
             _Length -= ActualLength
 
-            MarkAllMetadataPagesDirty()
+            MarkExtentPagesDirtyForReplacement(DirtyStartIndex, RemovedExtentCount, InsertedExtentCount)
+
+        End Sub
+
+        Private Sub ReplaceRangeCore(LogicalOffset As Long,
+                                     Length As Long,
+                                     NewExtents As IList(Of ExtentIndexEntry))
+
+            If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+            If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
+            If NewExtents Is Nothing Then Throw New ArgumentNullException(NameOf(NewExtents))
+            If Length = 0 Then Return
+            If LogicalOffset >= _Length Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+
+            Dim ActualLength = Math.Min(Length, _Length - LogicalOffset)
+            Dim EndOffset = LogicalOffset + ActualLength
+
+            Dim Materialised As New List(Of ExtentIndexEntry)(NewExtents.Count)
+            Dim InsertLength As Long = 0
+
+            For Each extent In NewExtents
+
+                If extent.LogicalLength <= 0 Then Continue For
+
+                ValidateExtentReference(extent)
+
+                Dim NewExtent = extent
+                NewExtent.LogicalOffset = 0
+
+                Materialised.Add(NewExtent)
+                InsertLength += NewExtent.LogicalLength
+
+            Next
+
+            If InsertLength <> ActualLength Then
+                Throw New InvalidOperationException("Replacement extent length must match the replaced logical length.")
+            End If
+
+            SplitExtentAt(LogicalOffset)
+            SplitExtentAt(EndOffset)
+
+            Dim StartIndex = FindExtentInsertIndex(LogicalOffset)
+            Dim EndIndex = FindExtentInsertIndex(EndOffset)
+            Dim RemovedExtentCount = EndIndex - StartIndex
+
+            If RemovedExtentCount <= 0 Then
+                Throw New InvalidDataException("No extents were found for the replacement range.")
+            End If
+
+            Dim NewLayout As New List(Of ExtentIndexEntry)(_Extents.Count - RemovedExtentCount + Materialised.Count)
+
+            For Index = 0 To StartIndex - 1
+                NewLayout.Add(_Extents(Index))
+            Next
+
+            Dim CurrentLogicalOffset = LogicalOffset
+
+            For Each extent In Materialised
+                Dim NewExtent = extent
+                NewExtent.LogicalOffset = CurrentLogicalOffset
+                NewLayout.Add(NewExtent)
+                CurrentLogicalOffset += NewExtent.LogicalLength
+            Next
+
+            For Index = EndIndex To _Extents.Count - 1
+                NewLayout.Add(_Extents(Index))
+            Next
+
+            For Index = StartIndex To EndIndex - 1
+                Dim RemovedExtent = _Extents(Index)
+                DecrementPhysicalRecordRefCount(RemovedExtent.PhysicalRecordId)
+            Next
+
+            _Extents.Clear()
+            _Extents.AddRange(NewLayout)
+
+            '
+            ' Logical length is unchanged. If the replacement uses the same number of
+            ' extents, only the replaced ordinal range is dirty. If the extent count
+            ' changed, later ordinals shift and pages from StartIndex onward are dirty.
+            '
+            MarkExtentPagesDirtyForReplacement(StartIndex, RemovedExtentCount, Materialised.Count)
 
         End Sub
 

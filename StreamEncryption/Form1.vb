@@ -68,7 +68,8 @@ Public Class Form1
         'Test("C:\Games\Vampire The Masquerade - Bloodlines.zip")
         'Test("C:\Windows\System32\mrt.exe")
         'Test("C:\Games\mrt.zip", True)
-        Test("C:\Games\mrt.exe", True)
+        'Test("C:\Games\mrt.exe", True)
+        Test("C:\Games\Vampire The Masquerade - Bloodlines.zip", False)
         'Test("C:\Windows\explorer.exe", True)
 
 
@@ -80,6 +81,7 @@ Public Class Form1
     End Sub
 
     Public Sub Test(FileName As String, Optional RandomWrite As Boolean = False)
+        Static LastTime As Date = Now()
 
         Dim Options As New Streams.ChunkedStream.ChunkedStreamOptions() With
         {
@@ -116,7 +118,7 @@ Public Class Form1
 
             Dim DecryptedMD5 As String
 
-            Using EncStorage As New MemoryStream()
+            Using EncStorage = New FileStream("asd.ziped", FileMode.Create) 'As New MemoryStream()
 
                 Dim InputMBps = 0.0
                 Dim OutputMBps = 0.0
@@ -214,8 +216,35 @@ Public Class Form1
 
                                 If BytesRead = Buffer.Length Then
 
+                                    Enc.swWriteExtentPage.Reset()
+                                    Enc.swWritePhysicalRecordPage.Reset()
+                                    Enc.swWriteDirectoryPages.Reset()
+                                    Enc.swWriteHoleDirectoryPages.Reset()
+                                    Enc.DebugWriteExtentPageCount = 0
+                                    Enc.DebugWritePhysicalRecordPageCount = 0
+
+                                    Dim sw As New Stopwatch()
+                                    sw.Start()
                                     Enc.Write(Offset,
                                               Buffer)
+                                    sw.Stop()
+
+                                    Dim ThisTime = Now()
+                                    If Math.Abs(ThisTime.Subtract(LastTime).TotalSeconds) > 1 Then
+                                        LastTime = ThisTime
+
+                                        Debug.Print($"{Now}: Cs.Length: {Enc.Length}")
+                                        Debug.Print($"    Total Write: {sw.ElapsedMilliseconds}")
+                                        Debug.Print($"    WriteExtentPage: {Enc.swWriteExtentPage.ElapsedMilliseconds}")
+                                        Debug.Print($"    WritePhysicalRecordPage: {Enc.swWritePhysicalRecordPage.ElapsedMilliseconds}")
+                                        Debug.Print($"    WriteDirectoryPages: {Enc.swWriteDirectoryPages.ElapsedMilliseconds}")
+                                        Debug.Print($"    WriteHoleDirectoryPages: {Enc.swWriteHoleDirectoryPages.ElapsedMilliseconds}")
+                                        Debug.Print($"    DirtyExtentPages: {Enc._DirtyExtentPages.Count}")
+                                        Debug.Print($"    DirtyPhysicalPages: {Enc._DirtyPhysicalRecordPages.Count}")
+                                        Debug.Print($"    DebugWriteExtentPageCount: {Enc.DebugWriteExtentPageCount}")
+                                        Debug.Print($"    DebugWritePhysicalRecordPageCount: {Enc.DebugWritePhysicalRecordPageCount}")
+
+                                    End If
 
                                 Else
 

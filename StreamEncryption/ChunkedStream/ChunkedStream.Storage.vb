@@ -369,7 +369,6 @@ Namespace Streams
             Record(ChunkCompressionEvaluatedPercentOffset) = CompressionEvaluatedPercent
 
             _Rng.GetBytes(_Counter)
-
             Buffer.BlockCopy(_Counter, 0, Record, ChunkRecordIvOffset, IvSize)
 
             Select Case EncryptionMethod
@@ -400,11 +399,8 @@ Namespace Streams
                    PublicIntegrityKey)
 
             Using Hmac As New HMACSHA256(RecordMacKey)
-
                 Dim Mac = Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
-
                 Buffer.BlockCopy(Mac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize)
-
             End Using
 
             Dim NewRecordOffset = GetNextPhysicalRecordWriteOffset(Record.Length)
@@ -429,7 +425,7 @@ Namespace Streams
                 _IndexOffset = NewRecordEndOffset
             End If
 
-            MarkAllMetadataPagesDirty()
+            MarkPhysicalRecordDirty(Result.RecordId)
 
             Return Result
 

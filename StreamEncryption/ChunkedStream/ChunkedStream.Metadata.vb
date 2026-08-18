@@ -222,44 +222,51 @@ Namespace Streams
         End Function
 
         Private Sub WriteExtentPage(PageNumber As Integer)
+            Try
+                DebugWriteExtentPageCount += 1
+                swWriteExtentPage.Start()
 
-            If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
+                If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
 
-            Dim OldDescriptor As MetadataPageDescriptor = Nothing
-            Dim HadOldDescriptor = _ExtentPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
-            Dim FirstIndex = PageNumber * _IndexPageEntryCount
-            Dim EntryCount = Math.Max(0, Math.Min(_IndexPageEntryCount, _Extents.Count - FirstIndex))
+                Dim OldDescriptor As MetadataPageDescriptor = Nothing
+                Dim HadOldDescriptor = _ExtentPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
+                Dim FirstIndex = PageNumber * _IndexPageEntryCount
+                Dim EntryCount = Math.Max(0, Math.Min(_IndexPageEntryCount, _Extents.Count - FirstIndex))
 
-            If EntryCount = 0 Then
-                If HadOldDescriptor Then
-                    If OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                        AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                If EntryCount = 0 Then
+                    If HadOldDescriptor Then
+                        If OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
+                            AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                        End If
+
+                        _ExtentPageDescriptors.Remove(PageNumber)
                     End If
 
-                    _ExtentPageDescriptors.Remove(PageNumber)
+                    Return
                 End If
 
-                Return
-            End If
+                Dim Page = BuildExtentPage(PageNumber)
+                Dim Offset = GetNextIndexPageWriteOffset(Page.Length)
 
-            Dim Page = BuildExtentPage(PageNumber)
-            Dim Offset = GetNextIndexPageWriteOffset(Page.Length)
+                _Fs.Position = Offset
+                _Fs.Write(Page, 0, Page.Length)
 
-            _Fs.Position = Offset
-            _Fs.Write(Page, 0, Page.Length)
-
-            Dim Descriptor = New MetadataPageDescriptor With {
+                Dim Descriptor = New MetadataPageDescriptor With {
                 .PageNumber = PageNumber,
                 .Offset = Offset,
                 .Length = Page.Length,
                 .Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
             }
 
-            If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
-            End If
+                If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
+                    AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                End If
 
-            _ExtentPageDescriptors(PageNumber) = Descriptor
+                _ExtentPageDescriptors(PageNumber) = Descriptor
+
+            Finally
+                swWriteExtentPage.Stop()
+            End Try
 
         End Sub
 
@@ -308,45 +315,53 @@ Namespace Streams
 
         Private Sub WritePhysicalRecordPage(PageNumber As Integer,
                                             OrderedRecords As IList(Of PhysicalRecordEntry))
+            Try
+                DebugWritePhysicalRecordPageCount += 1
+                swWritePhysicalRecordPage.Start()
 
-            If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
-            If OrderedRecords Is Nothing Then Throw New ArgumentNullException(NameOf(OrderedRecords))
+                If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
+                If OrderedRecords Is Nothing Then Throw New ArgumentNullException(NameOf(OrderedRecords))
 
-            Dim OldDescriptor As MetadataPageDescriptor = Nothing
-            Dim HadOldDescriptor = _PhysicalRecordPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
-            Dim FirstIndex = PageNumber * _IndexPageEntryCount
-            Dim EntryCount = Math.Max(0, Math.Min(_IndexPageEntryCount, OrderedRecords.Count - FirstIndex))
+                Dim OldDescriptor As MetadataPageDescriptor = Nothing
+                Dim HadOldDescriptor = _PhysicalRecordPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
+                Dim FirstIndex = PageNumber * _IndexPageEntryCount
+                Dim EntryCount = Math.Max(0, Math.Min(_IndexPageEntryCount, OrderedRecords.Count - FirstIndex))
 
-            If EntryCount = 0 Then
-                If HadOldDescriptor Then
-                    If OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                        AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                If EntryCount = 0 Then
+                    If HadOldDescriptor Then
+                        If OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
+                            AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                        End If
+
+                        _PhysicalRecordPageDescriptors.Remove(PageNumber)
                     End If
 
-                    _PhysicalRecordPageDescriptors.Remove(PageNumber)
+                    Return
                 End If
 
-                Return
-            End If
+                Dim Page = BuildPhysicalRecordPage(PageNumber, OrderedRecords)
+                Dim Offset = GetNextIndexPageWriteOffset(Page.Length)
 
-            Dim Page = BuildPhysicalRecordPage(PageNumber, OrderedRecords)
-            Dim Offset = GetNextIndexPageWriteOffset(Page.Length)
+                _Fs.Position = Offset
+                _Fs.Write(Page, 0, Page.Length)
 
-            _Fs.Position = Offset
-            _Fs.Write(Page, 0, Page.Length)
-
-            Dim Descriptor = New MetadataPageDescriptor With {
+                Dim Descriptor = New MetadataPageDescriptor With {
                 .PageNumber = PageNumber,
                 .Offset = Offset,
                 .Length = Page.Length,
                 .Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
             }
 
-            If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
-            End If
+                If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
+                    AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                End If
 
-            _PhysicalRecordPageDescriptors(PageNumber) = Descriptor
+                _PhysicalRecordPageDescriptors(PageNumber) = Descriptor
+
+            Finally
+                swWritePhysicalRecordPage.Stop()
+            End Try
+
 
         End Sub
 
@@ -398,38 +413,45 @@ Namespace Streams
         Private Function WriteDirectoryPages(DirectoryType As DirectoryTypes,
                                              Descriptors As IEnumerable(Of MetadataPageDescriptor),
                                              ExistingDirectoryDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)) As Dictionary(Of Integer, MetadataPageDescriptor)
+            Try
+                swWriteDirectoryPages.Start()
 
-            If Descriptors Is Nothing Then Throw New ArgumentNullException(NameOf(Descriptors))
-            If ExistingDirectoryDescriptors Is Nothing Then Throw New ArgumentNullException(NameOf(ExistingDirectoryDescriptors))
+                If Descriptors Is Nothing Then Throw New ArgumentNullException(NameOf(Descriptors))
+                If ExistingDirectoryDescriptors Is Nothing Then Throw New ArgumentNullException(NameOf(ExistingDirectoryDescriptors))
 
-            Dim DescriptorList = Descriptors.OrderBy(Function(descriptor) descriptor.PageNumber).ToList()
-            Dim DirectoryPageCount = GetIndexPageCount(DescriptorList.Count, _IndexDirectoryEntryCount)
-            Dim Result As New Dictionary(Of Integer, MetadataPageDescriptor)()
+                Dim DescriptorList = Descriptors.OrderBy(Function(descriptor) descriptor.PageNumber).ToList()
+                Dim DirectoryPageCount = GetIndexPageCount(DescriptorList.Count, _IndexDirectoryEntryCount)
+                Dim Result As New Dictionary(Of Integer, MetadataPageDescriptor)()
 
-            For PageNumber = 0 To DirectoryPageCount - 1
-                Dim Page = BuildDirectoryPage(DirectoryType, PageNumber, DescriptorList)
-                Dim Offset = GetNextIndexDirectoryPageWriteOffset(Page.Length)
-                Dim OldDescriptor As MetadataPageDescriptor = Nothing
-                Dim HadOldDescriptor = ExistingDirectoryDescriptors.TryGetValue(PageNumber, OldDescriptor)
+                For PageNumber = 0 To DirectoryPageCount - 1
+                    Dim Page = BuildDirectoryPage(DirectoryType, PageNumber, DescriptorList)
+                    Dim Offset = GetNextIndexDirectoryPageWriteOffset(Page.Length)
+                    Dim OldDescriptor As MetadataPageDescriptor = Nothing
+                    Dim HadOldDescriptor = ExistingDirectoryDescriptors.TryGetValue(PageNumber, OldDescriptor)
 
-                _Fs.Position = Offset
-                _Fs.Write(Page, 0, Page.Length)
+                    _Fs.Position = Offset
+                    _Fs.Write(Page, 0, Page.Length)
 
-                Dim NewDescriptor = New MetadataPageDescriptor With {
-                    .PageNumber = PageNumber,
-                    .Offset = Offset,
-                    .Length = Page.Length,
-                    .Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
-                }
+                    Dim NewDescriptor = New MetadataPageDescriptor With {
+                        .PageNumber = PageNumber,
+                        .Offset = Offset,
+                        .Length = Page.Length,
+                        .Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
+                    }
 
-                If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                    AddFreeIndexDirectoryPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
-                End If
+                    If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
+                        AddFreeIndexDirectoryPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                    End If
 
-                Result(PageNumber) = NewDescriptor
-            Next
+                    Result(PageNumber) = NewDescriptor
+                Next
 
-            Return Result
+                Return Result
+
+            Finally
+                swWriteDirectoryPages.Stop()
+            End Try
+
 
         End Function
 
@@ -474,39 +496,45 @@ Namespace Streams
         End Function
 
         Private Function WriteHoleDirectoryPages(Records As IList(Of HoleDirectoryRecord)) As Dictionary(Of Integer, MetadataPageDescriptor)
+            Try
+                swWriteHoleDirectoryPages.Start()
+                Dim Result As New Dictionary(Of Integer, MetadataPageDescriptor)()
 
-            Dim Result As New Dictionary(Of Integer, MetadataPageDescriptor)()
-
-            If Records Is Nothing OrElse Records.Count = 0 Then
-                Return Result
-            End If
-
-            Dim DirectoryPageCount = GetIndexPageCount(Records.Count, _IndexDirectoryEntryCount)
-
-            For PageNumber = 0 To DirectoryPageCount - 1
-                Dim Page = BuildHoleDirectoryPage(PageNumber, Records)
-                Dim Offset = GetNextIndexDirectoryPageWriteOffset(Page.Length)
-                Dim OldDescriptor As MetadataPageDescriptor = Nothing
-                Dim HadOldDescriptor = _HoleDirectoryPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
-
-                _Fs.Position = Offset
-                _Fs.Write(Page, 0, Page.Length)
-
-                Dim NewDescriptor = New MetadataPageDescriptor With {
-                    .PageNumber = PageNumber,
-                    .Offset = Offset,
-                    .Length = Page.Length,
-                    .Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
-                }
-
-                If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                    AddFreeIndexDirectoryPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                If Records Is Nothing OrElse Records.Count = 0 Then
+                    Return Result
                 End If
 
-                Result(PageNumber) = NewDescriptor
-            Next
+                Dim DirectoryPageCount = GetIndexPageCount(Records.Count, _IndexDirectoryEntryCount)
 
-            Return Result
+                For PageNumber = 0 To DirectoryPageCount - 1
+                    Dim Page = BuildHoleDirectoryPage(PageNumber, Records)
+                    Dim Offset = GetNextIndexDirectoryPageWriteOffset(Page.Length)
+                    Dim OldDescriptor As MetadataPageDescriptor = Nothing
+                    Dim HadOldDescriptor = _HoleDirectoryPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
+
+                    _Fs.Position = Offset
+                    _Fs.Write(Page, 0, Page.Length)
+
+                    Dim NewDescriptor = New MetadataPageDescriptor With {
+                        .PageNumber = PageNumber,
+                        .Offset = Offset,
+                        .Length = Page.Length,
+                        .Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
+                    }
+
+                    If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
+                        AddFreeIndexDirectoryPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                    End If
+
+                    Result(PageNumber) = NewDescriptor
+                Next
+
+                Return Result
+            Finally
+                swWriteHoleDirectoryPages.Stop()
+            End Try
+
+
 
         End Function
 

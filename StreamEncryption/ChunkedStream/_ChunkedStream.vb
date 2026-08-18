@@ -597,8 +597,8 @@ Namespace Streams
         Private _CompactMetadataWriteOffset As Long?
         Private _CompactMetadataWriteLimit As Long?
 
-        Private ReadOnly _DirtyExtentPages As New HashSet(Of Integer)()
-        Private ReadOnly _DirtyPhysicalRecordPages As New HashSet(Of Integer)()
+        Public ReadOnly _DirtyExtentPages As New HashSet(Of Integer)()
+        Public ReadOnly _DirtyPhysicalRecordPages As New HashSet(Of Integer)()
 
         Private ReadOnly _ExtentPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
         Private ReadOnly _ExtentDirectoryPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
@@ -1237,6 +1237,13 @@ Namespace Streams
 
 #If DEBUG Then
 
+        Public DebugWriteExtentPageCount As Integer
+        Public DebugWritePhysicalRecordPageCount As Integer
+        Public Property swWriteExtentPage As New Stopwatch
+        Public Property swWritePhysicalRecordPage As New Stopwatch
+        Public Property swWriteDirectoryPages As New Stopwatch
+        Public Property swWriteHoleDirectoryPages As New Stopwatch
+
 
         Friend _DebugPersistTicks As Long
         Friend _DebugIndexPageTicks As Long
@@ -1425,24 +1432,25 @@ Namespace Streams
                        Math.Min(CLng(EffectiveCount), _Length - LogicalOffset),
                        0L)
 
-                '
-                ' Write replacement records before removing the old extents.
-                '
-                ' This preserves copy-on-write publication:
-                '   - existing committed metadata remains valid until new metadata is published;
-                '   - FillHoles can reuse older safe holes;
-                '   - FillHoles cannot immediately reuse the physical record being overwritten.
-                '
-                Dim NewExtents =
-                    BuildExtentsFromBuffer(Input,
-                                           DataOffset,
-                                           EffectiveCount)
-
                 If ExistingLength > 0 Then
-                    RemoveRangeCore(LogicalOffset, ExistingLength, False)
+
+                    Dim ExistingCount = CInt(ExistingLength)
+                    Dim ReplacementExtents = BuildExtentsFromBuffer(Input, DataOffset, ExistingCount)
+
+                    ReplaceRangeCore(LogicalOffset, ExistingLength, ReplacementExtents)
+
                 End If
 
-                InsertExtentsCore(LogicalOffset, NewExtents)
+                If ExistingLength < EffectiveCount Then
+
+                    Dim AppendOffset = LogicalOffset + ExistingLength
+                    Dim AppendDataOffset = DataOffset + CInt(ExistingLength)
+                    Dim AppendCount = EffectiveCount - CInt(ExistingLength)
+                    Dim AppendExtents = BuildExtentsFromBuffer(Input, AppendDataOffset, AppendCount)
+
+                    InsertExtentsCore(AppendOffset, AppendExtents)
+
+                End If
 
                 If HasOpenCheckpoint = False Then
                     PersistIndexAndHeader(_IndexOffset)
