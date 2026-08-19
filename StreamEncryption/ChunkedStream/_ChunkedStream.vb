@@ -1590,6 +1590,170 @@ Namespace Streams
         End Sub
 
         ''' <summary>
+        ''' Replaces a logical range with zero bytes using sparse extents directly.
+        ''' </summary>
+        Public Sub Clear(LogicalOffset As Long,
+                         Count As Long)
+
+            SyncLock _SyncRoot
+
+                ThrowIfDisposed()
+
+                If LogicalOffset < 0 OrElse LogicalOffset > _Length Then
+                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+                End If
+
+                If Count < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(Count))
+                End If
+
+                If Count = 0 Then Return
+
+                If LogicalOffset > Long.MaxValue - Count Then
+                    Throw New ArgumentOutOfRangeException(
+                        NameOf(Count),
+                        "The clear range would exceed the maximum supported logical offset.")
+                End If
+
+                Dim ClearEndOffset = LogicalOffset + Count
+
+                If ClearEndOffset > _Length Then
+                    Throw New ArgumentOutOfRangeException(
+                        NameOf(Count),
+                        "The clear range extends beyond the logical stream length.")
+                End If
+
+                InvalidateChunkCache()
+
+                If Options.StoreSparseChunks = False Then
+
+                    Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
+
+                    Dim Remaining = Count
+                    Dim CurrentOffset = LogicalOffset
+
+                    While Remaining > 0
+
+                        Dim ThisWrite =
+                            CInt(Math.Min(CLng(ZeroBuffer.Length),
+                                          Remaining))
+
+                        Write(CurrentOffset,
+                              ZeroBuffer,
+                              0,
+                              ThisWrite)
+
+                        CurrentOffset += ThisWrite
+                        Remaining -= ThisWrite
+
+                    End While
+
+                Else
+
+                    Dim ReplacementExtents As New List(Of ExtentIndexEntry)()
+
+                    Dim Remaining = Count
+
+                    While Remaining > 0
+
+                        Dim SegmentLength =
+                            CInt(Math.Min(CLng(Options.ChunkSize),
+                                          Remaining))
+
+                        ReplacementExtents.Add(
+                            New ExtentIndexEntry With {
+                                .LogicalLength = SegmentLength,
+                                .PhysicalRecordId = SparsePhysicalRecordId,
+                                .PhysicalRecordOffset = 0
+                            })
+
+                        Remaining -= SegmentLength
+
+                    End While
+
+                    ReplaceRangeCore(LogicalOffset,
+                                     Count,
+                                     ReplacementExtents)
+
+                End If
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+            End SyncLock
+
+        End Sub
+
+        ''' <summary>
+        ''' Inserts zero bytes at the specified logical offset using sparse extents directly.
+        ''' </summary>
+        Public Sub InsertNullBytes(LogicalOffset As Long,
+                                   Count As Long)
+
+            SyncLock _SyncRoot
+
+                ThrowIfDisposed()
+
+                If LogicalOffset < 0 OrElse
+                   LogicalOffset > _Length Then
+                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+                End If
+
+                If Count < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(Count))
+                End If
+
+                If Count = 0 Then Return
+
+                If _Length > Long.MaxValue - Count Then
+                    Throw New ArgumentOutOfRangeException(
+                        NameOf(Count),
+                        "The insert would exceed the maximum supported logical length.")
+                End If
+
+                InvalidateChunkCache()
+
+                If Options.StoreSparseChunks = False Then
+
+                    Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
+
+                    Dim Remaining = Count
+                    Dim InsertOffset = LogicalOffset
+
+                    While Remaining > 0
+
+                        Dim ThisInsert =
+                            CInt(Math.Min(CLng(ZeroBuffer.Length),
+                                          Remaining))
+
+                        Insert(InsertOffset,
+                               ZeroBuffer,
+                               0,
+                               ThisInsert)
+
+                        InsertOffset += ThisInsert
+                        Remaining -= ThisInsert
+
+                    End While
+
+                Else
+
+                    InsertSparseRange(LogicalOffset,
+                                      Count)
+
+                    If HasOpenCheckpoint = False Then
+                        PersistIndexAndHeader(_IndexOffset)
+                    End If
+
+                End If
+
+
+            End SyncLock
+
+        End Sub
+
+        ''' <summary>
         ''' Flushes pending changes to the backing stream.
         ''' </summary>
         Public Overrides Sub Flush()

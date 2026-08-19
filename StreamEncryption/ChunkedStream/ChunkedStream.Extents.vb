@@ -417,33 +417,38 @@ Namespace Streams
 
         End Function
 
-        Private Sub InsertSparseRange(LogicalOffset As Long,
-                                      Length As Long)
+        Private Function BuildSparseExtents(Length As Long) As List(Of ExtentIndexEntry)
+            If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
 
-            If Length <= 0 Then Return
-            If Length > Integer.MaxValue Then Throw New InvalidOperationException("Sparse insert length is too large for a single operation.")
-
+            Dim Result As New List(Of ExtentIndexEntry)()
             Dim Remaining = Length
-            Dim InsertOffset = LogicalOffset
-            Dim Extents As New List(Of ExtentIndexEntry)()
 
             While Remaining > 0
+                If Result.Count = Integer.MaxValue Then
+                    Throw New InvalidOperationException("Sparse extent count exceeds the maximum supported list size.")
+                End If
 
                 Dim SegmentLength = CInt(Math.Min(CLng(Options.ChunkSize), Remaining))
 
-                Extents.Add(New ExtentIndexEntry With {
+                Result.Add(New ExtentIndexEntry With {
                     .LogicalLength = SegmentLength,
                     .PhysicalRecordId = SparsePhysicalRecordId,
                     .PhysicalRecordOffset = 0
                 })
 
-                InsertOffset += SegmentLength
                 Remaining -= SegmentLength
-
             End While
 
-            InsertExtentsCore(LogicalOffset, Extents)
+            Return Result
+        End Function
 
+        Private Sub InsertSparseRange(LogicalOffset As Long,
+                                      Length As Long)
+            If Length <= 0 Then Return
+
+            Dim Extents = BuildSparseExtents(Length)
+
+            InsertExtentsCore(LogicalOffset, Extents)
         End Sub
 
         Private Sub InsertExtentsCore(LogicalOffset As Long,

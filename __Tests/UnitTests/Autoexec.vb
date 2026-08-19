@@ -11,8 +11,6 @@ Public Class Autoexec
 
         'Test()
 
-        'Tests.StreamChunked.Hardening.ModelBasedRandomOperationsMatchByteArrayModel()
-
         Return UnitTester.Autoexec.Main()
     End Function
 
