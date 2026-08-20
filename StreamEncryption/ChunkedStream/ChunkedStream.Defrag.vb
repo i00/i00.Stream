@@ -238,12 +238,19 @@ Namespace Streams
                          NewOffset,
                          OldLength)
 
-            StreamCopyRecord(OldOffset, NewOffset, OldLength)
+            StreamCopyRecord(OldOffset,
+                             NewOffset,
+                             OldLength)
 
             FlushDurable(_Fs)
 
-            If IsValidPhysicalRecordAt(Record.RecordId, NewOffset, OldLength) = False Then
-                Throw New CryptographicException("Copied physical record failed validation.")
+            If IsValidPhysicalRecordAt(Record.RecordId,
+                                       NewOffset,
+                                       OldLength) = False Then
+
+                Throw New CryptographicException(
+                    "Copied physical record failed validation.")
+
             End If
 
             WriteJournal(JournalStates.Copied,
@@ -255,6 +262,10 @@ Namespace Streams
 
             Record.PhysicalOffset = NewOffset
             _PhysicalRecords(Record.RecordId) = Record
+
+            UpdatePhysicalRecordLocationIndexes(Record.RecordId,
+                                                OldOffset,
+                                                OldLength)
 
             '
             ' Only the moved physical record entry changed.

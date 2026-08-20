@@ -164,21 +164,67 @@ Namespace Streams
                                                          Length As Long) As Boolean
 
             If Length <= 0 Then Return False
+            If _LivePhysicalRecordIdsByOffset.Count = 0 Then Return False
+            If Offset > Long.MaxValue - Length Then Return True
 
-            For Each Record In _PhysicalRecords.Values
+            Dim EndOffset = Offset + Length
+            Dim Low = 0
+            Dim High = _LivePhysicalRecordIdsByOffset.Count
 
-                If Record.RefCount <= 0 Then Continue For
+            '
+            ' Find the first live physical record whose starting offset is greater
+            ' than or equal to the requested range start.
+            '
+            While Low < High
+
+                Dim Middle = Low + ((High - Low) \ 2)
+
+                If _LivePhysicalRecordIdsByOffset.Keys(Middle) < Offset Then
+                    Low = Middle + 1
+                Else
+                    High = Middle
+                End If
+
+            End While
+
+            Dim CandidateIndex = Low
+
+            '
+            ' The preceding record may begin before the requested range and extend
+            ' into it.
+            '
+            If CandidateIndex > 0 Then
+
+                Dim PreviousRecordId =
+                    _LivePhysicalRecordIdsByOffset.Values(CandidateIndex - 1)
+
+                Dim PreviousRecord = GetPhysicalRecord(PreviousRecordId)
 
                 If StorageRangesOverlap(Offset,
                                         Length,
-                                        Record.PhysicalOffset,
-                                        Record.PhysicalLength) Then
+                                        PreviousRecord.PhysicalOffset,
+                                        PreviousRecord.PhysicalLength) Then
 
                     Return True
 
                 End If
 
-            Next
+            End If
+
+            '
+            ' The first record beginning at or after Offset overlaps when its start
+            ' occurs before EndOffset.
+            '
+            If CandidateIndex < _LivePhysicalRecordIdsByOffset.Count Then
+
+                Dim CandidateOffset =
+                    _LivePhysicalRecordIdsByOffset.Keys(CandidateIndex)
+
+                If CandidateOffset < EndOffset Then
+                    Return True
+                End If
+
+            End If
 
             Return False
 
@@ -319,127 +365,155 @@ Namespace Streams
                                                        ForceCompression As Boolean,
                                                        EncryptionMethod As ChunkEncryptionMethods) As PhysicalRecordEntry
 
-                If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
-                If PlainLength < 0 OrElse PlainLength > Plain.Length Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
+            If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
+            If PlainLength < 0 OrElse PlainLength > Plain.Length Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
 
-                If CompressionRatioThreshold < MinimumCompressionRatioThreshold Then CompressionRatioThreshold = MinimumCompressionRatioThreshold
-                If CompressionRatioThreshold > MaximumCompressionRatioThreshold Then CompressionRatioThreshold = MaximumCompressionRatioThreshold
+            If CompressionRatioThreshold < MinimumCompressionRatioThreshold Then CompressionRatioThreshold = MinimumCompressionRatioThreshold
+            If CompressionRatioThreshold > MaximumCompressionRatioThreshold Then CompressionRatioThreshold = MaximumCompressionRatioThreshold
 
-                Dim Payload As Byte() = Plain
-                Dim PayloadLength = PlainLength
-                Dim StoredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None
-                Dim CompressionEvaluatedMethod = ChunkedStreamOptions.CompressionMethods.None
-                Dim CompressionEvaluatedPercent As Byte = 100
+            Dim Payload As Byte() = Plain
+            Dim PayloadLength = PlainLength
+            Dim StoredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None
+            Dim CompressionEvaluatedMethod = ChunkedStreamOptions.CompressionMethods.None
+            Dim CompressionEvaluatedPercent As Byte = 100
 
-                If CompressionMethodToUse <> ChunkedStreamOptions.CompressionMethods.None AndAlso PlainLength > 0 Then
+            If CompressionMethodToUse <> ChunkedStreamOptions.CompressionMethods.None AndAlso PlainLength > 0 Then
 
                 Dim Compressed = CompressPayload(CompressionMethodToUse, Plain, PlainLength)
-                    CompressionEvaluatedMethod = CompressionMethodToUse
-                    CompressionEvaluatedPercent = GetCompressionEvaluatedPercent(PlainLength, Compressed.Length)
 
-                    If ForceCompression OrElse CompressionEvaluatedPercent / 100.0R <= CompressionRatioThreshold Then
-                        Payload = Compressed
-                        PayloadLength = Compressed.Length
-                        StoredCompressionMethod = CompressionMethodToUse
-                        MarkCompressionFlag(StoredCompressionMethod)
+                CompressionEvaluatedMethod = CompressionMethodToUse
+                CompressionEvaluatedPercent =
+                    GetCompressionEvaluatedPercent(PlainLength, Compressed.Length)
+
+                If ForceCompression OrElse
+                   CompressionEvaluatedPercent / 100.0R <= CompressionRatioThreshold Then
+
+                    Payload = Compressed
+                    PayloadLength = Compressed.Length
+                    StoredCompressionMethod = CompressionMethodToUse
+
+                    MarkCompressionFlag(StoredCompressionMethod)
+
+                End If
+
+            End If
+
+            Dim PlaintextAllZero =
+                PlainLength = 0 OrElse IsAllZero(Plain, PlainLength)
+
+            Dim Flags = ChunkFlags.None
+
+            If PlaintextAllZero Then
+                Flags = Flags Or ChunkFlags.PlaintextAllZero
+            End If
+
+            Dim RecordId = AllocatePhysicalRecordId()
+            Dim RecordLength = ChunkRecordDataOffset + PayloadLength + MacSize
+            Dim StoredRecord(RecordLength - 1) As Byte
+
+            Buffer.BlockCopy(BitConverter.GetBytes(RecordId), 0, StoredRecord, 0, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(CInt(StoredCompressionMethod)), 0, StoredRecord, ChunkCompressionMethodOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(CInt(EncryptionMethod)), 0, StoredRecord, ChunkEncryptionMethodOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(PlainLength), 0, StoredRecord, ChunkPlainLengthOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(PayloadLength), 0, StoredRecord, ChunkPayloadLengthOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(CInt(Flags)), 0, StoredRecord, ChunkFlagsOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(CInt(CompressionEvaluatedMethod)), 0, StoredRecord, ChunkCompressionEvaluatedMethodOffset, 4)
+
+            StoredRecord(ChunkCompressionEvaluatedPercentOffset) =
+                CompressionEvaluatedPercent
+
+            _Rng.GetBytes(_Counter)
+
+            Buffer.BlockCopy(_Counter,
+                             0,
+                             StoredRecord,
+                             ChunkRecordIvOffset,
+                             IvSize)
+
+            Select Case EncryptionMethod
+
+                Case ChunkEncryptionMethods.None
+
+                    If PayloadLength > 0 Then
+                        Buffer.BlockCopy(Payload,
+                                         0,
+                                         StoredRecord,
+                                         ChunkRecordDataOffset,
+                                         PayloadLength)
                     End If
 
-                End If
+                Case ChunkEncryptionMethods.AesCtrFileMasterKey
 
-                Dim PlaintextAllZero = PlainLength = 0 OrElse IsAllZero(Plain, PlainLength)
-                Dim Flags = ChunkFlags.None
+                    If _ChunkEncryptionKey Is Nothing Then
+                        Throw New EncryptionMismatchException(
+                            "Encryption is enabled but no file master key is available.")
+                    End If
 
-                If PlaintextAllZero Then
-                    Flags = Flags Or ChunkFlags.PlaintextAllZero
-                End If
+                    CryptPayload(Payload,
+                                 0,
+                                 PayloadLength,
+                                 StoredRecord,
+                                 ChunkRecordDataOffset,
+                                 _ChunkEncryptionKey)
 
-                Dim RecordId = AllocatePhysicalRecordId()
-                Dim RecordLength = ChunkRecordDataOffset + PayloadLength + MacSize
-                Dim Record(RecordLength - 1) As Byte
+                Case Else
 
-                Buffer.BlockCopy(BitConverter.GetBytes(RecordId), 0, Record, 0, 8)
-                Buffer.BlockCopy(BitConverter.GetBytes(CInt(StoredCompressionMethod)), 0, Record, ChunkCompressionMethodOffset, 4)
-                Buffer.BlockCopy(BitConverter.GetBytes(CInt(EncryptionMethod)), 0, Record, ChunkEncryptionMethodOffset, 4)
-                Buffer.BlockCopy(BitConverter.GetBytes(PlainLength), 0, Record, ChunkPlainLengthOffset, 4)
-                Buffer.BlockCopy(BitConverter.GetBytes(PayloadLength), 0, Record, ChunkPayloadLengthOffset, 4)
-                Buffer.BlockCopy(BitConverter.GetBytes(CInt(Flags)), 0, Record, ChunkFlagsOffset, 4)
-                Buffer.BlockCopy(BitConverter.GetBytes(CInt(CompressionEvaluatedMethod)), 0, Record, ChunkCompressionEvaluatedMethodOffset, 4)
+                    Throw New InvalidDataException(
+                        $"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
 
-                Record(ChunkCompressionEvaluatedPercentOffset) = CompressionEvaluatedPercent
+            End Select
 
-                _Rng.GetBytes(_Counter)
-                Buffer.BlockCopy(_Counter, 0, Record, ChunkRecordIvOffset, IvSize)
+            Dim RecordMacKey =
+                If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey,
+                   _ChunkMacKey,
+                   PublicIntegrityKey)
 
-                Select Case EncryptionMethod
+            Using Hmac As New HMACSHA256(RecordMacKey)
 
-                    Case ChunkEncryptionMethods.None
+                Dim Mac =
+                    Hmac.ComputeHash(StoredRecord,
+                                     0,
+                                     ChunkRecordDataOffset + PayloadLength)
 
-                        If PayloadLength > 0 Then
-                            Buffer.BlockCopy(Payload, 0, Record, ChunkRecordDataOffset, PayloadLength)
-                        End If
+                Buffer.BlockCopy(Mac,
+                                 0,
+                                 StoredRecord,
+                                 ChunkRecordDataOffset + PayloadLength,
+                                 MacSize)
 
-                    Case ChunkEncryptionMethods.AesCtrFileMasterKey
+            End Using
 
-                        If _ChunkEncryptionKey Is Nothing Then
-                            Throw New EncryptionMismatchException("Encryption is enabled but no file master key is available.")
-                        End If
+            Dim NewRecordOffset =
+                GetNextPhysicalRecordWriteOffset(StoredRecord.Length)
 
-                        CryptPayload(Payload, 0, PayloadLength, Record, ChunkRecordDataOffset, _ChunkEncryptionKey)
+            _Fs.Position = NewRecordOffset
+            _Fs.Write(StoredRecord, 0, StoredRecord.Length)
 
-                    Case Else
+            Dim Result =
+                New PhysicalRecordEntry With {
+                    .RecordId = RecordId,
+                    .PhysicalOffset = NewRecordOffset,
+                    .PhysicalLength = StoredRecord.Length,
+                    .PlainLength = PlainLength,
+                    .RefCount = 1
+                }
 
-                        Throw New InvalidDataException($"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
-
-                End Select
-
-                Dim RecordMacKey =
-                    If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey,
-                       _ChunkMacKey,
-                       PublicIntegrityKey)
-
-                Using Hmac As New HMACSHA256(RecordMacKey)
-                Dim Mac = Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
-                    Buffer.BlockCopy(Mac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize)
-                End Using
-
-                Dim NewRecordOffset = GetNextPhysicalRecordWriteOffset(Record.Length)
-
-                _Fs.Position = NewRecordOffset
-                _Fs.Write(Record, 0, Record.Length)
-
-                Dim Result =
-                    New PhysicalRecordEntry With {
-                        .RecordId = RecordId,
-                        .PhysicalOffset = NewRecordOffset,
-                        .PhysicalLength = Record.Length,
-                        .PlainLength = PlainLength,
-                        .RefCount = 1
-                    }
-
-            '
-            ' Capture ordinal BEFORE inserting.
-            '
             Dim Ordinal = _PhysicalRecords.Count
 
-                _PhysicalRecords(Result.RecordId) = Result
+            _PhysicalRecords.Add(Result.RecordId, Result)
 
-            '
-            ' O(1) lookup for dirty tracking.
-            '
-            _PhysicalRecordOrdinals(Result.RecordId) = Ordinal
+            AddPhysicalRecordToIndexes(Result, Ordinal)
 
-                Dim NewRecordEndOffset = NewRecordOffset + Record.Length
+            Dim NewRecordEndOffset =
+                NewRecordOffset + CLng(StoredRecord.Length)
 
-                If NewRecordEndOffset > _IndexOffset Then
-                    _IndexOffset = NewRecordEndOffset
-                End If
+            If NewRecordEndOffset > _IndexOffset Then
+                _IndexOffset = NewRecordEndOffset
+            End If
 
-            '
-            ' Avoid MarkPhysicalRecordDirty().
-            '
             MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
 
-                Return Result
+            Return Result
 
         End Function
 
@@ -536,13 +610,7 @@ Namespace Streams
 
         Private Function GetDataEndFromIndex() As Long
 
-            Dim DataEnd = CLng(DataStartOffset)
-
-            For Each Record In _PhysicalRecords.Values
-                DataEnd = Math.Max(DataEnd, Record.PhysicalOffset + CLng(Record.PhysicalLength))
-            Next
-
-            Return DataEnd
+            Return _PhysicalDataEnd
 
         End Function
 

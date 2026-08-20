@@ -100,11 +100,18 @@ Namespace Streams
             Dim Record = GetPhysicalRecord(RecordId)
 
             If Record.RefCount = Integer.MaxValue Then
-                Throw New InvalidOperationException($"Physical record {RecordId} refcount overflow.")
+                Throw New InvalidOperationException(
+            $"Physical record {RecordId} refcount overflow.")
             End If
+
+            Dim WasUnreferenced = Record.RefCount = 0
 
             Record.RefCount += 1
             _PhysicalRecords(RecordId) = Record
+
+            If WasUnreferenced Then
+                AddLivePhysicalRecordOffset(Record)
+            End If
 
             MarkPhysicalRecordDirty(RecordId)
 
@@ -202,7 +209,12 @@ Namespace Streams
             Dim Record = GetPhysicalRecord(RecordId)
 
             If Record.RefCount <= 0 Then
-                Throw New InvalidDataException($"Physical record {RecordId} has an invalid refcount.")
+                Throw New InvalidDataException(
+                    $"Physical record {RecordId} has an invalid refcount.")
+            End If
+
+            If Record.RefCount = 1 Then
+                RemoveLivePhysicalRecordOffset(Record)
             End If
 
             Record.RefCount -= 1
@@ -227,42 +239,214 @@ Namespace Streams
 
             Dim RemovedOrdinal As Integer
 
-            If _PhysicalRecordOrdinals.TryGetValue(RecordId, RemovedOrdinal) = False Then
+            If _PhysicalRecordOrdinals.TryGetValue(RecordId,
+                                                   RemovedOrdinal) = False Then
+
                 Throw New InvalidDataException(
                     $"Physical record ordinal for record {RecordId} was not found.")
+
             End If
 
             Dim Record = GetPhysicalRecord(RecordId)
 
             If Record.RefCount <> 0 Then
+
                 Throw New InvalidOperationException(
                     $"Cannot reclaim physical record {RecordId} because it is still referenced.")
+
             End If
 
-            AddFreeChunkSpace(
-                Record.PhysicalOffset,
-                Record.PhysicalLength)
+            RemoveLivePhysicalRecordOffset(Record)
+
+            AddFreeChunkSpace(Record.PhysicalOffset,
+                              Record.PhysicalLength)
 
             _PhysicalRecords.Remove(RecordId)
 
+            '
+            ' Removing a record shifts every later ordinal and also
+            ' rebuilds the cached physical-data end value.
+            '
             RebuildPhysicalRecordOrdinals()
 
-            '
-            ' Removing a record shifts every later ordinal.
-            '
             MarkPhysicalRecordPagesDirtyFromOrdinal(RemovedOrdinal)
 
         End Sub
 
+        Private Sub AddPhysicalRecordToIndexes(Record As PhysicalRecordEntry,
+                                               Ordinal As Integer)
+
+            If Record.RecordId <= SparsePhysicalRecordId Then
+                Throw New InvalidDataException("Invalid physical record id.")
+            End If
+
+            If Ordinal < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Ordinal))
+            End If
+
+            If _PhysicalRecordOrdinals.ContainsKey(Record.RecordId) Then
+                Throw New InvalidDataException(
+                    $"Physical record {Record.RecordId} already exists in the ordinal index.")
+            End If
+
+            _PhysicalRecordOrdinals.Add(Record.RecordId, Ordinal)
+
+            Dim PageNumber = Ordinal \ _IndexPageEntryCount
+            Dim PageRecordIds As SortedSet(Of Long) = Nothing
+
+            If _PhysicalRecordIdsByPage.TryGetValue(PageNumber, PageRecordIds) = False Then
+                PageRecordIds = New SortedSet(Of Long)()
+                _PhysicalRecordIdsByPage.Add(PageNumber, PageRecordIds)
+            End If
+
+            If PageRecordIds.Add(Record.RecordId) = False Then
+                Throw New InvalidDataException(
+                    $"Physical record {Record.RecordId} already exists in physical-record page {PageNumber}.")
+            End If
+
+            If Record.RefCount > 0 Then
+                AddLivePhysicalRecordOffset(Record)
+            End If
+
+            _PhysicalDataEnd =
+                Math.Max(_PhysicalDataEnd,
+                         Record.PhysicalOffset + CLng(Record.PhysicalLength))
+
+        End Sub
+
+        Private Sub AddLivePhysicalRecordOffset(Record As PhysicalRecordEntry)
+
+            If Record.RefCount <= 0 Then Return
+
+            Dim ExistingRecordId As Long
+
+            If _LivePhysicalRecordIdsByOffset.TryGetValue(Record.PhysicalOffset,
+                                                          ExistingRecordId) Then
+
+                If ExistingRecordId = Record.RecordId Then Return
+
+                Throw New InvalidDataException(
+                    $"Physical offset {Record.PhysicalOffset} is already indexed by physical record {ExistingRecordId}.")
+
+            End If
+
+            _LivePhysicalRecordIdsByOffset.Add(Record.PhysicalOffset, Record.RecordId)
+
+        End Sub
+
+        Private Sub RemoveLivePhysicalRecordOffset(Record As PhysicalRecordEntry)
+
+            Dim ExistingRecordId As Long
+
+            If _LivePhysicalRecordIdsByOffset.TryGetValue(Record.PhysicalOffset,
+                                                          ExistingRecordId) = False Then
+
+                Return
+
+            End If
+
+            If ExistingRecordId <> Record.RecordId Then
+                Throw New InvalidDataException(
+                    $"Physical-offset index mismatch at offset {Record.PhysicalOffset}. " &
+                    $"Expected record {Record.RecordId}, found record {ExistingRecordId}.")
+            End If
+
+            _LivePhysicalRecordIdsByOffset.Remove(Record.PhysicalOffset)
+
+        End Sub
+
+        Private Sub UpdatePhysicalRecordLocationIndexes(RecordId As Long,
+                                                        OldPhysicalOffset As Long,
+                                                        OldPhysicalLength As Integer)
+
+            Dim Record = GetPhysicalRecord(RecordId)
+
+            Dim ExistingRecordId As Long
+
+            If _LivePhysicalRecordIdsByOffset.TryGetValue(OldPhysicalOffset,
+                                                          ExistingRecordId) Then
+
+                If ExistingRecordId <> RecordId Then
+                    Throw New InvalidDataException(
+                        $"Physical-offset index mismatch at offset {OldPhysicalOffset}.")
+                End If
+
+                _LivePhysicalRecordIdsByOffset.Remove(OldPhysicalOffset)
+
+            End If
+
+            If Record.RefCount > 0 Then
+                AddLivePhysicalRecordOffset(Record)
+            End If
+
+            Dim OldEnd = OldPhysicalOffset + CLng(OldPhysicalLength)
+            Dim NewEnd = Record.PhysicalOffset + CLng(Record.PhysicalLength)
+
+            If OldEnd >= _PhysicalDataEnd AndAlso NewEnd < OldEnd Then
+                RecalculatePhysicalDataEnd()
+            Else
+                _PhysicalDataEnd = Math.Max(_PhysicalDataEnd, NewEnd)
+            End If
+
+        End Sub
+
+        Private Sub RecalculatePhysicalDataEnd()
+
+            Dim DataEnd = CLng(DataStartOffset)
+
+            For Each Record In _PhysicalRecords.Values
+                DataEnd =
+                    Math.Max(DataEnd,
+                             Record.PhysicalOffset + CLng(Record.PhysicalLength))
+            Next
+
+            _PhysicalDataEnd = DataEnd
+
+        End Sub
 
         Private Sub RebuildPhysicalRecordOrdinals()
+
             _PhysicalRecordOrdinals.Clear()
+            _PhysicalRecordIdsByPage.Clear()
+            _LivePhysicalRecordIdsByOffset.Clear()
+
+            _PhysicalDataEnd = DataStartOffset
+
             Dim Ordinal = 0
-            For Each Record In _PhysicalRecords.Values.
-                                    OrderBy(Function(x) x.RecordId)
+
+            For Each Record In _PhysicalRecords.Values.OrderBy(Function(x) x.RecordId)
+
                 _PhysicalRecordOrdinals(Record.RecordId) = Ordinal
+
+                Dim PageNumber = Ordinal \ _IndexPageEntryCount
+                Dim PageRecordIds As SortedSet(Of Long) = Nothing
+
+                If _PhysicalRecordIdsByPage.TryGetValue(PageNumber, PageRecordIds) = False Then
+                    PageRecordIds = New SortedSet(Of Long)()
+                    _PhysicalRecordIdsByPage.Add(PageNumber, PageRecordIds)
+                End If
+
+                PageRecordIds.Add(Record.RecordId)
+
+                If Record.RefCount > 0 Then
+
+                    If _LivePhysicalRecordIdsByOffset.ContainsKey(Record.PhysicalOffset) Then
+                        Throw New InvalidDataException(
+                            $"Multiple live physical records begin at offset {Record.PhysicalOffset}.")
+                    End If
+
+                    _LivePhysicalRecordIdsByOffset.Add(Record.PhysicalOffset, Record.RecordId)
+
+                End If
+
+                _PhysicalDataEnd =
+                    Math.Max(_PhysicalDataEnd,
+                             Record.PhysicalOffset + CLng(Record.PhysicalLength))
+
                 Ordinal += 1
+
             Next
+
         End Sub
 
         Private Sub ReclaimPendingPhysicalRecords()

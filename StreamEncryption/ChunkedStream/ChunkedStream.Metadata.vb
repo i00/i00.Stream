@@ -270,17 +270,30 @@ Namespace Streams
 
         End Sub
 
-        Private Function BuildPhysicalRecordPage(PageNumber As Integer,
-                                                 OrderedRecords As IList(Of PhysicalRecordEntry)) As Byte()
+        Private Function BuildPhysicalRecordPage(PageNumber As Integer) As Byte()
 
             If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
-            If OrderedRecords Is Nothing Then Throw New ArgumentNullException(NameOf(OrderedRecords))
             If _IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid physical-record page entry count.")
 
-            Dim PageLengthWithoutMac = IndexPageHeaderSize + (_IndexPageEntryCount * PhysicalRecordEntrySize)
+            Dim PageLengthWithoutMac =
+                IndexPageHeaderSize +
+                (_IndexPageEntryCount * PhysicalRecordEntrySize)
+
             Dim Page(PageLengthWithoutMac + MacSize - 1) As Byte
             Dim FirstIndex = PageNumber * _IndexPageEntryCount
-            Dim EntryCount = Math.Max(0, Math.Min(_IndexPageEntryCount, OrderedRecords.Count - FirstIndex))
+
+            Dim PageRecordIds As SortedSet(Of Long) = Nothing
+
+            If _PhysicalRecordIdsByPage.TryGetValue(PageNumber, PageRecordIds) = False Then
+                PageRecordIds = New SortedSet(Of Long)()
+            End If
+
+            Dim EntryCount = PageRecordIds.Count
+
+            If EntryCount > _IndexPageEntryCount Then
+                Throw New InvalidDataException(
+                    $"Physical-record page {PageNumber} contains too many entries.")
+            End If
 
             Buffer.BlockCopy(IndexPageMagic, 0, Page, 0, IndexPageMagic.Length)
             Buffer.BlockCopy(BitConverter.GetBytes(CInt(DirectoryTypes.PhysicalRecordPages)), 0, Page, 8, 4)
@@ -290,78 +303,111 @@ Namespace Streams
 
             Dim EntryOffset = IndexPageHeaderSize
 
-            For EntryIndex = 0 To _IndexPageEntryCount - 1
-                Dim SourceIndex = FirstIndex + EntryIndex
+            For Each RecordId In PageRecordIds
 
-                If SourceIndex < OrderedRecords.Count Then
-                    Dim Entry = OrderedRecords(SourceIndex)
+                Dim Entry = GetPhysicalRecord(RecordId)
 
-                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.RecordId), 0, Page, EntryOffset, 8)
-                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.PhysicalOffset), 0, Page, EntryOffset + 8, 8)
-                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.PhysicalLength), 0, Page, EntryOffset + 16, 4)
-                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.PlainLength), 0, Page, EntryOffset + 20, 4)
-                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.RefCount), 0, Page, EntryOffset + 24, 4)
-                End If
+                Buffer.BlockCopy(BitConverter.GetBytes(Entry.RecordId), 0, Page, EntryOffset, 8)
+                Buffer.BlockCopy(BitConverter.GetBytes(Entry.PhysicalOffset), 0, Page, EntryOffset + 8, 8)
+                Buffer.BlockCopy(BitConverter.GetBytes(Entry.PhysicalLength), 0, Page, EntryOffset + 16, 4)
+                Buffer.BlockCopy(BitConverter.GetBytes(Entry.PlainLength), 0, Page, EntryOffset + 20, 4)
+                Buffer.BlockCopy(BitConverter.GetBytes(Entry.RefCount), 0, Page, EntryOffset + 24, 4)
 
                 EntryOffset += PhysicalRecordEntrySize
+
             Next
 
-            Dim Mac = ComputeMac(Page, PageLengthWithoutMac, PublicIntegrityKey)
-            Buffer.BlockCopy(Mac, 0, Page, PageLengthWithoutMac, MacSize)
+            Dim Mac =
+                ComputeMac(Page,
+                           PageLengthWithoutMac,
+                           PublicIntegrityKey)
+
+            Buffer.BlockCopy(Mac,
+                             0,
+                             Page,
+                             PageLengthWithoutMac,
+                             MacSize)
 
             Return Page
 
         End Function
 
-        Private Sub WritePhysicalRecordPage(PageNumber As Integer,
-                                            OrderedRecords As IList(Of PhysicalRecordEntry))
+        Private Sub WritePhysicalRecordPage(PageNumber As Integer)
+
             Try
+
                 DebugWritePhysicalRecordPageCount += 1
                 swWritePhysicalRecordPage.Start()
 
                 If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
-                If OrderedRecords Is Nothing Then Throw New ArgumentNullException(NameOf(OrderedRecords))
 
                 Dim OldDescriptor As MetadataPageDescriptor = Nothing
-                Dim HadOldDescriptor = _PhysicalRecordPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
-                Dim FirstIndex = PageNumber * _IndexPageEntryCount
-                Dim EntryCount = Math.Max(0, Math.Min(_IndexPageEntryCount, OrderedRecords.Count - FirstIndex))
+                Dim HadOldDescriptor =
+                    _PhysicalRecordPageDescriptors.TryGetValue(PageNumber,
+                                                               OldDescriptor)
+
+                Dim PageRecordIds As SortedSet(Of Long) = Nothing
+                Dim EntryCount = 0
+
+                If _PhysicalRecordIdsByPage.TryGetValue(PageNumber,
+                                                        PageRecordIds) Then
+
+                    EntryCount = PageRecordIds.Count
+
+                End If
 
                 If EntryCount = 0 Then
+
                     If HadOldDescriptor Then
-                        If OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                            AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+
+                        If OldDescriptor.Offset > 0 AndAlso
+                           OldDescriptor.Length > 0 Then
+
+                            AddFreeIndexPageSpace(OldDescriptor.Offset,
+                                                  OldDescriptor.Length)
+
                         End If
 
                         _PhysicalRecordPageDescriptors.Remove(PageNumber)
+
                     End If
 
                     Return
+
                 End If
 
-                Dim Page = BuildPhysicalRecordPage(PageNumber, OrderedRecords)
+                Dim Page = BuildPhysicalRecordPage(PageNumber)
                 Dim Offset = GetNextIndexPageWriteOffset(Page.Length)
 
                 _Fs.Position = Offset
                 _Fs.Write(Page, 0, Page.Length)
 
-                Dim Descriptor = New MetadataPageDescriptor With {
-                .PageNumber = PageNumber,
-                .Offset = Offset,
-                .Length = Page.Length,
-                .Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
-            }
+                Dim Descriptor =
+                    New MetadataPageDescriptor With {
+                        .PageNumber = PageNumber,
+                        .Offset = Offset,
+                        .Length = Page.Length,
+                        .Mac = ComputeMac(Page,
+                                          Page.Length - MacSize,
+                                          PublicIntegrityKey)
+                    }
 
-                If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                    AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                If HadOldDescriptor AndAlso
+                   OldDescriptor.Offset > 0 AndAlso
+                   OldDescriptor.Length > 0 Then
+
+                    AddFreeIndexPageSpace(OldDescriptor.Offset,
+                                          OldDescriptor.Length)
+
                 End If
 
                 _PhysicalRecordPageDescriptors(PageNumber) = Descriptor
 
             Finally
-                swWritePhysicalRecordPage.Stop()
-            End Try
 
+                swWritePhysicalRecordPage.Stop()
+
+            End Try
 
         End Sub
 
@@ -616,8 +662,11 @@ Namespace Streams
 
         End Sub
 
-        Private Sub PersistPagedMetadata(IndexOffset As Long, Durable As Boolean)
+        Private Sub PersistPagedMetadata(IndexOffset As Long,
+                                         Durable As Boolean)
+
             Try
+
                 swPersistPagedMetadata.Start()
 
                 If IndexOffset < DataStartOffset Then Throw New InvalidDataException("Invalid index offset.")
@@ -633,45 +682,80 @@ Namespace Streams
                 _DebugTotalPersistIndexPages += _DirtyExtentPages.Count + _DirtyPhysicalRecordPages.Count
 #End If
 
-                Dim RequiredExtentPageCount = GetIndexPageCount(_Extents.Count, _IndexPageEntryCount)
-                Dim RemovedExtentPages = _ExtentPageDescriptors.Keys.Where(Function(x) x >= RequiredExtentPageCount).ToArray()
+                Dim RequiredExtentPageCount =
+                    GetIndexPageCount(_Extents.Count,
+                                      _IndexPageEntryCount)
+
+                Dim RemovedExtentPages =
+                    _ExtentPageDescriptors.Keys.
+                                           Where(Function(pageNumber) pageNumber >= RequiredExtentPageCount).
+                                           ToArray()
 
                 For Each PageNumber In RemovedExtentPages
+
                     Dim Descriptor = _ExtentPageDescriptors(PageNumber)
-                    AddFreeIndexPageSpace(Descriptor.Offset, Descriptor.Length)
+
+                    AddFreeIndexPageSpace(Descriptor.Offset,
+                                          Descriptor.Length)
+
                     _ExtentPageDescriptors.Remove(PageNumber)
+
                 Next
 
-                Dim OrderedPhysicalRecords = _PhysicalRecords.Values.OrderBy(Function(record) record.RecordId).ToList()
-                Dim RequiredPhysicalRecordPageCount = GetIndexPageCount(OrderedPhysicalRecords.Count, _IndexPageEntryCount)
-                Dim RemovedPhysicalRecordPages = _PhysicalRecordPageDescriptors.Keys.Where(Function(x) x >= RequiredPhysicalRecordPageCount).ToArray()
+                Dim RequiredPhysicalRecordPageCount =
+                    GetIndexPageCount(_PhysicalRecords.Count,
+                                      _IndexPageEntryCount)
+
+                Dim RemovedPhysicalRecordPages =
+                    _PhysicalRecordPageDescriptors.Keys.
+                                                   Where(Function(pageNumber) pageNumber >= RequiredPhysicalRecordPageCount).
+                                                   ToArray()
 
                 For Each PageNumber In RemovedPhysicalRecordPages
-                    Dim Descriptor = _PhysicalRecordPageDescriptors(PageNumber)
-                    AddFreeIndexPageSpace(Descriptor.Offset, Descriptor.Length)
+
+                    Dim Descriptor =
+                        _PhysicalRecordPageDescriptors(PageNumber)
+
+                    AddFreeIndexPageSpace(Descriptor.Offset,
+                                          Descriptor.Length)
+
                     _PhysicalRecordPageDescriptors.Remove(PageNumber)
+
                 Next
 
                 For Each PageNumber In _DirtyExtentPages.ToArray()
+
                     If PageNumber < RequiredExtentPageCount Then
                         WriteExtentPage(PageNumber)
                     End If
+
                 Next
 
                 For Each PageNumber In _DirtyPhysicalRecordPages.ToArray()
+
                     If PageNumber < RequiredPhysicalRecordPageCount Then
-                        WritePhysicalRecordPage(PageNumber, OrderedPhysicalRecords)
+                        WritePhysicalRecordPage(PageNumber)
                     End If
+
                 Next
 
                 _DirtyExtentPages.Clear()
                 _DirtyPhysicalRecordPages.Clear()
 
-                Dim DirectExtentPageDescriptors As MetadataPageDescriptor() = _ExtentPageDescriptors.Values.OrderBy(Function(descriptor) descriptor.PageNumber).ToArray()
-                Dim ExtentDirectoryDescriptors As MetadataPageDescriptor() = Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
+                Dim DirectExtentPageDescriptors =
+                    _ExtentPageDescriptors.Values.
+                                           OrderBy(Function(descriptor) descriptor.PageNumber).
+                                           ToArray()
+
+                Dim ExtentDirectoryDescriptors =
+                    Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
 
                 If _ExtentPageDescriptors.Count > _IndexDirectoryEntryCount Then
-                    Dim NewExtentDirectoryDescriptors = WriteDirectoryPages(DirectoryTypes.ExtentPages, _ExtentPageDescriptors.Values, _ExtentDirectoryPageDescriptors)
+
+                    Dim NewExtentDirectoryDescriptors =
+                        WriteDirectoryPages(DirectoryTypes.ExtentPages,
+                                            _ExtentPageDescriptors.Values,
+                                            _ExtentDirectoryPageDescriptors)
 
                     _ExtentDirectoryPageDescriptors.Clear()
 
@@ -679,23 +763,43 @@ Namespace Streams
                         _ExtentDirectoryPageDescriptors(Pair.Key) = Pair.Value
                     Next
 
-                    DirectExtentPageDescriptors = Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
-                    ExtentDirectoryDescriptors = _ExtentDirectoryPageDescriptors.Values.OrderBy(Function(descriptor) descriptor.PageNumber).ToArray()
+                    DirectExtentPageDescriptors =
+                        Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
+
+                    ExtentDirectoryDescriptors =
+                        _ExtentDirectoryPageDescriptors.Values.
+                                                        OrderBy(Function(descriptor) descriptor.PageNumber).
+                                                        ToArray()
+
                 Else
+
                     For Each Descriptor In _ExtentDirectoryPageDescriptors.Values.ToArray()
+
                         If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                            AddFreeIndexDirectoryPageSpace(Descriptor.Offset, Descriptor.Length)
+                            AddFreeIndexDirectoryPageSpace(Descriptor.Offset,
+                                                           Descriptor.Length)
                         End If
+
                     Next
 
                     _ExtentDirectoryPageDescriptors.Clear()
+
                 End If
 
-                Dim DirectPhysicalRecordPageDescriptors As MetadataPageDescriptor() = _PhysicalRecordPageDescriptors.Values.OrderBy(Function(descriptor) descriptor.PageNumber).ToArray()
-                Dim PhysicalRecordDirectoryDescriptors As MetadataPageDescriptor() = Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
+                Dim DirectPhysicalRecordPageDescriptors =
+                    _PhysicalRecordPageDescriptors.Values.
+                                                   OrderBy(Function(descriptor) descriptor.PageNumber).
+                                                   ToArray()
+
+                Dim PhysicalRecordDirectoryDescriptors =
+                    Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
 
                 If _PhysicalRecordPageDescriptors.Count > _IndexDirectoryEntryCount Then
-                    Dim NewPhysicalRecordDirectoryDescriptors = WriteDirectoryPages(DirectoryTypes.PhysicalRecordPages, _PhysicalRecordPageDescriptors.Values, _PhysicalRecordDirectoryPageDescriptors)
+
+                    Dim NewPhysicalRecordDirectoryDescriptors =
+                        WriteDirectoryPages(DirectoryTypes.PhysicalRecordPages,
+                                            _PhysicalRecordPageDescriptors.Values,
+                                            _PhysicalRecordDirectoryPageDescriptors)
 
                     _PhysicalRecordDirectoryPageDescriptors.Clear()
 
@@ -703,30 +807,48 @@ Namespace Streams
                         _PhysicalRecordDirectoryPageDescriptors(Pair.Key) = Pair.Value
                     Next
 
-                    DirectPhysicalRecordPageDescriptors = Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
-                    PhysicalRecordDirectoryDescriptors = _PhysicalRecordDirectoryPageDescriptors.Values.OrderBy(Function(descriptor) descriptor.PageNumber).ToArray()
+                    DirectPhysicalRecordPageDescriptors =
+                        Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
+
+                    PhysicalRecordDirectoryDescriptors =
+                        _PhysicalRecordDirectoryPageDescriptors.Values.
+                                                                OrderBy(Function(descriptor) descriptor.PageNumber).
+                                                                ToArray()
+
                 Else
+
                     For Each Descriptor In _PhysicalRecordDirectoryPageDescriptors.Values.ToArray()
+
                         If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                            AddFreeIndexDirectoryPageSpace(Descriptor.Offset, Descriptor.Length)
+                            AddFreeIndexDirectoryPageSpace(Descriptor.Offset,
+                                                           Descriptor.Length)
                         End If
+
                     Next
 
                     _PhysicalRecordDirectoryPageDescriptors.Clear()
+
                 End If
 
-                Dim NewHoleDirectoryDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
+                Dim NewHoleDirectoryDescriptors =
+                    New Dictionary(Of Integer, MetadataPageDescriptor)()
 
                 If ShouldPersistHoleDirectory(Durable) Then
-                    NewHoleDirectoryDescriptors = WriteHoleDirectoryPages(GetKnownHoleRecords())
+                    NewHoleDirectoryDescriptors =
+                        WriteHoleDirectoryPages(GetKnownHoleRecords())
                 End If
 
                 For Each Descriptor In _HoleDirectoryPageDescriptors.Values.ToArray()
+
                     If NewHoleDirectoryDescriptors.ContainsKey(Descriptor.PageNumber) = False Then
+
                         If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                            AddFreeIndexDirectoryPageSpace(Descriptor.Offset, Descriptor.Length)
+                            AddFreeIndexDirectoryPageSpace(Descriptor.Offset,
+                                                           Descriptor.Length)
                         End If
+
                     End If
+
                 Next
 
                 _HoleDirectoryPageDescriptors.Clear()
@@ -735,22 +857,33 @@ Namespace Streams
                     _HoleDirectoryPageDescriptors(Pair.Key) = Pair.Value
                 Next
 
-                Dim HoleDirectoryDescriptors = _HoleDirectoryPageDescriptors.Values.OrderBy(Function(descriptor) descriptor.PageNumber).ToArray()
+                Dim HoleDirectoryDescriptors =
+                    _HoleDirectoryPageDescriptors.Values.
+                                                  OrderBy(Function(descriptor) descriptor.PageNumber).
+                                                  ToArray()
 
-                Dim Root = BuildMetadataRoot(DirectExtentPageDescriptors,
-                                             ExtentDirectoryDescriptors,
-                                             DirectPhysicalRecordPageDescriptors,
-                                             PhysicalRecordDirectoryDescriptors,
-                                             HoleDirectoryDescriptors)
+                Dim Root =
+                    BuildMetadataRoot(DirectExtentPageDescriptors,
+                                      ExtentDirectoryDescriptors,
+                                      DirectPhysicalRecordPageDescriptors,
+                                      PhysicalRecordDirectoryDescriptors,
+                                      HoleDirectoryDescriptors)
 
                 Dim OldRootOffset = _MetadataRootOffset
                 Dim OldRootLength = _MetadataRootLength
                 Dim CompactRootOffset As Long
 
-                If TryGetCompactMetadataWriteOffset(Root.Length, CompactRootOffset) Then
+                If TryGetCompactMetadataWriteOffset(Root.Length,
+                                                    CompactRootOffset) Then
+
                     _MetadataRootOffset = CompactRootOffset
+
                 Else
-                    _MetadataRootOffset = Math.Max(_Fs.Length, GetDataEndFromIndex())
+
+                    _MetadataRootOffset =
+                        Math.Max(_Fs.Length,
+                                 GetDataEndFromIndex())
+
                 End If
 
                 _MetadataRootLength = Root.Length
@@ -759,7 +892,8 @@ Namespace Streams
                 _Fs.Write(Root, 0, Root.Length)
 
                 If OldRootOffset > 0 AndAlso OldRootLength > 0 Then
-                    AddFreeIndexDirectoryPageSpace(OldRootOffset, OldRootLength)
+                    AddFreeIndexDirectoryPageSpace(OldRootOffset,
+                                                   OldRootLength)
                 End If
 
                 If Durable Then FlushDurable(_Fs)
@@ -769,9 +903,10 @@ Namespace Streams
                 If Durable Then FlushDurable(_Fs)
 
             Finally
-                swPersistPagedMetadata.Stop()
-            End Try
 
+                swPersistPagedMetadata.Stop()
+
+            End Try
 
         End Sub
 

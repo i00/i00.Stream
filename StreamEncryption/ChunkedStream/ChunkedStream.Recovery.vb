@@ -181,38 +181,35 @@ Namespace Streams
         Private Sub RecoverPhysicalRecordMove(State As RecoveryStates)
 
             Dim RecordId =
-                BitConverter.ToInt64(
-                    _Header,
-                    JournalChunkIndexOffset)
+                BitConverter.ToInt64(_Header,
+                                     JournalChunkIndexOffset)
 
             Dim OldOffset =
-                BitConverter.ToInt64(
-                    _Header,
-                    JournalOldOffsetOffset)
+                BitConverter.ToInt64(_Header,
+                                     JournalOldOffsetOffset)
 
             Dim OldLength =
-                BitConverter.ToInt32(
-                    _Header,
-                    JournalOldLengthOffset)
+                BitConverter.ToInt32(_Header,
+                                     JournalOldLengthOffset)
 
             Dim NewOffset =
-                BitConverter.ToInt64(
-                    _Header,
-                    JournalNewOffsetOffset)
+                BitConverter.ToInt64(_Header,
+                                     JournalNewOffsetOffset)
 
             Dim NewLength =
-                BitConverter.ToInt32(
-                    _Header,
-                    JournalNewLengthOffset)
+                BitConverter.ToInt32(_Header,
+                                     JournalNewLengthOffset)
 
             If RecordId <= SparsePhysicalRecordId Then
-                Throw New InvalidDataException("Invalid recovery journal record id.")
+                Throw New InvalidDataException(
+                    "Invalid recovery journal record id.")
             End If
 
             Dim Record As PhysicalRecordEntry = Nothing
 
             If _PhysicalRecords.TryGetValue(RecordId, Record) = False Then
-                Throw New InvalidDataException($"Recovery journal refers to unknown physical record {RecordId}.")
+                Throw New InvalidDataException(
+                    $"Recovery journal refers to unknown physical record {RecordId}.")
             End If
 
             Select Case State
@@ -223,20 +220,29 @@ Namespace Streams
                                                OldOffset,
                                                OldLength) Then
 
+                        Dim PreviousOffset = Record.PhysicalOffset
+                        Dim PreviousLength = Record.PhysicalLength
+
                         Record.PhysicalOffset = OldOffset
                         Record.PhysicalLength = OldLength
 
                         _PhysicalRecords(RecordId) = Record
 
-                        PersistIndexAndHeader(GetDataEndFromIndex())
+                        UpdatePhysicalRecordLocationIndexes(RecordId,
+                                                            PreviousOffset,
+                                                            PreviousLength)
 
+                        MarkPhysicalRecordDirty(RecordId)
+
+                        PersistIndexAndHeader(GetDataEndFromIndex())
                         ClearRecoveryState()
 
                         Return
 
                     End If
 
-                    Throw New CryptographicException("Recovery failed. Original physical record is invalid.")
+                    Throw New CryptographicException(
+                        "Recovery failed. Original physical record is invalid.")
 
                 Case RecoveryStates.PhysicalRecordCopied
 
@@ -244,13 +250,21 @@ Namespace Streams
                                                NewOffset,
                                                NewLength) Then
 
+                        Dim PreviousOffset = Record.PhysicalOffset
+                        Dim PreviousLength = Record.PhysicalLength
+
                         Record.PhysicalOffset = NewOffset
                         Record.PhysicalLength = NewLength
 
                         _PhysicalRecords(RecordId) = Record
 
-                        PersistIndexAndHeader(GetDataEndFromIndex())
+                        UpdatePhysicalRecordLocationIndexes(RecordId,
+                                                            PreviousOffset,
+                                                            PreviousLength)
 
+                        MarkPhysicalRecordDirty(RecordId)
+
+                        PersistIndexAndHeader(GetDataEndFromIndex())
                         ClearRecoveryState()
 
                         Return
@@ -261,24 +275,34 @@ Namespace Streams
                                                OldOffset,
                                                OldLength) Then
 
+                        Dim PreviousOffset = Record.PhysicalOffset
+                        Dim PreviousLength = Record.PhysicalLength
+
                         Record.PhysicalOffset = OldOffset
                         Record.PhysicalLength = OldLength
 
                         _PhysicalRecords(RecordId) = Record
 
-                        PersistIndexAndHeader(GetDataEndFromIndex())
+                        UpdatePhysicalRecordLocationIndexes(RecordId,
+                                                            PreviousOffset,
+                                                            PreviousLength)
 
+                        MarkPhysicalRecordDirty(RecordId)
+
+                        PersistIndexAndHeader(GetDataEndFromIndex())
                         ClearRecoveryState()
 
                         Return
 
                     End If
 
-                    Throw New CryptographicException("Recovery failed. Neither version of the physical record is valid.")
+                    Throw New CryptographicException(
+                        "Recovery failed. Neither version of the physical record is valid.")
 
                 Case Else
 
-                    Throw New InvalidDataException($"Unsupported recovery state: {CInt(State)}.")
+                    Throw New InvalidDataException(
+                        $"Unsupported recovery state: {CInt(State)}.")
 
             End Select
 

@@ -566,7 +566,10 @@ Namespace Streams
         Private ReadOnly _Header As Byte()
         Private ReadOnly _Extents As List(Of ExtentIndexEntry)
         Private ReadOnly _PhysicalRecordOrdinals As New Dictionary(Of Long, Integer)
+        Private ReadOnly _PhysicalRecordIdsByPage As New Dictionary(Of Integer, SortedSet(Of Long))
+        Private ReadOnly _LivePhysicalRecordIdsByOffset As New SortedList(Of Long, Long)
         Private ReadOnly _PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry)
+        Private _PhysicalDataEnd As Long = DataStartOffset
         Private _NextPhysicalRecordId As Long = 1
         Private ReadOnly _PendingReclaimedPhysicalRecords As New HashSet(Of Long)()
 
@@ -687,10 +690,7 @@ Namespace Streams
             _Length = Length
             _IndexOffset = IndexOffset
             _Extents = If(Extents, New List(Of ExtentIndexEntry)())
-
             _PhysicalRecords = If(PhysicalRecords, New Dictionary(Of Long, PhysicalRecordEntry)())
-            RebuildPhysicalRecordOrdinals()
-
             _NextPhysicalRecordId = Math.Max(1L, NextPhysicalRecordId)
             _HeaderFlags = HeaderFlags
             _MetadataRootOffset = MetadataRootOffset
@@ -698,20 +698,47 @@ Namespace Streams
 
             Me.Options = If(Options, New ChunkedStreamOptions())
 
-            If Me.Options.ChunkSize <= 0 Then Me.Options.ChunkSize = DefaultChunkSize
-            If Me.Options.CompressionRatioThreshold < MinimumCompressionRatioThreshold Then Me.Options.CompressionRatioThreshold = MinimumCompressionRatioThreshold
-            If Me.Options.CompressionRatioThreshold > MaximumCompressionRatioThreshold Then Me.Options.CompressionRatioThreshold = MaximumCompressionRatioThreshold
+            If Me.Options.ChunkSize <= 0 Then
+                Me.Options.ChunkSize = DefaultChunkSize
+            End If
 
-            If IndexPageEntryCount <= 0 Then IndexPageEntryCount = Me.Options.IndexPageEntryCount
-            If IndexDirectoryEntryCount <= 0 Then IndexDirectoryEntryCount = Me.Options.IndexDirectoryEntryCount
-            If IndexPageEntryCount <= 0 Then IndexPageEntryCount = 256
-            If IndexDirectoryEntryCount <= 0 Then IndexDirectoryEntryCount = 256
+            If Me.Options.CompressionRatioThreshold < MinimumCompressionRatioThreshold Then
+                Me.Options.CompressionRatioThreshold = MinimumCompressionRatioThreshold
+            End If
 
+            If Me.Options.CompressionRatioThreshold > MaximumCompressionRatioThreshold Then
+                Me.Options.CompressionRatioThreshold = MaximumCompressionRatioThreshold
+            End If
+
+            If IndexPageEntryCount <= 0 Then
+                IndexPageEntryCount = Me.Options.IndexPageEntryCount
+            End If
+
+            If IndexDirectoryEntryCount <= 0 Then
+                IndexDirectoryEntryCount = Me.Options.IndexDirectoryEntryCount
+            End If
+
+            If IndexPageEntryCount <= 0 Then
+                IndexPageEntryCount = 256
+            End If
+
+            If IndexDirectoryEntryCount <= 0 Then
+                IndexDirectoryEntryCount = 256
+            End If
+
+            '
+            ' These values must be established before rebuilding the physical-record
+            ' page indexes because RebuildPhysicalRecordOrdinals calculates:
+            '
+            '     PageNumber = Ordinal \ _IndexPageEntryCount
+            '
             _IndexPageEntryCount = IndexPageEntryCount
             _IndexDirectoryEntryCount = IndexDirectoryEntryCount
 
             Me.Options.IndexPageEntryCount = _IndexPageEntryCount
             Me.Options.IndexDirectoryEntryCount = _IndexDirectoryEntryCount
+
+            RebuildPhysicalRecordOrdinals()
 
             _ChunkSize = Me.Options.ChunkSize
             _ChunkPlain = New Byte(_ChunkSize - 1) {}
