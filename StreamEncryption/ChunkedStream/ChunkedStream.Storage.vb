@@ -519,47 +519,39 @@ Namespace Streams
 
         Private Function GetNextPhysicalRecordWriteOffset(RecordLength As Integer) As Long
 
-            Try
-                swGetNextPhysicalRecordWriteOffset.Start()
+            If RecordLength < MinChunkRecordSize Then Throw New ArgumentOutOfRangeException(NameOf(RecordLength))
 
-                If RecordLength < MinChunkRecordSize Then Throw New ArgumentOutOfRangeException(NameOf(RecordLength))
-
-                If HasOpenCheckpoint Then
-                    Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
-                End If
-
-                Select Case Options.NewChunkWriteLocationPolicy
-
-                    Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles
-
-                        Dim HoleOffset As Long
-
-                        If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
-                            Return HoleOffset
-                        End If
-
-                    Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
-
-                        Dim HoleOffset As Long
-
-                        If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
-                            Return HoleOffset
-                        End If
-
-                        BuildFreeChunkSpaceMap()
-
-                        If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
-                            Return HoleOffset
-                        End If
-
-                End Select
-
+            If HasOpenCheckpoint Then
                 Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
-            Finally
-                swGetNextPhysicalRecordWriteOffset.Stop()
-            End Try
+            End If
 
+            Select Case Options.NewChunkWriteLocationPolicy
 
+                Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles
+
+                    Dim HoleOffset As Long
+
+                    If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
+                        Return HoleOffset
+                    End If
+
+                Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
+
+                    Dim HoleOffset As Long
+
+                    If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
+                        Return HoleOffset
+                    End If
+
+                    BuildFreeChunkSpaceMap()
+
+                    If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
+                        Return HoleOffset
+                    End If
+
+            End Select
+
+            Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
 
         End Function
 

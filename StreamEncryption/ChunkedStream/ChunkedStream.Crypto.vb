@@ -375,33 +375,24 @@ Namespace Streams
                                  OutputOffset As Integer,
                                  Key As Byte())
 
-            Try
-                swCryptPayload.Start()
+            If Key Is Nothing Then Throw New ArgumentNullException(NameOf(Key))
 
-                If Key Is Nothing Then Throw New ArgumentNullException(NameOf(Key))
+            _AesProvider.Key = Key
 
-                _AesProvider.Key = Key
+            Using Transform = _AesProvider.CreateEncryptor()
+                For BlockOffset = 0 To Count - 1 Step 16
+                    Transform.TransformBlock(_Counter, 0, 16, _KeyStream, 0)
 
-                Using Transform = _AesProvider.CreateEncryptor()
-                    For BlockOffset = 0 To Count - 1 Step 16
-                        Transform.TransformBlock(_Counter, 0, 16, _KeyStream, 0)
+                    Dim BytesToProcess = Math.Min(16, Count - BlockOffset)
 
-                        Dim BytesToProcess = Math.Min(16, Count - BlockOffset)
-
-                        For i = 0 To BytesToProcess - 1
-                            Output(OutputOffset + BlockOffset + i) =
-                                CByte(CInt(Input(InputOffset + BlockOffset + i)) Xor CInt(_KeyStream(i)))
-                        Next
-
-                        IncrementCounter(_Counter)
+                    For i = 0 To BytesToProcess - 1
+                        Output(OutputOffset + BlockOffset + i) =
+                            CByte(CInt(Input(InputOffset + BlockOffset + i)) Xor CInt(_KeyStream(i)))
                     Next
-                End Using
 
-            Finally
-                swCryptPayload.Stop()
-            End Try
-
-
+                    IncrementCounter(_Counter)
+                Next
+            End Using
 
         End Sub
 

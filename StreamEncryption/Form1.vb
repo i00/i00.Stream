@@ -68,8 +68,8 @@ Public Class Form1
         'Test("C:\Games\Vampire The Masquerade - Bloodlines.zip")
         'Test("C:\Windows\System32\mrt.exe")
         'Test("C:\Games\mrt.zip", True)
-        'Test("C:\Games\mrt.exe", True)
-        Test("C:\Games\Vampire The Masquerade - Bloodlines.zip", False)
+        Test("C:\Games\mrt.exe", True)
+        'Test("C:\Games\Vampire The Masquerade - Bloodlines.zip", False)
         'Test("C:\Windows\explorer.exe", True)
 
 
@@ -86,10 +86,10 @@ Public Class Form1
         Dim Options As New Streams.ChunkedStream.ChunkedStreamOptions() With
         {
             .CompressionRatioThreshold = 1,
-            .CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.None,
+            .CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
             .NewIndexPageWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
             .NewChunkWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
-            .EncryptionInfo = Nothing'New Streams.ChunkedStream.EncryptionInfo("MySecretPassword")
+            .EncryptionInfo = New Streams.ChunkedStream.EncryptionInfo("MySecretPassword")
         }
         '.EncryptionInfo = New Streams.ChunkedStream.EncryptionInfo("MySecretPassword"),
 
@@ -119,7 +119,7 @@ Public Class Form1
 
             Dim DecryptedMD5 As String
 
-            Using EncStorage = New FileStream("asd.ziped", FileMode.Create) 'As New MemoryStream()
+            Using EncStorage = New MemoryStream() 'New FileStream("asd.ziped", FileMode.Create) ' New MemoryStream()
 
                 Dim InputMBps = 0.0
                 Dim OutputMBps = 0.0
@@ -217,22 +217,22 @@ Public Class Form1
                                 If BytesRead = 0 Then Exit While
 
                                 If BytesRead = Buffer.Length Then
-                                    Enc.DebugTimers.Clear()
+                                    'Enc.DebugTimers.Clear()
 
-                                    Enc.swCryptPayload.Reset()
-                                    'Enc.swCompressPayload.Reset()
-                                    'Enc.swComputeHash.Reset()
-                                    'Enc.swWritePhysicalRecordWithPolicy.Reset()
-                                    Enc.swGetNextPhysicalRecordWriteOffset.Reset()
-                                    Enc.swPersistPagedMetadata.Reset()
-                                    'Enc.swMarkPhysicalRecordDirty.Reset()
+                                    'Enc.swCryptPayload.Reset()
+                                    ''Enc.swCompressPayload.Reset()
+                                    ''Enc.swComputeHash.Reset()
+                                    ''Enc.swWritePhysicalRecordWithPolicy.Reset()
+                                    'Enc.swGetNextPhysicalRecordWriteOffset.Reset()
+                                    'Enc.swPersistPagedMetadata.Reset()
+                                    ''Enc.swMarkPhysicalRecordDirty.Reset()
 
-                                    Enc.swWriteExtentPage.Reset()
-                                    Enc.swWritePhysicalRecordPage.Reset()
-                                    Enc.swWriteDirectoryPages.Reset()
-                                    Enc.swWriteHoleDirectoryPages.Reset()
-                                    Enc.DebugWriteExtentPageCount = 0
-                                    Enc.DebugWritePhysicalRecordPageCount = 0
+                                    'Enc.swWriteExtentPage.Reset()
+                                    'Enc.swWritePhysicalRecordPage.Reset()
+                                    'Enc.swWriteDirectoryPages.Reset()
+                                    'Enc.swWriteHoleDirectoryPages.Reset()
+                                    'Enc.DebugWriteExtentPageCount = 0
+                                    'Enc.DebugWritePhysicalRecordPageCount = 0
 
                                     Dim sw As New Stopwatch()
                                     sw.Start()
@@ -253,7 +253,7 @@ Public Class Form1
                                         'Debug.Print($"    WriteHoleDirectoryPages: {Enc.swWriteHoleDirectoryPages.ElapsedMilliseconds}")
                                         ''Debug.Print($"    WritePhysicalRecordWithPolicy: {Enc.swWritePhysicalRecordWithPolicy.ElapsedMilliseconds}")
                                         'Debug.Print($"    GetNextPhysicalRecordWriteOffset: {Enc.swGetNextPhysicalRecordWriteOffset.ElapsedMilliseconds}")
-                                        Debug.Print($"    PersistPagedMetadata: {Enc.swPersistPagedMetadata.ElapsedMilliseconds}")
+                                        'Debug.Print($"    PersistPagedMetadata: {Enc.swPersistPagedMetadata.ElapsedMilliseconds}")
                                         'Debug.Print($"    CryptPayload: {Enc.swCryptPayload.ElapsedMilliseconds}")
                                         ''Debug.Print($"    CompressPayload: {Enc.swCompressPayload.ElapsedMilliseconds}")
                                         ''Debug.Print($"    ComputeHash: {Enc.swComputeHash.ElapsedMilliseconds}")
@@ -261,9 +261,9 @@ Public Class Form1
                                         'Debug.Print($"    DirtyPhysicalPages: {Enc._DirtyPhysicalRecordPages.Count}")
                                         'Debug.Print($"    DebugWriteExtentPageCount: {Enc.DebugWriteExtentPageCount}")
                                         'Debug.Print($"    DebugWritePhysicalRecordPageCount: {Enc.DebugWritePhysicalRecordPageCount}")
-                                        For Each entry In Enc.DebugTimers
-                                            Debug.Print($"    {entry.Key}: {entry.Value.ElapsedMilliseconds}")
-                                        Next
+                                        'For Each entry In Enc.DebugTimers
+                                        '    Debug.Print($"    {entry.Key}: {entry.Value.ElapsedMilliseconds}")
+                                        'Next
 
                                     End If
 
