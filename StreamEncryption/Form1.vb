@@ -217,14 +217,15 @@ Public Class Form1
                                 If BytesRead = 0 Then Exit While
 
                                 If BytesRead = Buffer.Length Then
+                                    Enc.DebugTimers.Clear()
+
                                     Enc.swCryptPayload.Reset()
-                                    Enc.swCompressPayload.Reset()
-                                    Enc.swComputeHash.Reset()
-                                    Enc.swWritePhysicalRecordWithPolicy.Reset()
-                                    Enc.swWritePhysicalRecordWithPolicy.Reset()
+                                    'Enc.swCompressPayload.Reset()
+                                    'Enc.swComputeHash.Reset()
+                                    'Enc.swWritePhysicalRecordWithPolicy.Reset()
                                     Enc.swGetNextPhysicalRecordWriteOffset.Reset()
                                     Enc.swPersistPagedMetadata.Reset()
-                                    Enc.swMarkPhysicalRecordDirty.Reset()
+                                    'Enc.swMarkPhysicalRecordDirty.Reset()
 
                                     Enc.swWriteExtentPage.Reset()
                                     Enc.swWritePhysicalRecordPage.Reset()
@@ -245,21 +246,24 @@ Public Class Form1
 
                                         Debug.Print($"{Now}: Cs.Length: {Enc.Length}")
                                         Debug.Print($"    Total Write: {sw.ElapsedMilliseconds}")
-                                        Debug.Print($"    WriteExtentPage: {Enc.swWriteExtentPage.ElapsedMilliseconds}")
-                                        Debug.Print($"    MarkPhysicalRecordDirty: {Enc.swMarkPhysicalRecordDirty.ElapsedMilliseconds}")
-                                        Debug.Print($"    WritePhysicalRecordPage: {Enc.swWritePhysicalRecordPage.ElapsedMilliseconds}")
-                                        Debug.Print($"    WriteDirectoryPages: {Enc.swWriteDirectoryPages.ElapsedMilliseconds}")
-                                        Debug.Print($"    WriteHoleDirectoryPages: {Enc.swWriteHoleDirectoryPages.ElapsedMilliseconds}")
-                                        Debug.Print($"    WritePhysicalRecordWithPolicy: {Enc.swWritePhysicalRecordWithPolicy.ElapsedMilliseconds}")
-                                        Debug.Print($"    GetNextPhysicalRecordWriteOffset: {Enc.swGetNextPhysicalRecordWriteOffset.ElapsedMilliseconds}")
+                                        'Debug.Print($"    WriteExtentPage: {Enc.swWriteExtentPage.ElapsedMilliseconds}")
+                                        ''Debug.Print($"    MarkPhysicalRecordDirty: {Enc.swMarkPhysicalRecordDirty.ElapsedMilliseconds}")
+                                        'Debug.Print($"    WritePhysicalRecordPage: {Enc.swWritePhysicalRecordPage.ElapsedMilliseconds}")
+                                        'Debug.Print($"    WriteDirectoryPages: {Enc.swWriteDirectoryPages.ElapsedMilliseconds}")
+                                        'Debug.Print($"    WriteHoleDirectoryPages: {Enc.swWriteHoleDirectoryPages.ElapsedMilliseconds}")
+                                        ''Debug.Print($"    WritePhysicalRecordWithPolicy: {Enc.swWritePhysicalRecordWithPolicy.ElapsedMilliseconds}")
+                                        'Debug.Print($"    GetNextPhysicalRecordWriteOffset: {Enc.swGetNextPhysicalRecordWriteOffset.ElapsedMilliseconds}")
                                         Debug.Print($"    PersistPagedMetadata: {Enc.swPersistPagedMetadata.ElapsedMilliseconds}")
-                                        Debug.Print($"    CryptPayload: {Enc.swCryptPayload.ElapsedMilliseconds}")
-                                        Debug.Print($"    CompressPayload: {Enc.swCompressPayload.ElapsedMilliseconds}")
-                                        Debug.Print($"    ComputeHash: {Enc.swComputeHash.ElapsedMilliseconds}")
-                                        Debug.Print($"    DirtyExtentPages: {Enc._DirtyExtentPages.Count}")
-                                        Debug.Print($"    DirtyPhysicalPages: {Enc._DirtyPhysicalRecordPages.Count}")
-                                        Debug.Print($"    DebugWriteExtentPageCount: {Enc.DebugWriteExtentPageCount}")
-                                        Debug.Print($"    DebugWritePhysicalRecordPageCount: {Enc.DebugWritePhysicalRecordPageCount}")
+                                        'Debug.Print($"    CryptPayload: {Enc.swCryptPayload.ElapsedMilliseconds}")
+                                        ''Debug.Print($"    CompressPayload: {Enc.swCompressPayload.ElapsedMilliseconds}")
+                                        ''Debug.Print($"    ComputeHash: {Enc.swComputeHash.ElapsedMilliseconds}")
+                                        'Debug.Print($"    DirtyExtentPages: {Enc._DirtyExtentPages.Count}")
+                                        'Debug.Print($"    DirtyPhysicalPages: {Enc._DirtyPhysicalRecordPages.Count}")
+                                        'Debug.Print($"    DebugWriteExtentPageCount: {Enc.DebugWriteExtentPageCount}")
+                                        'Debug.Print($"    DebugWritePhysicalRecordPageCount: {Enc.DebugWritePhysicalRecordPageCount}")
+                                        For Each entry In Enc.DebugTimers
+                                            Debug.Print($"    {entry.Key}: {entry.Value.ElapsedMilliseconds}")
+                                        Next
 
                                     End If
 

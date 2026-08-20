@@ -359,10 +359,10 @@ Namespace Streams
             _Extents.AddRange(State.Extents)
 
             _PhysicalRecords.Clear()
-
             For Each pair In State.PhysicalRecords
                 _PhysicalRecords(pair.Key) = pair.Value
             Next
+            RebuildPhysicalRecordOrdinals()
 
             _ExtentPageDescriptors.Clear()
             _ExtentDirectoryPageDescriptors.Clear()

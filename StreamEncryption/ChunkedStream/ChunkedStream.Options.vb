@@ -777,10 +777,10 @@ Namespace Streams
                 _Extents.AddRange(NewExtents)
 
                 _PhysicalRecords.Clear()
-
                 For Each pair In NewPhysicalRecords
                     _PhysicalRecords(pair.Key) = pair.Value
                 Next
+                RebuildPhysicalRecordOrdinals()
 
                 _ChunkSize = Options.ChunkSize
                 _ChunkPlain = New Byte(_ChunkSize - 1) {}
@@ -820,10 +820,10 @@ Namespace Streams
             _Extents.AddRange(OriginalExtents)
 
             _PhysicalRecords.Clear()
-
             For Each pair In OriginalPhysicalRecords
                 _PhysicalRecords(pair.Key) = pair.Value
             Next
+            RebuildPhysicalRecordOrdinals()
 
             _NextPhysicalRecordId = OriginalNextPhysicalRecordId
             _IndexOffset = OriginalIndexOffset

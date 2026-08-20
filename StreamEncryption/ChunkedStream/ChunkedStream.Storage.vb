@@ -318,8 +318,6 @@ Namespace Streams
                                                        CompressionRatioThreshold As Double,
                                                        ForceCompression As Boolean,
                                                        EncryptionMethod As ChunkEncryptionMethods) As PhysicalRecordEntry
-            Try
-                swWritePhysicalRecordWithPolicy.Start()
 
                 If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
                 If PlainLength < 0 OrElse PlainLength > Plain.Length Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
@@ -335,15 +333,7 @@ Namespace Streams
 
                 If CompressionMethodToUse <> ChunkedStreamOptions.CompressionMethods.None AndAlso PlainLength > 0 Then
 
-                    Dim Compressed = (Function()
-                                          Try
-                                              swCompressPayload.Start()
-                                              Return CompressPayload(CompressionMethodToUse, Plain, PlainLength)
-                                          Finally
-                                              swCompressPayload.Stop()
-                                          End Try
-                                      End Function).Invoke()
-
+                Dim Compressed = CompressPayload(CompressionMethodToUse, Plain, PlainLength)
                     CompressionEvaluatedMethod = CompressionMethodToUse
                     CompressionEvaluatedPercent = GetCompressionEvaluatedPercent(PlainLength, Compressed.Length)
 
@@ -408,15 +398,7 @@ Namespace Streams
                        PublicIntegrityKey)
 
                 Using Hmac As New HMACSHA256(RecordMacKey)
-                    Dim Mac = (Function()
-                                   Try
-                                       swComputeHash.Start()
-                                       Return Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
-                                   Finally
-                                       swComputeHash.Stop()
-
-                                   End Try
-                               End Function).Invoke()
+                Dim Mac = Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
                     Buffer.BlockCopy(Mac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize)
                 End Using
 
@@ -434,7 +416,17 @@ Namespace Streams
                         .RefCount = 1
                     }
 
+            '
+            ' Capture ordinal BEFORE inserting.
+            '
+            Dim Ordinal = _PhysicalRecords.Count
+
                 _PhysicalRecords(Result.RecordId) = Result
+
+            '
+            ' O(1) lookup for dirty tracking.
+            '
+            _PhysicalRecordOrdinals(Result.RecordId) = Ordinal
 
                 Dim NewRecordEndOffset = NewRecordOffset + Record.Length
 
@@ -442,19 +434,12 @@ Namespace Streams
                     _IndexOffset = NewRecordEndOffset
                 End If
 
-                Try
-                    swMarkPhysicalRecordDirty.Start()
-                    MarkPhysicalRecordDirty(Result.RecordId)
-                Finally
-                    swMarkPhysicalRecordDirty.Stop()
-                End Try
+            '
+            ' Avoid MarkPhysicalRecordDirty().
+            '
+            MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
 
                 Return Result
-            Finally
-                swWritePhysicalRecordWithPolicy.Stop()
-            End Try
-
-
 
         End Function
 

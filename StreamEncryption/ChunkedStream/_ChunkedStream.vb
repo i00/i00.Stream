@@ -565,6 +565,7 @@ Namespace Streams
 
         Private ReadOnly _Header As Byte()
         Private ReadOnly _Extents As List(Of ExtentIndexEntry)
+        Private ReadOnly _PhysicalRecordOrdinals As New Dictionary(Of Long, Integer)
         Private ReadOnly _PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry)
         Private _NextPhysicalRecordId As Long = 1
         Private ReadOnly _PendingReclaimedPhysicalRecords As New HashSet(Of Long)()
@@ -686,7 +687,10 @@ Namespace Streams
             _Length = Length
             _IndexOffset = IndexOffset
             _Extents = If(Extents, New List(Of ExtentIndexEntry)())
+
             _PhysicalRecords = If(PhysicalRecords, New Dictionary(Of Long, PhysicalRecordEntry)())
+            RebuildPhysicalRecordOrdinals()
+
             _NextPhysicalRecordId = Math.Max(1L, NextPhysicalRecordId)
             _HeaderFlags = HeaderFlags
             _MetadataRootOffset = MetadataRootOffset
@@ -1240,16 +1244,32 @@ Namespace Streams
 
 #If DEBUG Then
 
+        Public Property DebugTimers As New Dictionary(Of String, Stopwatch)(StringComparer.OrdinalIgnoreCase)
+        Private Sub TimeIt(Key As String, Action As Action)
+            Dim sw As Stopwatch = Nothing
+            DebugTimers.TryGetValue(Key, sw)
+            If sw Is Nothing Then
+                sw = New Stopwatch
+                DebugTimers(Key) = sw
+            End If
+            Try
+                sw.Start()
+                Action.Invoke()
+            Finally
+                sw.Stop()
+            End Try
+        End Sub
+
         Public DebugWriteExtentPageCount As Integer
         Public DebugWritePhysicalRecordPageCount As Integer
 
         Public Property swCryptPayload As New Stopwatch
-        Public Property swCompressPayload As New Stopwatch
-        Public Property swComputeHash As New Stopwatch
+        'Public Property swCompressPayload As New Stopwatch
+        'Public Property swComputeHash As New Stopwatch
 
-        Public Property swMarkPhysicalRecordDirty As New Stopwatch
+        'Public Property swMarkPhysicalRecordDirty As New Stopwatch
 
-        Public Property swWritePhysicalRecordWithPolicy As New Stopwatch
+        'Public Property swWritePhysicalRecordWithPolicy As New Stopwatch
         Public Property swGetNextPhysicalRecordWriteOffset As New Stopwatch
         Public Property swPersistPagedMetadata As New Stopwatch
 

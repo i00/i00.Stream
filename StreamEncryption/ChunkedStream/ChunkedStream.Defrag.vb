@@ -280,20 +280,14 @@ Namespace Streams
 
         Private Sub MarkPhysicalRecordPageDirty(RecordId As Long)
 
-            Dim Ordinal = 0
+            Dim Ordinal As Integer
 
-            For Each record In _PhysicalRecords.Values.OrderBy(Function(x) x.RecordId)
+            If _PhysicalRecordOrdinals.TryGetValue(RecordId, Ordinal) = False Then
+                Throw New InvalidDataException(
+            $"Physical record {RecordId} was not found while marking metadata dirty.")
+            End If
 
-                If record.RecordId = RecordId Then
-                    MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
-                    Return
-                End If
-
-                Ordinal += 1
-
-            Next
-
-            Throw New InvalidDataException($"Physical record {RecordId} was not found while marking metadata dirty.")
+            MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
 
         End Sub
 
@@ -788,10 +782,10 @@ Namespace Streams
             _Extents.AddRange(OriginalExtents)
 
             _PhysicalRecords.Clear()
-
             For Each pair In OriginalPhysicalRecords
                 _PhysicalRecords(pair.Key) = pair.Value
             Next
+            RebuildPhysicalRecordOrdinals()
 
             ClearFreeSpaceMaps()
             DiscardPendingPhysicalRecordReclaims()
@@ -910,10 +904,10 @@ Namespace Streams
                 _Extents.AddRange(NewExtents)
 
                 _PhysicalRecords.Clear()
-
                 For Each pair In NewPhysicalRecords
                     _PhysicalRecords(pair.Key) = pair.Value
                 Next
+                RebuildPhysicalRecordOrdinals()
 
                 _ChunkSize = TargetChunkSize
                 _IndexPageEntryCount = Options.IndexPageEntryCount

@@ -165,30 +165,16 @@ Namespace Streams
 
         End Sub
 
-        Private Function GetPhysicalRecordOrdinal(RecordId As Long) As Integer
-
-            Dim Ordinal = 0
-
-            For Each record In _PhysicalRecords.Values.OrderBy(Function(x) x.RecordId)
-
-                If record.RecordId = RecordId Then
-                    Return Ordinal
-                End If
-
-                Ordinal += 1
-
-            Next
-
-            Throw New InvalidDataException($"Physical record {RecordId} was not found.")
-
-        End Function
-
         Private Sub MarkPhysicalRecordDirty(RecordId As Long)
 
             If RecordId = SparsePhysicalRecordId Then Return
 
-            MarkPhysicalRecordPageDirtyByOrdinal(GetPhysicalRecordOrdinal(RecordId))
-
+            Dim Ordinal As Integer
+            If _PhysicalRecordOrdinals.TryGetValue(RecordId, Ordinal) = False Then
+                Throw New InvalidDataException(
+                    $"Physical record ordinal for record {RecordId} was not found.")
+            End If
+            MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
         End Sub
 
         Private Sub MarkPhysicalRecordPagesDirtyFromOrdinal(Ordinal As Integer)
@@ -239,23 +225,44 @@ Namespace Streams
 
             If RecordId = SparsePhysicalRecordId Then Return
 
-            Dim RemovedOrdinal = GetPhysicalRecordOrdinal(RecordId)
+            Dim RemovedOrdinal As Integer
+
+            If _PhysicalRecordOrdinals.TryGetValue(RecordId, RemovedOrdinal) = False Then
+                Throw New InvalidDataException(
+                    $"Physical record ordinal for record {RecordId} was not found.")
+            End If
+
             Dim Record = GetPhysicalRecord(RecordId)
 
             If Record.RefCount <> 0 Then
-                Throw New InvalidOperationException($"Cannot reclaim physical record {RecordId} because it is still referenced.")
+                Throw New InvalidOperationException(
+                    $"Cannot reclaim physical record {RecordId} because it is still referenced.")
             End If
 
-            AddFreeChunkSpace(Record.PhysicalOffset, Record.PhysicalLength)
+            AddFreeChunkSpace(
+                Record.PhysicalOffset,
+                Record.PhysicalLength)
 
             _PhysicalRecords.Remove(RecordId)
 
+            RebuildPhysicalRecordOrdinals()
+
             '
-            ' Physical-record pages are stored by RecordId order. Removing one entry shifts
-            ' every later physical-record entry left by one ordinal.
+            ' Removing a record shifts every later ordinal.
             '
             MarkPhysicalRecordPagesDirtyFromOrdinal(RemovedOrdinal)
 
+        End Sub
+
+
+        Private Sub RebuildPhysicalRecordOrdinals()
+            _PhysicalRecordOrdinals.Clear()
+            Dim Ordinal = 0
+            For Each Record In _PhysicalRecords.Values.
+                                    OrderBy(Function(x) x.RecordId)
+                _PhysicalRecordOrdinals(Record.RecordId) = Ordinal
+                Ordinal += 1
+            Next
         End Sub
 
         Private Sub ReclaimPendingPhysicalRecords()
