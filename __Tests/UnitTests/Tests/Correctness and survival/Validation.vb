@@ -502,7 +502,7 @@ Namespace Tests
                         CorruptPhysicalRecordInt32Field(
                             Ms,
                             Chunk.PhysicalOffset.Value,
-                            ChunkedStream.Debug_ChunkFlagsOffset,
+                            ChunkedStream.ChunkFlagsOffset,
                             &H7FFFFFFF)
 
                         AssertThrows(Of InvalidDataException)(
@@ -550,7 +550,7 @@ Namespace Tests
                         CorruptPhysicalRecordByteField(
                             Ms,
                             Chunk.PhysicalOffset.Value,
-                            ChunkedStream.Debug_ChunkCompressionEvaluatedPercentOffset,
+                            ChunkedStream.ChunkCompressionEvaluatedPercentOffset,
                             255)
 
                         AssertThrows(Of InvalidDataException)(

@@ -87,7 +87,6 @@
     <Compile Include="ChunkedStream\ChunkedStream.Crypto.vb" />
     <Compile Include="ChunkedStream\ChunkedStream.Storage.vb" />
     <Compile Include="ChunkedStream\ChunkedStream.Structure.vb" />
-    <Compile Include="ChunkedStream\UnitTest\Exposed.vb" />
     <Compile Include="ChunkedStream\UnitTest\Helpers.vb" />
     <Compile Include="Compression\Snappy.vb" />
     <Compile Include="Extensions.vb" />

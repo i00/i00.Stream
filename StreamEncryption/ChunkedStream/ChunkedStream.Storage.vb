@@ -318,154 +318,189 @@ Namespace Streams
                                                        CompressionRatioThreshold As Double,
                                                        ForceCompression As Boolean,
                                                        EncryptionMethod As ChunkEncryptionMethods) As PhysicalRecordEntry
+            Try
+                swWritePhysicalRecordWithPolicy.Start()
 
-            If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
-            If PlainLength < 0 OrElse PlainLength > Plain.Length Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
+                If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
+                If PlainLength < 0 OrElse PlainLength > Plain.Length Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
 
-            If CompressionRatioThreshold < MinimumCompressionRatioThreshold Then CompressionRatioThreshold = MinimumCompressionRatioThreshold
-            If CompressionRatioThreshold > MaximumCompressionRatioThreshold Then CompressionRatioThreshold = MaximumCompressionRatioThreshold
+                If CompressionRatioThreshold < MinimumCompressionRatioThreshold Then CompressionRatioThreshold = MinimumCompressionRatioThreshold
+                If CompressionRatioThreshold > MaximumCompressionRatioThreshold Then CompressionRatioThreshold = MaximumCompressionRatioThreshold
 
-            Dim Payload As Byte() = Plain
-            Dim PayloadLength = PlainLength
-            Dim StoredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None
-            Dim CompressionEvaluatedMethod = ChunkedStreamOptions.CompressionMethods.None
-            Dim CompressionEvaluatedPercent As Byte = 100
+                Dim Payload As Byte() = Plain
+                Dim PayloadLength = PlainLength
+                Dim StoredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None
+                Dim CompressionEvaluatedMethod = ChunkedStreamOptions.CompressionMethods.None
+                Dim CompressionEvaluatedPercent As Byte = 100
 
-            If CompressionMethodToUse <> ChunkedStreamOptions.CompressionMethods.None AndAlso PlainLength > 0 Then
+                If CompressionMethodToUse <> ChunkedStreamOptions.CompressionMethods.None AndAlso PlainLength > 0 Then
 
-                Dim Compressed = CompressPayload(CompressionMethodToUse, Plain, PlainLength)
+                    Dim Compressed = (Function()
+                                          Try
+                                              swCompressPayload.Start()
+                                              Return CompressPayload(CompressionMethodToUse, Plain, PlainLength)
+                                          Finally
+                                              swCompressPayload.Stop()
+                                          End Try
+                                      End Function).Invoke()
 
-                CompressionEvaluatedMethod = CompressionMethodToUse
-                CompressionEvaluatedPercent = GetCompressionEvaluatedPercent(PlainLength, Compressed.Length)
+                    CompressionEvaluatedMethod = CompressionMethodToUse
+                    CompressionEvaluatedPercent = GetCompressionEvaluatedPercent(PlainLength, Compressed.Length)
 
-                If ForceCompression OrElse CompressionEvaluatedPercent / 100.0R <= CompressionRatioThreshold Then
-                    Payload = Compressed
-                    PayloadLength = Compressed.Length
-                    StoredCompressionMethod = CompressionMethodToUse
-                    MarkCompressionFlag(StoredCompressionMethod)
+                    If ForceCompression OrElse CompressionEvaluatedPercent / 100.0R <= CompressionRatioThreshold Then
+                        Payload = Compressed
+                        PayloadLength = Compressed.Length
+                        StoredCompressionMethod = CompressionMethodToUse
+                        MarkCompressionFlag(StoredCompressionMethod)
+                    End If
+
                 End If
 
-            End If
+                Dim PlaintextAllZero = PlainLength = 0 OrElse IsAllZero(Plain, PlainLength)
+                Dim Flags = ChunkFlags.None
 
-            Dim PlaintextAllZero = PlainLength = 0 OrElse IsAllZero(Plain, PlainLength)
-            Dim Flags = ChunkFlags.None
+                If PlaintextAllZero Then
+                    Flags = Flags Or ChunkFlags.PlaintextAllZero
+                End If
 
-            If PlaintextAllZero Then
-                Flags = Flags Or ChunkFlags.PlaintextAllZero
-            End If
+                Dim RecordId = AllocatePhysicalRecordId()
+                Dim RecordLength = ChunkRecordDataOffset + PayloadLength + MacSize
+                Dim Record(RecordLength - 1) As Byte
 
-            Dim RecordId = AllocatePhysicalRecordId()
-            Dim RecordLength = ChunkRecordDataOffset + PayloadLength + MacSize
-            Dim Record(RecordLength - 1) As Byte
+                Buffer.BlockCopy(BitConverter.GetBytes(RecordId), 0, Record, 0, 8)
+                Buffer.BlockCopy(BitConverter.GetBytes(CInt(StoredCompressionMethod)), 0, Record, ChunkCompressionMethodOffset, 4)
+                Buffer.BlockCopy(BitConverter.GetBytes(CInt(EncryptionMethod)), 0, Record, ChunkEncryptionMethodOffset, 4)
+                Buffer.BlockCopy(BitConverter.GetBytes(PlainLength), 0, Record, ChunkPlainLengthOffset, 4)
+                Buffer.BlockCopy(BitConverter.GetBytes(PayloadLength), 0, Record, ChunkPayloadLengthOffset, 4)
+                Buffer.BlockCopy(BitConverter.GetBytes(CInt(Flags)), 0, Record, ChunkFlagsOffset, 4)
+                Buffer.BlockCopy(BitConverter.GetBytes(CInt(CompressionEvaluatedMethod)), 0, Record, ChunkCompressionEvaluatedMethodOffset, 4)
 
-            Buffer.BlockCopy(BitConverter.GetBytes(RecordId), 0, Record, 0, 8)
-            Buffer.BlockCopy(BitConverter.GetBytes(CInt(StoredCompressionMethod)), 0, Record, ChunkCompressionMethodOffset, 4)
-            Buffer.BlockCopy(BitConverter.GetBytes(CInt(EncryptionMethod)), 0, Record, ChunkEncryptionMethodOffset, 4)
-            Buffer.BlockCopy(BitConverter.GetBytes(PlainLength), 0, Record, ChunkPlainLengthOffset, 4)
-            Buffer.BlockCopy(BitConverter.GetBytes(PayloadLength), 0, Record, ChunkPayloadLengthOffset, 4)
-            Buffer.BlockCopy(BitConverter.GetBytes(CInt(Flags)), 0, Record, ChunkFlagsOffset, 4)
-            Buffer.BlockCopy(BitConverter.GetBytes(CInt(CompressionEvaluatedMethod)), 0, Record, ChunkCompressionEvaluatedMethodOffset, 4)
+                Record(ChunkCompressionEvaluatedPercentOffset) = CompressionEvaluatedPercent
 
-            Record(ChunkCompressionEvaluatedPercentOffset) = CompressionEvaluatedPercent
+                _Rng.GetBytes(_Counter)
+                Buffer.BlockCopy(_Counter, 0, Record, ChunkRecordIvOffset, IvSize)
 
-            _Rng.GetBytes(_Counter)
-            Buffer.BlockCopy(_Counter, 0, Record, ChunkRecordIvOffset, IvSize)
+                Select Case EncryptionMethod
 
-            Select Case EncryptionMethod
+                    Case ChunkEncryptionMethods.None
 
-                Case ChunkEncryptionMethods.None
+                        If PayloadLength > 0 Then
+                            Buffer.BlockCopy(Payload, 0, Record, ChunkRecordDataOffset, PayloadLength)
+                        End If
 
-                    If PayloadLength > 0 Then
-                        Buffer.BlockCopy(Payload, 0, Record, ChunkRecordDataOffset, PayloadLength)
-                    End If
+                    Case ChunkEncryptionMethods.AesCtrFileMasterKey
 
-                Case ChunkEncryptionMethods.AesCtrFileMasterKey
+                        If _ChunkEncryptionKey Is Nothing Then
+                            Throw New EncryptionMismatchException("Encryption is enabled but no file master key is available.")
+                        End If
 
-                    If _ChunkEncryptionKey Is Nothing Then
-                        Throw New EncryptionMismatchException("Encryption is enabled but no file master key is available.")
-                    End If
+                        CryptPayload(Payload, 0, PayloadLength, Record, ChunkRecordDataOffset, _ChunkEncryptionKey)
 
-                    CryptPayload(Payload, 0, PayloadLength, Record, ChunkRecordDataOffset, _ChunkEncryptionKey)
+                    Case Else
 
-                Case Else
+                        Throw New InvalidDataException($"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
 
-                    Throw New InvalidDataException($"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
+                End Select
 
-            End Select
+                Dim RecordMacKey =
+                    If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey,
+                       _ChunkMacKey,
+                       PublicIntegrityKey)
 
-            Dim RecordMacKey =
-                If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey,
-                   _ChunkMacKey,
-                   PublicIntegrityKey)
+                Using Hmac As New HMACSHA256(RecordMacKey)
+                    Dim Mac = (Function()
+                                   Try
+                                       swComputeHash.Start()
+                                       Return Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
+                                   Finally
+                                       swComputeHash.Stop()
 
-            Using Hmac As New HMACSHA256(RecordMacKey)
-                Dim Mac = Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
-                Buffer.BlockCopy(Mac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize)
-            End Using
+                                   End Try
+                               End Function).Invoke()
+                    Buffer.BlockCopy(Mac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize)
+                End Using
 
-            Dim NewRecordOffset = GetNextPhysicalRecordWriteOffset(Record.Length)
+                Dim NewRecordOffset = GetNextPhysicalRecordWriteOffset(Record.Length)
 
-            _Fs.Position = NewRecordOffset
-            _Fs.Write(Record, 0, Record.Length)
+                _Fs.Position = NewRecordOffset
+                _Fs.Write(Record, 0, Record.Length)
 
-            Dim Result =
-                New PhysicalRecordEntry With {
-                    .RecordId = RecordId,
-                    .PhysicalOffset = NewRecordOffset,
-                    .PhysicalLength = Record.Length,
-                    .PlainLength = PlainLength,
-                    .RefCount = 1
-                }
+                Dim Result =
+                    New PhysicalRecordEntry With {
+                        .RecordId = RecordId,
+                        .PhysicalOffset = NewRecordOffset,
+                        .PhysicalLength = Record.Length,
+                        .PlainLength = PlainLength,
+                        .RefCount = 1
+                    }
 
-            _PhysicalRecords(Result.RecordId) = Result
+                _PhysicalRecords(Result.RecordId) = Result
 
-            Dim NewRecordEndOffset = NewRecordOffset + Record.Length
+                Dim NewRecordEndOffset = NewRecordOffset + Record.Length
 
-            If NewRecordEndOffset > _IndexOffset Then
-                _IndexOffset = NewRecordEndOffset
-            End If
+                If NewRecordEndOffset > _IndexOffset Then
+                    _IndexOffset = NewRecordEndOffset
+                End If
 
-            MarkPhysicalRecordDirty(Result.RecordId)
+                Try
+                    swMarkPhysicalRecordDirty.Start()
+                    MarkPhysicalRecordDirty(Result.RecordId)
+                Finally
+                    swMarkPhysicalRecordDirty.Stop()
+                End Try
 
-            Return Result
+                Return Result
+            Finally
+                swWritePhysicalRecordWithPolicy.Stop()
+            End Try
+
+
 
         End Function
 
         Private Function GetNextPhysicalRecordWriteOffset(RecordLength As Integer) As Long
 
-            If RecordLength < MinChunkRecordSize Then Throw New ArgumentOutOfRangeException(NameOf(RecordLength))
+            Try
+                swGetNextPhysicalRecordWriteOffset.Start()
 
-            If HasOpenCheckpoint Then
+                If RecordLength < MinChunkRecordSize Then Throw New ArgumentOutOfRangeException(NameOf(RecordLength))
+
+                If HasOpenCheckpoint Then
+                    Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
+                End If
+
+                Select Case Options.NewChunkWriteLocationPolicy
+
+                    Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles
+
+                        Dim HoleOffset As Long
+
+                        If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
+                            Return HoleOffset
+                        End If
+
+                    Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
+
+                        Dim HoleOffset As Long
+
+                        If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
+                            Return HoleOffset
+                        End If
+
+                        BuildFreeChunkSpaceMap()
+
+                        If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
+                            Return HoleOffset
+                        End If
+
+                End Select
+
                 Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
-            End If
+            Finally
+                swGetNextPhysicalRecordWriteOffset.Stop()
+            End Try
 
-            Select Case Options.NewChunkWriteLocationPolicy
 
-                Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles
-
-                    Dim HoleOffset As Long
-
-                    If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
-                        Return HoleOffset
-                    End If
-
-                Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
-
-                    Dim HoleOffset As Long
-
-                    If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
-                        Return HoleOffset
-                    End If
-
-                    BuildFreeChunkSpaceMap()
-
-                    If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
-                        Return HoleOffset
-                    End If
-
-            End Select
-
-            Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
 
         End Function
 

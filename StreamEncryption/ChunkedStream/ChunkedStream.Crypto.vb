@@ -88,6 +88,19 @@ Namespace Streams
             ''' <param name="Salt">The salt. If shorter than eight bytes, it is padded for PBKDF2 compatibility.</param>
             ''' <param name="Iterations">The PBKDF2 iteration count.</param>
             ''' <returns>A 32-byte key.</returns>
+            ''' <remarks>
+            ''' Salt is optional and rarely needed. The file master key is always wrapped using a
+            ''' random, per-file WrapSalt (stored in the header, generated automatically) - so two
+            ''' files encrypted with the same passphrase and no Salt here still get distinct wrapped
+            ''' keys on disk. The same passphrase will still open either file - that's inherent to
+            ''' passphrase-based wrapping, not something Salt controls.
+            '''
+            ''' An explicit Salt only adds resistance to precomputed (rainbow-table) attacks against
+            ''' the PBKDF2 step itself, amortised across many files/deployments sharing the same
+            ''' default. At 600,000 iterations that's already an expensive attack; Salt exists for
+            ''' callers who want extra defence-in-depth on top of that, not because omitting it
+            ''' weakens per-file security.
+            ''' </remarks>
             Public Shared Function DeriveMasterKey(Passphrase As String,
                                                    Optional Salt As Byte() = Nothing,
                                                    Optional Iterations As Integer? = Nothing) As Byte()
@@ -95,7 +108,11 @@ Namespace Streams
                 If Iterations.HasValue = False Then Iterations = DefaultPBKDF2Iterations
 
                 If Passphrase Is Nothing Then Throw New ArgumentNullException(NameOf(Passphrase))
-                'If Salt Is Nothing Then Throw New ArgumentNullException(NameOf(Salt))
+
+                ' DeriveMasterKey used to throw if the Salt was empty:
+                '   If Salt Is Nothing Then Throw New ArgumentNullException(NameOf(Salt))
+                ' But this was changed to remove this requirement, this is not an oversight
+                ' per-file key uniqueness is already guaranteed by WrapSalt (see <remarks>)
                 If Salt Is Nothing Then Salt = {}
                 If Iterations <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Iterations), "Iterations must be greater than zero.")
 
@@ -358,24 +375,33 @@ Namespace Streams
                                  OutputOffset As Integer,
                                  Key As Byte())
 
-            If Key Is Nothing Then Throw New ArgumentNullException(NameOf(Key))
+            Try
+                swCryptPayload.Start()
 
-            _AesProvider.Key = Key
+                If Key Is Nothing Then Throw New ArgumentNullException(NameOf(Key))
 
-            Using Transform = _AesProvider.CreateEncryptor()
-                For BlockOffset = 0 To Count - 1 Step 16
-                    Transform.TransformBlock(_Counter, 0, 16, _KeyStream, 0)
+                _AesProvider.Key = Key
 
-                    Dim BytesToProcess = Math.Min(16, Count - BlockOffset)
+                Using Transform = _AesProvider.CreateEncryptor()
+                    For BlockOffset = 0 To Count - 1 Step 16
+                        Transform.TransformBlock(_Counter, 0, 16, _KeyStream, 0)
 
-                    For i = 0 To BytesToProcess - 1
-                        Output(OutputOffset + BlockOffset + i) =
-                            CByte(CInt(Input(InputOffset + BlockOffset + i)) Xor CInt(_KeyStream(i)))
+                        Dim BytesToProcess = Math.Min(16, Count - BlockOffset)
+
+                        For i = 0 To BytesToProcess - 1
+                            Output(OutputOffset + BlockOffset + i) =
+                                CByte(CInt(Input(InputOffset + BlockOffset + i)) Xor CInt(_KeyStream(i)))
+                        Next
+
+                        IncrementCounter(_Counter)
                     Next
+                End Using
 
-                    IncrementCounter(_Counter)
-                Next
-            End Using
+            Finally
+                swCryptPayload.Stop()
+            End Try
+
+
 
         End Sub
 

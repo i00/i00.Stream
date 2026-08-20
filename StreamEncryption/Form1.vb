@@ -86,9 +86,10 @@ Public Class Form1
         Dim Options As New Streams.ChunkedStream.ChunkedStreamOptions() With
         {
             .CompressionRatioThreshold = 1,
-            .CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
+            .CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.None,
             .NewIndexPageWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
-            .NewChunkWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles
+            .NewChunkWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
+            .EncryptionInfo = Nothing'New Streams.ChunkedStream.EncryptionInfo("MySecretPassword")
         }
         '.EncryptionInfo = New Streams.ChunkedStream.EncryptionInfo("MySecretPassword"),
 
@@ -206,6 +207,7 @@ Public Class Form1
                             Dim Buffer(1024 * 1024 - 1) As Byte
                             Dim Offset As Long = 0
 
+                            LastTime = Now()
                             While True
 
                                 Dim BytesRead = InputFs.Read(Buffer,
@@ -215,6 +217,14 @@ Public Class Form1
                                 If BytesRead = 0 Then Exit While
 
                                 If BytesRead = Buffer.Length Then
+                                    Enc.swCryptPayload.Reset()
+                                    Enc.swCompressPayload.Reset()
+                                    Enc.swComputeHash.Reset()
+                                    Enc.swWritePhysicalRecordWithPolicy.Reset()
+                                    Enc.swWritePhysicalRecordWithPolicy.Reset()
+                                    Enc.swGetNextPhysicalRecordWriteOffset.Reset()
+                                    Enc.swPersistPagedMetadata.Reset()
+                                    Enc.swMarkPhysicalRecordDirty.Reset()
 
                                     Enc.swWriteExtentPage.Reset()
                                     Enc.swWritePhysicalRecordPage.Reset()
@@ -236,9 +246,16 @@ Public Class Form1
                                         Debug.Print($"{Now}: Cs.Length: {Enc.Length}")
                                         Debug.Print($"    Total Write: {sw.ElapsedMilliseconds}")
                                         Debug.Print($"    WriteExtentPage: {Enc.swWriteExtentPage.ElapsedMilliseconds}")
+                                        Debug.Print($"    MarkPhysicalRecordDirty: {Enc.swMarkPhysicalRecordDirty.ElapsedMilliseconds}")
                                         Debug.Print($"    WritePhysicalRecordPage: {Enc.swWritePhysicalRecordPage.ElapsedMilliseconds}")
                                         Debug.Print($"    WriteDirectoryPages: {Enc.swWriteDirectoryPages.ElapsedMilliseconds}")
                                         Debug.Print($"    WriteHoleDirectoryPages: {Enc.swWriteHoleDirectoryPages.ElapsedMilliseconds}")
+                                        Debug.Print($"    WritePhysicalRecordWithPolicy: {Enc.swWritePhysicalRecordWithPolicy.ElapsedMilliseconds}")
+                                        Debug.Print($"    GetNextPhysicalRecordWriteOffset: {Enc.swGetNextPhysicalRecordWriteOffset.ElapsedMilliseconds}")
+                                        Debug.Print($"    PersistPagedMetadata: {Enc.swPersistPagedMetadata.ElapsedMilliseconds}")
+                                        Debug.Print($"    CryptPayload: {Enc.swCryptPayload.ElapsedMilliseconds}")
+                                        Debug.Print($"    CompressPayload: {Enc.swCompressPayload.ElapsedMilliseconds}")
+                                        Debug.Print($"    ComputeHash: {Enc.swComputeHash.ElapsedMilliseconds}")
                                         Debug.Print($"    DirtyExtentPages: {Enc._DirtyExtentPages.Count}")
                                         Debug.Print($"    DirtyPhysicalPages: {Enc._DirtyPhysicalRecordPages.Count}")
                                         Debug.Print($"    DebugWriteExtentPageCount: {Enc.DebugWriteExtentPageCount}")

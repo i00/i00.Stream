@@ -367,7 +367,8 @@ Namespace Streams
         Private Const MagicOffset As Integer = 0
         Private Const MagicSize As Integer = 8
 
-        Private Const HeaderSequenceOffset As Integer = 8
+        <ComponentModel.EditorBrowsable(ComponentModel.EditorBrowsableState.Never)>
+        Friend Const HeaderSequenceOffset As Integer = 8
         Private Const FlagsOffset As Integer = 16
         Private Const LengthOffset As Integer = 24
         Private Const FileSaltOffset As Integer = 32
@@ -421,10 +422,12 @@ Namespace Streams
         Private Const ChunkEncryptionMethodOffset As Integer = 12
         Private Const ChunkPlainLengthOffset As Integer = 16
         Private Const ChunkPayloadLengthOffset As Integer = 20
-        Private Const ChunkFlagsOffset As Integer = 24
+        <ComponentModel.EditorBrowsable(ComponentModel.EditorBrowsableState.Never)>
+        Friend Const ChunkFlagsOffset As Integer = 24
 
         Private Const ChunkCompressionEvaluatedMethodOffset As Integer = 28
-        Private Const ChunkCompressionEvaluatedPercentOffset As Integer = 32
+        <ComponentModel.EditorBrowsable(ComponentModel.EditorBrowsableState.Never)>
+        Friend Const ChunkCompressionEvaluatedPercentOffset As Integer = 32
 
         Private Const ChunkReservedOffset As Integer = 33
         Private Const ChunkReservedSize As Integer = 15
@@ -1239,6 +1242,17 @@ Namespace Streams
 
         Public DebugWriteExtentPageCount As Integer
         Public DebugWritePhysicalRecordPageCount As Integer
+
+        Public Property swCryptPayload As New Stopwatch
+        Public Property swCompressPayload As New Stopwatch
+        Public Property swComputeHash As New Stopwatch
+
+        Public Property swMarkPhysicalRecordDirty As New Stopwatch
+
+        Public Property swWritePhysicalRecordWithPolicy As New Stopwatch
+        Public Property swGetNextPhysicalRecordWriteOffset As New Stopwatch
+        Public Property swPersistPagedMetadata As New Stopwatch
+
         Public Property swWriteExtentPage As New Stopwatch
         Public Property swWritePhysicalRecordPage As New Stopwatch
         Public Property swWriteDirectoryPages As New Stopwatch

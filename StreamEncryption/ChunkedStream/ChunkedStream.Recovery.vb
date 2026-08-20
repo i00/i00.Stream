@@ -82,7 +82,8 @@ Namespace Streams
 
         End Sub
 
-        Private Sub WriteChunkSizeRebuildRecoveryState(OriginalPhysicalLength As Long)
+        <ComponentModel.EditorBrowsable(ComponentModel.EditorBrowsableState.Never)>
+        Friend Sub WriteChunkSizeRebuildRecoveryState(OriginalPhysicalLength As Long)
 
             Dim CurrentState = GetRecoveryState()
 
@@ -346,12 +347,13 @@ Namespace Streams
 
         End Sub
 
-        Private Sub WritePhysicalRecordMoveRecoveryState(State As RecoveryStates,
-                                                         RecordId As Long,
-                                                         OldOffset As Long,
-                                                         OldLength As Integer,
-                                                         NewOffset As Long,
-                                                         NewLength As Integer)
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Sub WritePhysicalRecordMoveRecoveryState(State As RecoveryStates,
+                                                        RecordId As Long,
+                                                        OldOffset As Long,
+                                                        OldLength As Integer,
+                                                        NewOffset As Long,
+                                                        NewLength As Integer)
 
             Select Case State
 

@@ -99,6 +99,7 @@
     <Compile Include="Tests\Correctness and survival\Validation.vb" />
     <Compile Include="Tests\Developer confidence\Diagnostics.vb" />
     <Compile Include="Tests\Developer confidence\Hardening.vb" />
+    <Compile Include="Tests\Developer confidence\Visualization.vb" />
     <Compile Include="Tests\Logical mutations and allocation\Allocation.vb" />
     <Compile Include="Tests\Logical mutations and allocation\CopyOnWrite.vb" />
     <Compile Include="Tests\Logical mutations and allocation\ExtentOperations.vb" />

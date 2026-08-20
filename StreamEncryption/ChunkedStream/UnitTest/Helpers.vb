@@ -1,11 +1,11 @@
-﻿#If DEBUG Then ' < This exposes some data for unit tests
+﻿#If DEBUG Then ' < This is only for unit tests
 
 Namespace Streams
 
     Partial Class ChunkedStream
 
-        <System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
-        Public Sub Debug_CorruptPhysicalRecordMetadataRefCount(RecordId As Long,
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Sub Debug_CorruptPhysicalRecordMetadataRefCount(RecordId As Long,
                                                                NewRefCount As Integer)
 
             Dim Record = _PhysicalRecords(RecordId)

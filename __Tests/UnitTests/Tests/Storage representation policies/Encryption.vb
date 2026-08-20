@@ -180,6 +180,52 @@ Namespace Tests
             End Sub
 
             ' ================================================================================
+            ' Key derivation / salt behaviour
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Documents current behaviour: a separately constructed EncryptionInfo built from the
+            ''' same passphrase, with no salt supplied, unlocks a file written by another
+            ''' EncryptionInfo instance built the same way. Two callers who both use the no-salt
+            ''' overload with the same passphrase get interchangeable keys. Flagging this so it's a
+            ''' conscious choice - update or remove this test if per-file salting becomes mandatory.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub SamePassphraseWithoutSaltProducesInterchangeableKeysAcrossInstances()
+
+                Using Ms As New MemoryStream()
+
+                    Dim WriteOptions As New ChunkedStream.ChunkedStreamOptions With {
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo("shared passphrase")
+                    }
+
+                    Dim Expected =
+                        GenerateRandomData(
+                            WriteOptions.ChunkSize,
+                            6201)
+
+                    Using Cs = ChunkedStream.Open(Ms, WriteOptions)
+                        Cs.Write(0, Expected)
+                    End Using
+
+                    Dim ReopenOptions As New ChunkedStream.ChunkedStreamOptions With {
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo("shared passphrase")
+                    }
+
+                    Using Reopened = ChunkedStream.Open(Ms, ReopenOptions)
+
+                        AssertBytesEqual(
+                            Expected,
+                            Reopened.ToArray(),
+                            "Expected a second EncryptionInfo built from the same no-salt passphrase to also unlock the file.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ' ================================================================================
             ' Encryption transitions
             ' ================================================================================
 

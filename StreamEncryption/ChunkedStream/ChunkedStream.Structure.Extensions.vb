@@ -1,7 +1,4 @@
-﻿Imports System.Collections.Generic
-Imports System.Drawing
-Imports System.Linq
-Imports System.Runtime.CompilerServices
+﻿Imports System.Runtime.CompilerServices
 
 Partial Module Extensions
 

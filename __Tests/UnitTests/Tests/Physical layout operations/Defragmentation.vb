@@ -320,6 +320,96 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Verifies that cancelling a Rebuild immediately after the new metadata has been
+            ''' published still leaves the stream fully committed and readable - the final Sequence
+            ''' (compaction) phase is skipped, not rolled back. This exercises the cooperative
+            ''' CancellationToken path only; see RebuildInterruptedAfterPublishRethrowsAndLeaves...
+            ''' for the uncooperative (exception/crash) counterpart at the same boundary.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub RebuildCancelledAfterPublishStillCommitsData()
+
+                Using Ms As New MemoryStream()
+
+                    ' A single full chunk guarantees the write-phase loop runs exactly once, so
+                    ' cancelling unconditionally inside the callback only takes effect after the
+                    ' loop has already exited and the rebuild has already published.
+                    Dim Expected =
+                        GenerateRandomData(
+                            ChunkedStream.DefaultChunkSize,
+                            6101)
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, Expected)
+
+                        Dim Cancelled = False
+
+                        Dim Result =
+                            Cs.Defragment(
+                                ChunkedStream.DefragTypes.Rebuild,
+                                Sub(ProcessedUnits As Long,
+                                    TotalUnits As Long,
+                                    UnitType As ChunkedStream.ProcessUnitTypes,
+                                    CancellationToken As ChunkedStream.CancellationToken)
+
+                                    Cancelled = True
+                                    CancellationToken.Cancel = True
+
+                                End Sub)
+
+                        AssertTrue(
+                            Cancelled,
+                            "Test setup failed to invoke the progress callback.")
+
+                        AssertEqual(
+                            -1L,
+                            Result,
+                            "Expected Defragment to report cancellation.")
+
+                        AssertEqual(
+                            ChunkedStream.RecoveryStates.None,
+                            Cs.GetRecoveryState(),
+                            "Publish should have cleared recovery state even though the final sequence phase was skipped.")
+
+                        AssertBytesEqual(
+                            Expected,
+                            Cs.ToArray(),
+                            "Cancelling after publish should not have altered committed data.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+
+                        AssertEqual(
+                            ChunkedStream.RecoveryStates.None,
+                            Reopened.RecoveryStateAtOpen,
+                            "Reopening after a publish-then-cancel rebuild should not trigger recovery.")
+
+                        AssertBytesEqual(
+                            Expected,
+                            Reopened.ToArray(),
+                            "Reopened stream lost data after a publish-then-cancel rebuild.")
+
+                        ' Compaction was skipped, not lost: an explicit Sequence still succeeds afterwards.
+                        Reopened.Defragment(ChunkedStream.DefragTypes.Sequence)
+
+                        AssertBytesEqual(
+                            Expected,
+                            Reopened.ToArray(),
+                            "Data changed after compacting a previously publish-then-cancelled rebuild.")
+
+                        Reopened.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
             ' ================================================================================
             ' Checkpoint behaviour
             ' ================================================================================

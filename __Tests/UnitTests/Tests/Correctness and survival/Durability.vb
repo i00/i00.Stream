@@ -385,6 +385,116 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Verifies that cancelling ApplyOptions partway through leaves already-rewritten chunks
+            ''' committed, reports WasCancelled, and leaves the stream valid and resumable.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ApplyOptionsCancelledMidRunReportsWasCancelledAndStaysValid()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 256,
+                        .CompressionRatioThreshold = 1
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Expected =
+                            GenerateRandomData(
+                                Options.ChunkSize * 2,
+                                6401)
+
+                        Cs.Write(0, Expected)
+
+                        ' Both chunks start uncompressed; both need converting once this changes -
+                        ' cancelling after the first record lets us prove only one was converted.
+                        Cs.Options.CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate
+
+                        Dim ProgressCalls = 0
+
+                        Dim Result =
+                            Cs.ApplyOptions(
+                                ChunkedStream.ApplyOptionTypes.Compression,
+                                Sub(ProcessedUnits As Long,
+                                    TotalUnits As Long,
+                                    UnitType As ChunkedStream.ProcessUnitTypes,
+                                    CancellationToken As ChunkedStream.CancellationToken)
+
+                                    ProgressCalls += 1
+                                    CancellationToken.Cancel = True
+
+                                End Sub)
+
+                        AssertTrue(
+                            ProgressCalls > 0,
+                            "Test setup failed to invoke the progress callback.")
+
+                        AssertTrue(
+                            Result.WasCancelled,
+                            "Expected ApplyOptions to report WasCancelled.")
+
+                        AssertEqual(
+                            1,
+                            Result.ExaminedChunks,
+                            "Expected cancellation to stop after exactly one chunk was examined.")
+
+                        AssertEqual(
+                            1,
+                            Result.RewrittenChunks,
+                            "Expected exactly one chunk to have actually been rewritten before cancellation.")
+
+                        ' Assumes physical record ids - and therefore RecordIds' processing order in
+                        ' ApplyOptions - were assigned in write order, so Chunks(0)/Chunks(1) line up
+                        ' with "examined first" / "examined second".
+                        Dim StructureAfterCancel = Cs.GetStructure()
+
+                        AssertEqual(
+                            ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                            StructureAfterCancel.Chunks(0).CompressionMethod,
+                            "Expected the first chunk to actually be converted to Deflate before cancellation.")
+
+                        AssertTrue(
+                            StructureAfterCancel.Chunks(1).CompressionMethod <> ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                            "Expected the second chunk to remain unconverted, proving the run stopped rather than finishing silently.")
+
+                        AssertBytesEqual(
+                            Expected,
+                            Cs.ToArray(),
+                            "Cancelling ApplyOptions should not have altered logical data.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                        Dim FinalResult =
+                            Reopened.ApplyOptions(ChunkedStream.ApplyOptionTypes.Compression)
+
+                        AssertFalse(
+                            FinalResult.WasCancelled,
+                            "Expected the follow-up ApplyOptions call to complete.")
+
+                        AssertEqual(
+                            1,
+                            FinalResult.RewrittenChunks,
+                            "Expected exactly the remaining chunk to be rewritten on the follow-up call.")
+
+                        AssertEqual(
+                            ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                            Reopened.GetStructure().Chunks(1).CompressionMethod,
+                            "Expected the second chunk to be converted to Deflate on the follow-up call.")
+
+                        Reopened.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
             ' ================================================================================
             ' Defragmentation durability
             ' ================================================================================
@@ -521,6 +631,96 @@ Namespace Tests
                     End Using
 
                 End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies HoleDirectoryModes.Auto behaves like Never below the configured threshold
+            ''' (a hole freed before close is unknown after reopen, so FillHoles - which does not scan -
+            ''' cannot reuse it) and like Always once the threshold is met.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub HoleDirectoryAutoModeRespectsThresholdBytes()
+
+                Dim MakeOptions =
+                    Function(ThresholdBytes As Long) As ChunkedStream.ChunkedStreamOptions
+                        Return New ChunkedStream.ChunkedStreamOptions With {
+                            .ChunkSize = 256,
+                            .IndexPageEntryCount = 4,
+                            .IndexDirectoryEntryCount = 4,
+                            .HoleDirectoryMode = ChunkedStream.ChunkedStreamOptions.HoleDirectoryModes.Auto,
+                            .HoleDirectoryAutoThresholdBytes = ThresholdBytes,
+                            .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles
+                        }
+                    End Function
+
+                Dim FreedPhysicalOffset As Long
+                Dim ReusedOffsetBelowThreshold As Long?
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options = MakeOptions(Long.MaxValue) ' physical stream will never reach this
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, GenerateRandomData(Options.ChunkSize, 6501))
+                        Cs.Write(Options.ChunkSize, GenerateRandomData(Options.ChunkSize, 6502))
+
+                        FreedPhysicalOffset = Cs.GetStructure().Chunks(1).PhysicalOffset.Value
+
+                        Cs.Remove(Options.ChunkSize, Options.ChunkSize)
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                        Reopened.Write(Reopened.Length, GenerateRandomData(Options.ChunkSize, 6503))
+
+                        Dim ReopenedChunks = Reopened.GetStructure().Chunks
+                        ReusedOffsetBelowThreshold = ReopenedChunks(ReopenedChunks.Count - 1).PhysicalOffset
+
+                    End Using
+
+                End Using
+
+                AssertFalse(
+                    ReusedOffsetBelowThreshold.HasValue AndAlso ReusedOffsetBelowThreshold.Value = FreedPhysicalOffset,
+                    "Expected the below-threshold hole to be unknown after reopen, so the new chunk should not land at the freed offset.")
+
+                Dim ReusedOffsetAboveThreshold As Long?
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options = MakeOptions(0) ' any non-empty stream is "above" the threshold
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, GenerateRandomData(Options.ChunkSize, 6501))
+                        Cs.Write(Options.ChunkSize, GenerateRandomData(Options.ChunkSize, 6502))
+
+                        FreedPhysicalOffset = Cs.GetStructure().Chunks(1).PhysicalOffset.Value
+
+                        Cs.Remove(Options.ChunkSize, Options.ChunkSize)
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                        Reopened.Write(Reopened.Length, GenerateRandomData(Options.ChunkSize, 6503))
+
+                        Dim ReopenedChunks = Reopened.GetStructure().Chunks
+                        ReusedOffsetAboveThreshold = ReopenedChunks(ReopenedChunks.Count - 1).PhysicalOffset
+
+                        Reopened.Validate()
+
+                    End Using
+
+                End Using
+
+                AssertEqual(
+                    FreedPhysicalOffset,
+                    ReusedOffsetAboveThreshold.Value,
+                    "Expected an above-threshold hole to be persisted and reused after reopen, landing the new chunk at the freed offset.")
 
             End Sub
 

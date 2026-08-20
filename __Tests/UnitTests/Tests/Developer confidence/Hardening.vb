@@ -272,7 +272,7 @@ Namespace Tests
                     Dim NewOffset =
                         Ms.Length + 4096L
 
-                    Cs.Debug_WritePhysicalRecordMoveRecoveryState(
+                    Cs.WritePhysicalRecordMoveRecoveryState(
                         ChunkedStream.RecoveryStates.CopyingPhysicalRecord,
                         Chunk.PhysicalRecordId.Value,
                         OldOffset,
@@ -365,7 +365,7 @@ Namespace Tests
                         NewOffset,
                         OldLength)
 
-                    Cs.Debug_WritePhysicalRecordMoveRecoveryState(
+                    Cs.WritePhysicalRecordMoveRecoveryState(
                         ChunkedStream.RecoveryStates.PhysicalRecordCopied,
                         Chunk.PhysicalRecordId.Value,
                         OldOffset,
@@ -471,7 +471,7 @@ Namespace Tests
                     Ms.Position = CorruptOffset
                     Ms.WriteByte(CByte(OriginalByte Xor &HFF))
 
-                    Cs.Debug_WritePhysicalRecordMoveRecoveryState(
+                    Cs.WritePhysicalRecordMoveRecoveryState(
                         ChunkedStream.RecoveryStates.PhysicalRecordCopied,
                         Chunk.PhysicalRecordId.Value,
                         OldOffset,
@@ -856,7 +856,7 @@ Namespace Tests
                 If Stream Is Nothing Then Throw New ArgumentNullException(NameOf(Stream))
                 If HeaderCopyIndex < 0 OrElse HeaderCopyIndex > 1 Then Throw New ArgumentOutOfRangeException(NameOf(HeaderCopyIndex))
 
-                Dim HeaderSize = ChunkedStream.Debug_HeaderSize
+                Dim HeaderSize = ChunkedStream.HeaderSize
 
                 Dim CorruptOffset =
                     CLng(HeaderCopyIndex * HeaderSize) + 32L
@@ -879,9 +879,9 @@ Namespace Tests
                 If Stream Is Nothing Then Throw New ArgumentNullException(NameOf(Stream))
                 If HeaderCopyIndex < 0 OrElse HeaderCopyIndex > 1 Then Throw New ArgumentOutOfRangeException(NameOf(HeaderCopyIndex))
 
-                Dim HeaderSize = ChunkedStream.Debug_HeaderSize
+                Dim HeaderSize = ChunkedStream.HeaderSize
 
-                Dim HeaderSequenceOffset = ChunkedStream.Debug_HeaderSequenceOffset
+                Dim HeaderSequenceOffset = ChunkedStream.HeaderSequenceOffset
 
                 Dim Buffer(7) As Byte
 

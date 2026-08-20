@@ -90,7 +90,7 @@ Namespace Streams
                     If Value = _ChunkSize Then Return
                     _ChunkSize = Value
 #If DEBUG Then
-                    System.Diagnostics.Debug.Print($"ChunkedStream chunk size changed to {Value:N0} bytes. Existing extents will not be affected until ApplyOptions(ChunkSize) or Defragment(Rebuild) is performed.")
+                    Debug.Print($"ChunkedStream chunk size changed to {Value:N0} bytes. Existing extents will not be affected until {NameOf(ApplyOptions)}({NameOf(ApplyOptionTypes.ChunkSize)}) or {NameOf(Defragment)}({NameOf(DefragTypes.Rebuild)}) is performed.")
 #End If
                 End Set
             End Property
