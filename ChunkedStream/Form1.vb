@@ -2,6 +2,7 @@
 Imports System.IO
 Imports System.Security.Cryptography
 Imports i00CodeLib
+Imports i00.Streams
 
 
 Public Class Form1

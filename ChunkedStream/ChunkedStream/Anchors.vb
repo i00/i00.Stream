@@ -1,6 +1,108 @@
-﻿Imports System.Collections.ObjectModel
+﻿' ================================================================================
+' ChunkedStream Anchors
+' ================================================================================
+'
+' Purpose
+'   - Implements stable logical anchors.
+'   - Allows logical data to be identified without relying on offsets that may
+'     change due to inserts, removals or rebuild operations.
+'
+' Design
+'   - Anchors are stored directly on extents using immutable AnchorIds.
+'   - An AnchorId of zero means the extent is not anchored.
+'   - A positive AnchorId identifies the start of anchored logical data.
+'   - AnchorIds are immutable and never reused.
+'   - At most one anchor may exist at any logical offset.
+'   - Anchors belong to a specific ChunkedStream instance.
+'   - Anchors are rebuilt into an in-memory AnchorId -> Extent index on open.
+'
+' Creation
+'   - CreateAnchor(LogicalOffset):
+'       - Anchors existing logical data.
+'       - Splits the target extent if required.
+'       - Throws if an anchor already exists at the requested logical offset.
+'       - Throws if the logical offset is not within existing logical data.
+'
+'   - CreateAnchor(Data):
+'       - Appends new logical data.
+'       - Creates an anchor at the first appended byte.
+'       - Throws when Data is Nothing.
+'       - Throws when Data is empty.
+'
+' Lifetime
+'   - Anchors survive:
+'       - Normal writes
+'       - Clear operations
+'       - Copy-on-write
+'       - Physical record relocation
+'       - Compression rewrites
+'       - Encryption rewrites
+'       - Sparse/allocated conversions
+'       - Defragmentation
+'       - Rebuild operations
+'       - ApplyOptions migrations
+'
+'   - Anchors are destroyed when:
+'       - The anchored logical start is removed.
+'       - Anchor.Remove() is called.
+'       - Remove(Anchor, ...) removes anchored data.
+'
+' Insert Semantics
+'   - AnchorActionsAtLogicalOffset controls anchor handling when logical data is
+'     inserted at an anchored position.
+'
+'       TransformAway
+'         - Existing data keeps the anchor.
+'         - Inserted data does not inherit the anchor.
+'         - The anchor moves with the original data.
+'
+'       Use
+'         - Inserted data inherits the anchor.
+'         - The anchor remains at the insertion position.
+'
+'   - Insert(LogicalOffset, ...) defaults to TransformAway.
+'   - CloneInsert(LogicalOffset, ...) defaults to TransformAway.
+'   - Insert(Anchor, ...) always uses Use.
+'   - CloneInsert(..., Anchor) always uses Use.
+'
+' Replace Semantics
+'   - Replace(LogicalOffset, ...) defaults to Use.
+'   - The anchor at the replacement start may transfer to replacement data.
+'   - Anchors strictly inside the replaced logical range are removed.
+'   - Anchors at the replacement end survive.
+'   - Replace(Anchor, ...) preserves the specified anchor whenever replacement
+'     data remains.
+'
+' Remove Semantics
+'   - Anchors whose logical starts fall inside a removed range are destroyed.
+'   - Anchors at the logical end of the removed range survive.
+'   - Removing anchored data removes the anchor.
+'
+' Clone Semantics
+'   - Clone operations copy logical data only.
+'   - Anchor identities are never cloned.
+'   - Existing destination anchors are preserved according to the selected
+'     AnchorActionsAtLogicalOffset behaviour.
+'
+' Checkpoints
+'   - Anchor creation, removal and transfer participate in checkpoints.
+'   - Rollback restores anchor state.
+'   - Commit updates the anchor baseline.
+'
+' Recovery
+'   - Anchors are recovered as part of normal metadata recovery.
+'   - AnchorIds survive reopen, rollback and rebuild recovery.
+'
+' Validation
+'   - AnchorIds must be unique.
+'   - Anchored logical offsets must be unique.
+'   - Anchor references must resolve to valid extents.
+'   - Anchor index state is validated against extent metadata.
+'
+' ================================================================================
+
+Imports System.Collections.ObjectModel
 Imports System.IO
-Imports System.Linq
 
 Namespace Streams
     Partial Class ChunkedStream
@@ -291,7 +393,6 @@ Namespace Streams
         Private Sub RemoveAnchor(Anchor As Anchor)
 
             If Anchor Is Nothing Then Throw New ArgumentNullException(NameOf(Anchor))
-            EnsureAnchorOwner(Anchor)
 
             EnsureAnchorOwner(Anchor)
 

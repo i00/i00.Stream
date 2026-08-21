@@ -1,5 +1,4 @@
-﻿Imports StreamEncryption
-Imports StreamEncryption.Streams
+﻿Imports i00.Streams
 Imports System.IO
 Imports System.Runtime.InteropServices
 
@@ -49,7 +48,7 @@ Namespace Tests
                         Dim BlockIndex As Long = -1
 
                         Options.RegionColorSelector =
-                            Function(Regions As Streams.ChunkedStreamStructure.Region(),
+                            Function(Regions As ChunkedStreamStructure.Region(),
                                      SuggestedColor As Color) As Color
 
                                 BlockIndex += 1

@@ -1,5 +1,5 @@
 ﻿Imports System.IO
-Imports StreamEncryption.Streams
+Imports i00.Streams
 
 Namespace Tests
 

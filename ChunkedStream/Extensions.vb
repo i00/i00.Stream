@@ -1,4 +1,4 @@
-﻿Public Module Extensions
+﻿Friend Module Extensions
 
     Private FormatFileSizeLimits As Long() = New Long() {1099511627776, 1073741824, 1048576, 1024}
     Private FormatFileSizeUnits As String() = New String() {"TB", "GB", "MB", "KB"}

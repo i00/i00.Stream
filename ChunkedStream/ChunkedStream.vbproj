@@ -6,9 +6,9 @@
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
     <ProjectGuid>{4D29CECB-5C0B-4DF4-B97E-90740B76544D}</ProjectGuid>
     <OutputType>WinExe</OutputType>
-    <StartupObject>StreamEncryption.My.MyApplication</StartupObject>
-    <RootNamespace>StreamEncryption</RootNamespace>
-    <AssemblyName>StreamEncryption</AssemblyName>
+    <StartupObject>i00.My.MyApplication</StartupObject>
+    <RootNamespace>i00</RootNamespace>
+    <AssemblyName>ChunkedStream</AssemblyName>
     <FileAlignment>512</FileAlignment>
     <MyType>WindowsForms</MyType>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
@@ -22,7 +22,7 @@
     <DefineDebug>true</DefineDebug>
     <DefineTrace>true</DefineTrace>
     <OutputPath>bin\Debug\</OutputPath>
-    <DocumentationFile>StreamEncryption.xml</DocumentationFile>
+    <DocumentationFile>ChunkedStream.xml</DocumentationFile>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
@@ -33,7 +33,7 @@
     <DefineTrace>true</DefineTrace>
     <Optimize>true</Optimize>
     <OutputPath>bin\Release\</OutputPath>
-    <DocumentationFile>StreamEncryption.xml</DocumentationFile>
+    <DocumentationFile>ChunkedStream.xml</DocumentationFile>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
   </PropertyGroup>
   <PropertyGroup>
@@ -78,17 +78,17 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="ChunkedStream\Anchors.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Checkpoints.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Compression.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Diagnostics.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Extents.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Options.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Recovery.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Defrag.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Crypto.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Storage.vb" />
-    <Compile Include="ChunkedStream\ChunkedStream.Structure.vb" />
-    <Compile Include="ChunkedStream\UnitTest\Helpers.vb" />
+    <Compile Include="ChunkedStream\Checkpoints.vb" />
+    <Compile Include="ChunkedStream\Compression.vb" />
+    <Compile Include="ChunkedStream\Diagnostics.vb" />
+    <Compile Include="ChunkedStream\Extents.vb" />
+    <Compile Include="ChunkedStream\Options.vb" />
+    <Compile Include="ChunkedStream\Recovery.vb" />
+    <Compile Include="ChunkedStream\Defrag.vb" />
+    <Compile Include="ChunkedStream\Crypto.vb" />
+    <Compile Include="ChunkedStream\Storage.vb" />
+    <Compile Include="ChunkedStream\Structure.vb" />
+    <Compile Include="ChunkedStream\UnitTestHelpers.vb" />
     <Compile Include="Compression\Snappy.vb" />
     <Compile Include="Extensions.vb" />
     <Compile Include="Compression\Lz4Block.vb" />
@@ -104,6 +104,7 @@
     <Compile Include="My Project\Application.Designer.vb">
       <AutoGen>True</AutoGen>
       <DependentUpon>Application.myapp</DependentUpon>
+      <DesignTime>True</DesignTime>
     </Compile>
     <Compile Include="My Project\Resources.Designer.vb">
       <AutoGen>True</AutoGen>
@@ -115,7 +116,7 @@
       <DependentUpon>Settings.settings</DependentUpon>
       <DesignTimeSharedInput>True</DesignTimeSharedInput>
     </Compile>
-    <Compile Include="ChunkedStream\ChunkedStream.Structure.Extensions.vb" />
+    <Compile Include="ChunkedStream\Structure.Extensions.vb" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="Form1.resx">
@@ -129,7 +130,7 @@
     </EmbeddedResource>
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="ChunkedStream\ChunkedStream.Metadata.vb" />
+    <Compile Include="ChunkedStream\Metadata.vb" />
     <None Include="My Project\Application.myapp">
       <Generator>MyApplicationCodeGenerator</Generator>
       <LastGenOutput>Application.Designer.vb</LastGenOutput>

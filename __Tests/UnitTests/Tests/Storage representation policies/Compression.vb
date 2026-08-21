@@ -1,6 +1,6 @@
 ﻿Imports System.IO
 Imports System.Linq
-Imports StreamEncryption.Streams
+Imports i00.Streams
 
 Namespace Tests
 

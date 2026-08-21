@@ -15,6 +15,8 @@
 '   - Encryption is optional.
 '   - Compression is optional and evaluated per chunk.
 '   - Sparse chunk support.
+'   - Stable logical anchors for identifying logical data without requiring
+'     external offset tracking.
 '   - Dynamic paged metadata architecture.
 '   - Metadata roots, index pages, directory pages and optional hole-directory pages.
 '   - Configurable chunk-record placement policies.
@@ -40,6 +42,32 @@
 '   - Rewriting data typically creates new physical records and retires old records.
 '   - Physical layout is independent of logical ordering.
 '   - Sparse extents may reference no physical record.
+'   - Extents may optionally contain immutable anchor identifiers.
+'   - Anchors identify logical data starts rather than physical storage locations.
+'   - Anchor identities remain stable across logical movement, compression changes,
+'     encryption changes, copy-on-write operations, defragmentation and rebuilds.
+'
+' Anchor Model
+'   - Anchors provide stable references to logical data.
+'   - Anchor IDs are immutable and are never reused.
+'   - An anchor identifies the beginning of an extent.
+'   - At most one anchor may exist at any logical offset.
+'   - Anchors may be created for existing logical data using:
+'       - CreateAnchor(LogicalOffset)
+'   - Anchors may be created while appending new data using:
+'       - CreateAnchor(Data)
+'   - CreateAnchor(Data) appends the data and anchors the first appended byte.
+'   - Anchors may be resolved later using:
+'       - GetAnchor(AnchorId)
+'   - Anchor objects expose:
+'       - AnchorId
+'       - Offset
+'       - IsValid
+'       - Remove()
+'   - Anchors belong to a specific ChunkedStream instance and cannot be used on
+'     another ChunkedStream.
+'   - Removing anchored data destroys the associated anchor.
+'   - Explicit anchor removal does not remove the underlying data.
 '
 ' Chunk Size Model
 '   - New streams use Options.ChunkSize.
@@ -51,6 +79,7 @@
 '       - or Defragment(DefragTypes.Rebuild)
 '   - Physical records are Not required To share a common size.
 '   - Streams may legitimately contain physical records of many different sizes.
+'   - Rebuild operations preserve anchored logical boundaries.
 '
 ' Metadata Model
 '   - Metadata is stored using variable-sized paged structures.
@@ -63,6 +92,7 @@
 '       - Physical Record Directory Pages
 '       - Hole Directory Pages
 '       - Metadata Root
+'   - Extent metadata includes AnchorId information.
 '   - Only modified metadata pages are normally rewritten.
 '   - Metadata publication is atomic from the perspective of readers.
 '   - A newly written metadata root becomes active only after a header update.
@@ -75,7 +105,8 @@
 '       - Physical Record Page descriptors
 '       - Physical Record Directory Page descriptors
 '       - Hole Directory Page descriptors
-'       - Logical file length
+'       - NextPhysicalRecordId
+'       - NextAnchorId
 '       - Metadata generation information
 '   - The root is authenticated.
 '   - Old roots become inactive after publication of a newer root.
@@ -151,6 +182,7 @@
 ' Sparse Chunk Model
 '   - All-zero logical ranges may be represented by sparse extents.
 '   - Sparse extents consume no physical payload storage.
+'   - Sparse extents may be anchored.
 '   - Physically stored all-zero records are marked using
 '     the PlaintextAllZero flag.
 '   - Sparse extents are treated as plaintext-all-zero by diagnostics.
@@ -159,6 +191,7 @@
 '   - ApplyOptions may rewrite existing chunks to conform to current settings.
 '   - Compression, encryption and sparseness may be applied independently.
 '   - Existing chunk records are rewritten only when required.
+'   - Anchors survive ApplyOptions rewrites.
 '   - ApplyOptions supports progress reporting and cancellation.
 '
 ' Checkpoint Model
@@ -174,7 +207,9 @@
 '   - A committed inner checkpoint is still part of its parent checkpoint and will
 '     be rolled back if the parent checkpoint is rolled back or disposed.
 '   - Only the outermost checkpoint owns header recovery state.
-'   - Checkpoints roll back stream data and anchors created, and removed.
+'   - Checkpoints roll back:
+'       - Stream data
+'       - Anchor creation/removal
 '   - Options and encryption configuration are not rolled back.
 '   - Defragmentation is not allowed while a checkpoint is active.
 '
@@ -187,6 +222,7 @@
 '   - Checkpoint recovery restores the checkpoint baseline.
 '   - Chunk-size rebuild recovery truncates incomplete rebuild output and reopens
 '     the previously committed stream state.
+'   - Anchors recover as part of normal metadata recovery.
 '
 ' File Layout
 '
@@ -225,6 +261,7 @@
 '       - Compression statistics
 '       - Encryption statistics
 '       - Physical layout information
+'       - Anchor information
 '   - Diagnostic information does not alter stream state.
 '
 ' ================================================================================

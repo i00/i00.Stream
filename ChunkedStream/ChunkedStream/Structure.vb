@@ -38,6 +38,7 @@ Namespace Streams
             Public IsAllocated As Boolean
             Public PhysicalRecordId As Long
             Public PhysicalRecordOffset As Integer
+            Public AnchorId As Long
             Public PhysicalOffset As Long
             Public PhysicalLength As Integer
             Public CompressionMethod As ChunkedStreamOptions.CompressionMethods
@@ -154,6 +155,7 @@ Namespace Streams
                                 .IsAllocated = False,
                                 .PhysicalRecordId = SparsePhysicalRecordId,
                                 .PhysicalRecordOffset = 0,
+                                .AnchorId = Extent.AnchorId,
                                 .PhysicalOffset = 0,
                                 .PhysicalLength = 0,
                                 .CompressionMethod = ChunkedStreamOptions.CompressionMethods.None,
@@ -200,6 +202,7 @@ Namespace Streams
                             .IsAllocated = True,
                             .PhysicalRecordId = Extent.PhysicalRecordId,
                             .PhysicalRecordOffset = Extent.PhysicalRecordOffset,
+                            .AnchorId = Extent.AnchorId,
                             .PhysicalOffset = Record.PhysicalOffset,
                             .PhysicalLength = Record.PhysicalLength,
                             .CompressionMethod = Header.CompressionMethod,
@@ -376,7 +379,8 @@ Namespace Streams
                             IsPhysicallyContiguousWithNext:=BuildInfo.IsAllocated AndAlso IsPhysicallyContiguousWithNext,
                             IsInLogicalOrder:=BuildInfo.IsAllocated AndAlso IsInLogicalOrder,
                             PhysicalRecordId:=BuildInfo.PhysicalRecordId,
-                            PhysicalRecordOffset:=BuildInfo.PhysicalRecordOffset))
+                            PhysicalRecordOffset:=BuildInfo.PhysicalRecordOffset,
+                            AnchorId:=BuildInfo.AnchorId))
 
                 Next
 
@@ -1477,7 +1481,8 @@ Namespace Streams
                            IsPhysicallyContiguousWithNext As Boolean,
                            IsInLogicalOrder As Boolean,
                            Optional PhysicalRecordId As Long? = Nothing,
-                           Optional PhysicalRecordOffset As Integer? = Nothing)
+                           Optional PhysicalRecordOffset As Integer? = Nothing,
+                           Optional AnchorId As Long = 0)
 
                 Me.Index = Index
                 Me.LogicalOffset = LogicalOffset
@@ -1502,6 +1507,7 @@ Namespace Streams
                 Me.IsInLogicalOrder = IsInLogicalOrder
                 Me.PhysicalRecordId = PhysicalRecordId
                 Me.PhysicalRecordOffset = PhysicalRecordOffset
+                Me.AnchorId = AnchorId
 
             End Sub
 
@@ -1553,6 +1559,21 @@ Namespace Streams
             ''' Offset within the physical record plaintext, or Nothing for sparse chunks.
             ''' </summary>
             Public ReadOnly Property PhysicalRecordOffset As Integer?
+
+            ''' <summary>
+            ''' Immutable anchor identifier for the chunk's logical start.
+            ''' Zero indicates the chunk is not anchored.
+            ''' </summary>
+            Public ReadOnly Property AnchorId As Long
+
+            ''' <summary>
+            ''' True when this chunk begins at an anchored logical position.
+            ''' </summary>
+            Public ReadOnly Property IsAnchored As Boolean
+                Get
+                    Return AnchorId > 0
+                End Get
+            End Property
 
             ''' <summary>
             ''' Physical chunk record start offset, or Nothing for sparse chunks.
@@ -1726,24 +1747,19 @@ Namespace Streams
             ''' </summary>
             Public Overrides Function ToString() As String
 
+                Dim AnchorText = If(IsAnchored, $", Anchor={AnchorId}", "")
+                Dim ZeroText = If(IsPlaintextAllZero, ", zero", "")
+
                 If IsSparse Then
-                    Return $"Chunk {Index} [Sparse, {PlainLength.FormatFileSizeFromBytes()} logical, zero={IsPlaintextAllZero}]"
+                    Return $"Chunk {Index} [Sparse, {PlainLength.FormatFileSizeFromBytes()} logical{AnchorText}{ZeroText}]"
                 End If
 
                 Dim EncryptionText = If(IsEncrypted, ", encrypted", "")
-                Dim CompressionText =
-                    If(IsCompressed,
-                       $", {PayloadSpaceSavedRatio:P2} saved",
-                       "")
+                Dim CompressionText = If(IsCompressed, $", {PayloadSpaceSavedRatio:P2} saved", "")
 
-                Dim EvaluatedCompressionText =
-                    If(CompressionEvaluatedMethod <> ChunkedStream.ChunkedStreamOptions.CompressionMethods.None,
-                       $", evaluated {CompressionEvaluatedMethod} {CompressionEvaluatedRatio:P2}",
-                       "")
+                Dim EvaluatedCompressionText = If(CompressionEvaluatedMethod <> ChunkedStream.ChunkedStreamOptions.CompressionMethods.None, $", evaluated {CompressionEvaluatedMethod} {CompressionEvaluatedRatio:P2}", "")
 
-                Dim ZeroText = If(IsPlaintextAllZero, ", zero", "")
-
-                Return $"Chunk {Index} [{PlainLength.FormatFileSizeFromBytes()} -> {PayloadLength.FormatFileSizeFromBytes()}{CompressionText}{EvaluatedCompressionText}{EncryptionText}{ZeroText}]"
+                Return $"Chunk {Index} [{PlainLength.FormatFileSizeFromBytes()} -> {PayloadLength.FormatFileSizeFromBytes()}{CompressionText}{EvaluatedCompressionText}{EncryptionText}{ZeroText}{AnchorText}]"
 
             End Function
 

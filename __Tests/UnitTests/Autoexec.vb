@@ -1,12 +1,12 @@
 ﻿Imports System.IO
-Imports StreamEncryption.Streams
+Imports i00.Streams
 
 Public Class Autoexec
 
     Public Shared Function Main() As Integer
 
         'because we are not testing PBKDF2 key generation speed :P:
-        StreamEncryption.Streams.ChunkedStream.EncryptionInfo.DefaultPBKDF2Iterations = 1
+        ChunkedStream.EncryptionInfo.DefaultPBKDF2Iterations = 1
         UnitTester.SimpleTest.TestTypesToRun = UnitTester.SimpleTest.TestTypes.Test
 
         'Test()

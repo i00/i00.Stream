@@ -1,6 +1,6 @@
 ﻿Imports System.IO
 Imports System.Security.Cryptography
-Imports StreamEncryption.Streams
+Imports i00.Streams
 
 Namespace Tests
 
