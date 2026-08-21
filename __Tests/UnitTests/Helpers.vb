@@ -22,12 +22,12 @@ Namespace Tests
             }
 
         <System.Runtime.CompilerServices.Extension>
-        Public Function FormatFileSizeFromBytes(Size As Long) As String
+        Public Function FormatFileSizeFromBytes(Size As Long, Optional DecimalPlaces As Integer = 1) As String
 
             For Index As Integer = 0 To FormatFileSizeLimits.Length - 1
                 If Size >= FormatFileSizeLimits(Index) Then
                     Return String.Format(
-                        "{0:#,##0.#} " & FormatFileSizeUnits(Index),
+                        "{0:#,##0." & New String("#"c, DecimalPlaces) & "} " & FormatFileSizeUnits(Index),
                         Size / CDbl(FormatFileSizeLimits(Index)))
                 End If
             Next

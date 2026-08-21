@@ -1,8 +1,43 @@
 ﻿Imports System.IO
-Imports StreamEncryption.Streams
+Imports i00.Streams
 
 Namespace Tests
     Partial Public NotInheritable Class StreamChunked
+
+
+        <UnitTester.SimpleBenchmark()>
+        Public Shared Function BaseFileSizes() As UnitTester.SimpleTest.BenchmarkResult
+            Dim Results As New Dictionary(Of String, String)
+
+            Dim Tests = {
+                New With {.Test = "Single Byte",
+                          .Action = Sub(Cs As ChunkedStream)
+                                        Cs.Options.IndexPageEntryCount
+                                        Cs.Write(0, New Byte() {1})
+                                    End Sub}
+            }
+            'New With {.Test = "No Data",
+            '          .Action = Sub(Cs As ChunkedStream)
+
+            '                    End Sub},
+            'New With {.Test = "Single Sparse Byte",
+            '          .Action = Sub(Cs As ChunkedStream)
+            '                        Cs.SetLength(1)
+            '                    End Sub},
+
+            For Each Test In Tests
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+                        Test.Action.Invoke(Cs)
+                        Results.Add(Test.Test, $"{Ms.Length:N0} B")
+                        Dim struct = Cs.GetStructure()
+                        Dim qwe = ""
+                    End Using
+                End Using
+            Next
+
+            Return New UnitTester.SimpleTest.BenchmarkResult($"{Join(Results.Select(Function(x) $"{x.Key}: {x.Value}").ToArray, vbCrLf)}")
+        End Function
 
         '''' <summary>
         '''' Measures the cost of publishing metadata as index size grows.
@@ -83,141 +118,141 @@ Namespace Tests
 
         'End Function
 
-        ''' <summary>
-        ''' Benchmarks new chunk write-location policies.
-        ''' </summary>
-        <UnitTester.SimpleBenchmark({128, 1000})>
-        <UnitTester.SimpleBenchmark({256, 1000})>
-        <UnitTester.SimpleBenchmark({512, 1000})>
-        <UnitTester.SimpleBenchmark({1024, 1000})>
-        Public Shared Function NewChunkWriteLocationPolicyBenchmark(LogicalChunkCount As Integer,
-                                                                    DurationMs As Long) As UnitTester.SimpleTest.BenchmarkResult
-            '<UnitTester.SimpleTest({2048, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
-            '<UnitTester.SimpleTest({4096, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
-            '<UnitTester.SimpleTest({8192, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        '    ''' <summary>
+        '    ''' Benchmarks new chunk write-location policies.
+        '    ''' </summary>
+        '    <UnitTester.SimpleBenchmark({128, 1000})>
+        '    <UnitTester.SimpleBenchmark({256, 1000})>
+        '    <UnitTester.SimpleBenchmark({512, 1000})>
+        '    <UnitTester.SimpleBenchmark({1024, 1000})>
+        '    Public Shared Function NewChunkWriteLocationPolicyBenchmark(LogicalChunkCount As Integer,
+        '                                                                DurationMs As Long) As UnitTester.SimpleTest.BenchmarkResult
+        '        '<UnitTester.SimpleTest({2048, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        '        '<UnitTester.SimpleTest({4096, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
+        '        '<UnitTester.SimpleTest({8192, 1000}, TestType:=UnitTester.SimpleTest.TestTypes.Benchmark)>
 
-            Dim Messages As New List(Of String)
+        '        Dim Messages As New List(Of String)
 
-            '
-            ' Pre-generate buffers so allocation and pattern generation are not included
-            ' in the benchmark.
-            '
-            Dim DataSets(LogicalChunkCount - 1)() As Byte
+        '        '
+        '        ' Pre-generate buffers so allocation and pattern generation are not included
+        '        ' in the benchmark.
+        '        '
+        '        Dim DataSets(LogicalChunkCount - 1)() As Byte
 
-            For ChunkIndex = 0 To DataSets.Length - 1
-                DataSets(ChunkIndex) =
-                    GeneratePatternData(
-                        ChunkedStream.DefaultChunkSize,
-                        ChunkIndex + 1)
-            Next
+        '        For ChunkIndex = 0 To DataSets.Length - 1
+        '            DataSets(ChunkIndex) =
+        '                GeneratePatternData(
+        '                    ChunkedStream.DefaultChunkSize,
+        '                    ChunkIndex + 1)
+        '        Next
 
-            Dim InitialWrite = True
+        '        Dim InitialWrite = True
 
-            For Each Policy As ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies In
-                [Enum].GetValues(GetType(ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies))
+        '        For Each Policy As ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies In
+        '            [Enum].GetValues(GetType(ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies))
 
-                Dim TotalBytesWritten As Long = 0
+        '            Dim TotalBytesWritten As Long = 0
 
-                Using Ms As New MemoryStream()
+        '            Using Ms As New MemoryStream()
 
-                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
-                        .NewChunkWriteLocationPolicy = Policy
-                    }
+        '                Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+        '                    .NewChunkWriteLocationPolicy = Policy
+        '                }
 
-                    Using Cs = ChunkedStream.Open(Ms, Options)
+        '                Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        '
-                        ' Build an initial file.
-                        '
-                        TotalBytesWritten = 0
+        '                    '
+        '                    ' Build an initial file.
+        '                    '
+        '                    TotalBytesWritten = 0
 
-                        Dim Sw = Stopwatch.StartNew()
+        '                    Dim Sw = Stopwatch.StartNew()
 
-                        For ChunkIndex = 0 To LogicalChunkCount - 1
-                            Cs.Write(
-                                CLng(ChunkIndex) * ChunkedStream.DefaultChunkSize,
-                                DataSets(ChunkIndex))
+        '                    For ChunkIndex = 0 To LogicalChunkCount - 1
+        '                        Cs.Write(
+        '                            CLng(ChunkIndex) * ChunkedStream.DefaultChunkSize,
+        '                            DataSets(ChunkIndex))
 
-                            TotalBytesWritten += DataSets(ChunkIndex).Length
-                        Next
+        '                        TotalBytesWritten += DataSets(ChunkIndex).Length
+        '                    Next
 
-                        Sw.Stop()
+        '                    Sw.Stop()
 
-                        Dim BytesPerSecond =
-                            CLng(TotalBytesWritten /
-                                 Math.Max(0.001, Sw.Elapsed.TotalSeconds))
+        '                    Dim BytesPerSecond =
+        '                        CLng(TotalBytesWritten /
+        '                             Math.Max(0.001, Sw.Elapsed.TotalSeconds))
 
-                        If InitialWrite Then
-                            Dim StructInitial = Cs.GetStructure()
+        '                    If InitialWrite Then
+        '                        Dim StructInitial = Cs.GetStructure()
 
-                            Messages.Add(
-                                $"Initial: " &
-                                $"{BytesPerSecond.FormatFileSizeFromBytes()}/s, " &
-                                $"LiveData={StructInitial.LiveDataEndOffset.FormatFileSizeFromBytes()}, " &
-                                $"Physical={Ms.Length.FormatFileSizeFromBytes()}")
+        '                        Messages.Add(
+        '                            $"Initial: " &
+        '                            $"{BytesPerSecond.FormatFileSizeFromBytes()}/s, " &
+        '                            $"LiveData={StructInitial.LiveDataEndOffset.FormatFileSizeFromBytes()}, " &
+        '                            $"Physical={Ms.Length.FormatFileSizeFromBytes()}")
 
-                            InitialWrite = False
-                        End If
+        '                        InitialWrite = False
+        '                    End If
 
-                        '
-                        ' Create some initial fragmentation.
-                        '
-                        GenerateFragmentedData(Cs)
+        '                    '
+        '                    ' Create some initial fragmentation.
+        '                    '
+        '                    GenerateFragmentedData(Cs)
 
-                        '
-                        ' Only measure metadata cost for the timed benchmark section.
-                        '
-                        Cs.DebugResetMetadataCounters()
+        '                    '
+        '                    ' Only measure metadata cost for the timed benchmark section.
+        '                    '
+        '                    Cs.DebugResetMetadataCounters()
 
-                        Dim Rng As New Random(1)
+        '                    Dim Rng As New Random(1)
 
-                        TotalBytesWritten = 0
-                        Sw.Restart()
+        '                    TotalBytesWritten = 0
+        '                    Sw.Restart()
 
-                        Do While Sw.ElapsedMilliseconds < DurationMs
-                            Dim ChunkIndex = Rng.Next(LogicalChunkCount)
+        '                    Do While Sw.ElapsedMilliseconds < DurationMs
+        '                        Dim ChunkIndex = Rng.Next(LogicalChunkCount)
 
-                            Cs.Write(
-                                CLng(ChunkIndex) * ChunkedStream.DefaultChunkSize,
-                                DataSets(ChunkIndex))
+        '                        Cs.Write(
+        '                            CLng(ChunkIndex) * ChunkedStream.DefaultChunkSize,
+        '                            DataSets(ChunkIndex))
 
-                            TotalBytesWritten += DataSets(ChunkIndex).Length
-                        Loop
+        '                        TotalBytesWritten += DataSets(ChunkIndex).Length
+        '                    Loop
 
-                        Sw.Stop()
+        '                    Sw.Stop()
 
-                        BytesPerSecond =
-                            CLng(TotalBytesWritten /
-                                 Math.Max(0.001, Sw.Elapsed.TotalSeconds))
+        '                    BytesPerSecond =
+        '                        CLng(TotalBytesWritten /
+        '                             Math.Max(0.001, Sw.Elapsed.TotalSeconds))
 
-                        Dim Struct = Cs.GetStructure()
+        '                    Dim Struct = Cs.GetStructure()
 
-                        Messages.Add(
-    $"{Policy}: " &
-    $"{BytesPerSecond.FormatFileSizeFromBytes()}/s, " &
-    $"LiveData={Struct.LiveDataEndOffset.FormatFileSizeFromBytes()}, " &
-    $"Physical={Ms.Length.FormatFileSizeFromBytes()}, " &
-    $"Persists={Cs.DebugPersistCount:N0}, " &
-    $"AvgDirtyPages={Cs.DebugAveragePersistIndexPageCount:N2}, " &
-    $"PersistMs={Cs.DebugPersistMilliseconds:N0}, " &
-    $"AvgPersistMs={Cs.DebugAveragePersistMilliseconds:N3}, " &
-    $"IndexMs={Cs.DebugIndexPageMilliseconds:N0}, " &
-    $"DirMs={Cs.DebugDirectoryMilliseconds:N0}, " &
-    $"ChunkDirMs={Cs.DebugChunkDirectoryMilliseconds:N0}, " &
-    $"HoleDirMs={Cs.DebugHoleDirectoryMilliseconds:N0}, " &
-    $"RootMs={Cs.DebugRootMilliseconds:N0}, " &
-    $"HeaderMs={Cs.DebugHeaderMilliseconds:N0}")
+        '                    Messages.Add(
+        '$"{Policy}: " &
+        '$"{BytesPerSecond.FormatFileSizeFromBytes()}/s, " &
+        '$"LiveData={Struct.LiveDataEndOffset.FormatFileSizeFromBytes()}, " &
+        '$"Physical={Ms.Length.FormatFileSizeFromBytes()}, " &
+        '$"Persists={Cs.DebugPersistCount:N0}, " &
+        '$"AvgDirtyPages={Cs.DebugAveragePersistIndexPageCount:N2}, " &
+        '$"PersistMs={Cs.DebugPersistMilliseconds:N0}, " &
+        '$"AvgPersistMs={Cs.DebugAveragePersistMilliseconds:N3}, " &
+        '$"IndexMs={Cs.DebugIndexPageMilliseconds:N0}, " &
+        '$"DirMs={Cs.DebugDirectoryMilliseconds:N0}, " &
+        '$"ChunkDirMs={Cs.DebugChunkDirectoryMilliseconds:N0}, " &
+        '$"HoleDirMs={Cs.DebugHoleDirectoryMilliseconds:N0}, " &
+        '$"RootMs={Cs.DebugRootMilliseconds:N0}, " &
+        '$"HeaderMs={Cs.DebugHeaderMilliseconds:N0}")
 
-                    End Using
+        '                End Using
 
-                End Using
+        '            End Using
 
-            Next
+        '        Next
 
-            Return New UnitTester.SimpleTest.BenchmarkResult(
-                String.Join(vbCrLf, Messages))
+        '        Return New UnitTester.SimpleTest.BenchmarkResult(
+        '            String.Join(vbCrLf, Messages))
 
-        End Function
+        '    End Function
 
     End Class
 
