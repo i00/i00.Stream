@@ -1,5 +1,4 @@
 ﻿Imports System.IO
-Imports System.Linq
 Imports StreamEncryption.Streams
 
 Namespace Tests

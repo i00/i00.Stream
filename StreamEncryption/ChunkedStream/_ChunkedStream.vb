@@ -174,7 +174,7 @@
 '   - A committed inner checkpoint is still part of its parent checkpoint and will
 '     be rolled back if the parent checkpoint is rolled back or disposed.
 '   - Only the outermost checkpoint owns header recovery state.
-'   - Checkpoints roll back stream data only.
+'   - Checkpoints roll back stream data and anchors created, and removed.
 '   - Options and encryption configuration are not rolled back.
 '   - Defragmentation is not allowed while a checkpoint is active.
 '
@@ -410,7 +410,7 @@ Namespace Streams
         Private Const HeaderMacOffset As Integer = 480
         Private Const HeaderMacCoveredSize As Integer = 480
 
-        Private Const ExtentEntrySize As Integer = 24
+        Private Const ExtentEntrySize As Integer = 32
         Private Const PhysicalRecordEntrySize As Integer = 32
 
         Private Const ChunkRecordHeaderSize As Integer = 48
@@ -439,7 +439,7 @@ Namespace Streams
         Private Const MetadataReservedOffset As Integer = 268
         Private Const MetadataReservedLength As Integer = 212
 
-        Private Const MetadataRootHeaderSize As Integer = 64
+        Private Const MetadataRootHeaderSize As Integer = 72
         Private Const MetadataRootMagicSize As Integer = 8
         Private Const MetadataDescriptorSize As Integer = 48
         Private Const MetadataRootDescriptorSize As Integer = 52
@@ -502,12 +502,11 @@ Namespace Streams
         Friend Structure ExtentIndexEntry
 
             Public LogicalOffset As Long
-
             Public LogicalLength As Integer
-
             Public PhysicalRecordId As Long
 
-            Dim _PhysicalRecordOffset As Integer
+            Private _PhysicalRecordOffset As Integer
+
             Public Property PhysicalRecordOffset As Integer
                 Get
                     Return _PhysicalRecordOffset
@@ -517,6 +516,11 @@ Namespace Streams
                 End Set
             End Property
 
+            '
+            ' Zero means unanchored.
+            ' A positive value identifies this extent's logical start.
+            '
+            Public AnchorId As Long
 
         End Structure
 
@@ -676,6 +680,7 @@ Namespace Streams
                         Extents As List(Of ExtentIndexEntry),
                         PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry),
                         NextPhysicalRecordId As Long,
+                        NextAnchorId As Long,
                         HeaderFlags As HeaderFlags,
                         Options As ChunkedStreamOptions,
                         MetadataRootOffset As Long,
@@ -692,6 +697,7 @@ Namespace Streams
             _Extents = If(Extents, New List(Of ExtentIndexEntry)())
             _PhysicalRecords = If(PhysicalRecords, New Dictionary(Of Long, PhysicalRecordEntry)())
             _NextPhysicalRecordId = Math.Max(1L, NextPhysicalRecordId)
+            _NextAnchorId = Math.Max(1L, NextAnchorId)
             _HeaderFlags = HeaderFlags
             _MetadataRootOffset = MetadataRootOffset
             _MetadataRootLength = MetadataRootLength
@@ -718,20 +724,9 @@ Namespace Streams
                 IndexDirectoryEntryCount = Me.Options.IndexDirectoryEntryCount
             End If
 
-            If IndexPageEntryCount <= 0 Then
-                IndexPageEntryCount = 256
-            End If
+            If IndexPageEntryCount <= 0 Then IndexPageEntryCount = 256
+            If IndexDirectoryEntryCount <= 0 Then IndexDirectoryEntryCount = 256
 
-            If IndexDirectoryEntryCount <= 0 Then
-                IndexDirectoryEntryCount = 256
-            End If
-
-            '
-            ' These values must be established before rebuilding the physical-record
-            ' page indexes because RebuildPhysicalRecordOrdinals calculates:
-            '
-            '     PageNumber = Ordinal \ _IndexPageEntryCount
-            '
             _IndexPageEntryCount = IndexPageEntryCount
             _IndexDirectoryEntryCount = IndexDirectoryEntryCount
 
@@ -739,6 +734,7 @@ Namespace Streams
             Me.Options.IndexDirectoryEntryCount = _IndexDirectoryEntryCount
 
             RebuildPhysicalRecordOrdinals()
+            RebuildAnchorIndex()
 
             _ChunkSize = Me.Options.ChunkSize
             _ChunkPlain = New Byte(_ChunkSize - 1) {}
@@ -883,6 +879,7 @@ Namespace Streams
                                            Metadata.Extents,
                                            Metadata.PhysicalRecords,
                                            Metadata.NextPhysicalRecordId,
+                                           Metadata.NextAnchorId,
                                            Flags,
                                            EffectiveOptions,
                                            MetadataRootOffset,
@@ -923,6 +920,8 @@ Namespace Streams
                 If Fs.CanWrite Then
                     Try
                         Result.RecoverState()
+                        Result.RebuildPhysicalRecordOrdinals()
+                        Result.RebuildAnchorIndex()
                         Result._AutoRecoveryState = AutoRecoveryStates.Repaired
                     Catch ex As Exception When AllowOpeningWhenRecoveryFails
                         'we ignore errors to allow diagnostics if AllowOpeningRecoveryFails is set
@@ -1025,6 +1024,7 @@ Namespace Streams
                                            DataStartOffset,
                                            New List(Of ExtentIndexEntry)(),
                                            New Dictionary(Of Long, PhysicalRecordEntry)(),
+                                           1L,
                                            1L,
                                            Flags,
                                            EffectiveOptions,
@@ -1422,7 +1422,187 @@ Namespace Streams
 
         End Sub
 
-        Public Sub Remove(LogicalOffset As Long,
+        Public Sub Replace(LogicalOffset As Long,
+                           Length As Long,
+                           Data As Byte(),
+                           Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset =
+                               AnchorActionsAtLogicalOffset.Use)
+
+            If Data Is Nothing Then Throw New ArgumentNullException(NameOf(Data))
+
+            Replace(LogicalOffset,
+                    Length,
+                    Data,
+                    0,
+                    Data.Length,
+                    AnchorActionAtLogicalOffset)
+
+        End Sub
+
+        Public Sub Replace(LogicalOffset As Long,
+                           Length As Long,
+                           Data As Byte(),
+                           DataOffset As Integer,
+                           Count As Integer,
+                           Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset =
+                               AnchorActionsAtLogicalOffset.Use)
+
+            SyncLock _SyncRoot
+
+                ThrowIfDisposed()
+
+                If LogicalOffset < 0 OrElse LogicalOffset > _Length Then
+                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+                End If
+
+                If Length < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(Length))
+                End If
+
+                If Data Is Nothing Then
+                    Throw New ArgumentNullException(NameOf(Data))
+                End If
+
+                If DataOffset < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(DataOffset))
+                End If
+
+                If Count < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(Count))
+                End If
+
+                If DataOffset > Data.Length OrElse Count > Data.Length - DataOffset Then
+                    Throw New ArgumentException("Invalid offset/count.")
+                End If
+
+                If LogicalOffset >= _Length AndAlso Length > 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+                End If
+
+                InvalidateChunkCache()
+
+                Dim ActualLength =
+                    If(LogicalOffset < _Length,
+                       Math.Min(Length, _Length - LogicalOffset),
+                       0L)
+
+                '
+                ' Capture the anchor at the original replacement start before removing
+                ' the old range. Anchors strictly inside the removed range are destroyed
+                ' by RemoveRangeCore. An anchor at the removal end survives.
+                '
+                Dim StartAnchorId =
+                    FindAnchorIdAtLogicalOffset(LogicalOffset)
+
+                If ActualLength > 0 Then
+                    RemoveRangeCore(LogicalOffset,
+                                    ActualLength,
+                                    False)
+                End If
+
+                If Count > 0 Then
+
+                    Dim NewExtents =
+                        BuildExtentsFromBuffer(Data,
+                                               DataOffset,
+                                               Count)
+
+                    If StartAnchorId > 0 AndAlso
+                       AnchorActionAtLogicalOffset = AnchorActionsAtLogicalOffset.Use Then
+
+                        Dim FirstExtent = NewExtents(0)
+
+                        FirstExtent.AnchorId = StartAnchorId
+                        NewExtents(0) = FirstExtent
+
+                    End If
+
+                    '
+                    ' Always use TransformAway for this insertion.
+                    '
+                    ' The original start anchor, when retained, has already been assigned
+                    ' explicitly to the first replacement extent above.
+                    '
+                    ' An anchor at the original removal end temporarily occupies
+                    ' LogicalOffset after removal. TransformAway keeps that anchor attached
+                    ' to the surviving data and pushes it after the replacement data.
+                    '
+                    InsertExtentsCore(
+                        LogicalOffset,
+                        NewExtents,
+                        AnchorActionsAtLogicalOffset.TransformAway)
+
+                End If
+
+                RebuildAnchorIndex()
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+            End SyncLock
+
+        End Sub
+
+        Public Sub CloneInsert(SourceLogicalOffset As Long,
+                               CloneLength As Long,
+                               TargetLogicalOffset As Long,
+                               Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset =
+                                   AnchorActionsAtLogicalOffset.TransformAway)
+
+            SyncLock _SyncRoot
+
+                ThrowIfDisposed()
+
+                If SourceLogicalOffset < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(SourceLogicalOffset))
+                End If
+
+                If CloneLength < 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(CloneLength))
+                End If
+
+                If TargetLogicalOffset < 0 OrElse TargetLogicalOffset > _Length Then
+                    Throw New ArgumentOutOfRangeException(NameOf(TargetLogicalOffset))
+                End If
+
+                If CloneLength = 0 OrElse SourceLogicalOffset >= _Length Then Return
+
+                InvalidateChunkCache()
+
+                Dim ActualLength =
+                    Math.Min(CloneLength,
+                             _Length - SourceLogicalOffset)
+
+                Dim CloneExtents =
+                    BuildCloneExtents(SourceLogicalOffset,
+                                      ActualLength)
+
+                '
+                ' Source anchor identities are never cloned.
+                '
+                For Index = 0 To CloneExtents.Count - 1
+
+                    Dim Extent = CloneExtents(Index)
+                    Extent.AnchorId = 0
+
+                    CloneExtents(Index) = Extent
+
+                Next
+
+                InsertExtentsCore(TargetLogicalOffset,
+                                  CloneExtents,
+                                  AnchorActionAtLogicalOffset)
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+            End SyncLock
+
+        End Sub
+
+        Public Overloads Sub Remove(LogicalOffset As Long,
                           Length As Long)
 
             SyncLock _SyncRoot
@@ -1447,37 +1627,53 @@ Namespace Streams
 
         End Sub
 
-        Public Sub Insert(LogicalOffset As Long,
-                          Data As Byte())
+        Public Overloads Sub Insert(LogicalOffset As Long,
+                                    Data As Byte(),
+                                    Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway)
 
             If Data Is Nothing Then Throw New ArgumentNullException(NameOf(Data))
 
-            Insert(LogicalOffset, Data, 0, Data.Length)
+            Insert(LogicalOffset,
+                   Data,
+                   0,
+                   Data.Length,
+                   AnchorActionAtLogicalOffset)
 
         End Sub
 
-        Public Sub Insert(LogicalOffset As Long,
-                          Data As Byte(),
-                          DataOffset As Integer,
-                          Count As Integer)
+        Public Overloads Sub Insert(LogicalOffset As Long,
+                                    Data As Byte(),
+                                    DataOffset As Integer,
+                                    Count As Integer,
+                                    Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway)
 
             SyncLock _SyncRoot
 
                 ThrowIfDisposed()
 
-                If LogicalOffset < 0 OrElse LogicalOffset > _Length Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+                If LogicalOffset < 0 OrElse LogicalOffset > _Length Then
+                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+                End If
+
                 If Data Is Nothing Then Throw New ArgumentNullException(NameOf(Data))
                 If DataOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(DataOffset))
                 If Count < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Count))
-                If Count > Data.Length - DataOffset Then Throw New ArgumentException("Invalid offset/count.")
+
+                If Count > Data.Length - DataOffset Then
+                    Throw New ArgumentException("Invalid offset/count.")
+                End If
 
                 If Count = 0 Then Return
 
                 InvalidateChunkCache()
 
-                Dim NewExtents = BuildExtentsFromBuffer(Data, DataOffset, Count)
+                Dim NewExtents = BuildExtentsFromBuffer(Data,
+                                                        DataOffset,
+                                                        Count)
 
-                InsertExtentsCore(LogicalOffset, NewExtents)
+                InsertExtentsCore(LogicalOffset,
+                                  NewExtents,
+                                  AnchorActionAtLogicalOffset)
 
                 If HasOpenCheckpoint = False Then
                     PersistIndexAndHeader(_IndexOffset)
@@ -1519,8 +1715,8 @@ Namespace Streams
         ''' <summary>
         ''' Replaces a logical range with zero bytes using sparse extents directly.
         ''' </summary>
-        Public Sub Clear(LogicalOffset As Long,
-                         Count As Long)
+        Public Overloads Sub Clear(LogicalOffset As Long,
+                                   Count As Long)
 
             SyncLock _SyncRoot
 
@@ -1615,8 +1811,9 @@ Namespace Streams
         ''' <summary>
         ''' Inserts zero bytes at the specified logical offset using sparse extents directly.
         ''' </summary>
-        Public Sub InsertNullBytes(LogicalOffset As Long,
-                                   Count As Long)
+        Public Overloads Sub InsertNullBytes(LogicalOffset As Long,
+                                             Count As Long,
+                                             Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway)
 
             SyncLock _SyncRoot
 
@@ -1624,7 +1821,10 @@ Namespace Streams
 
                 If LogicalOffset < 0 OrElse
                    LogicalOffset > _Length Then
-                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+
+                    Throw New ArgumentOutOfRangeException(
+                        NameOf(LogicalOffset))
+
                 End If
 
                 If Count < 0 Then
@@ -1644,9 +1844,9 @@ Namespace Streams
                 If Options.StoreSparseChunks = False Then
 
                     Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
-
                     Dim Remaining = Count
                     Dim InsertOffset = LogicalOffset
+                    Dim FirstInsert = True
 
                     While Remaining > 0
 
@@ -1657,24 +1857,28 @@ Namespace Streams
                         Insert(InsertOffset,
                                ZeroBuffer,
                                0,
-                               ThisInsert)
+                               ThisInsert,
+                               If(FirstInsert,
+                                  AnchorActionAtLogicalOffset,
+                                  AnchorActionsAtLogicalOffset.TransformAway))
 
                         InsertOffset += ThisInsert
                         Remaining -= ThisInsert
+                        FirstInsert = False
 
                     End While
 
                 Else
 
                     InsertSparseRange(LogicalOffset,
-                                      Count)
+                                      Count,
+                                      AnchorActionAtLogicalOffset)
 
                     If HasOpenCheckpoint = False Then
                         PersistIndexAndHeader(_IndexOffset)
                     End If
 
                 End If
-
 
             End SyncLock
 

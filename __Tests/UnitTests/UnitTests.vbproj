@@ -92,22 +92,7 @@
       <DependentUpon>Settings.settings</DependentUpon>
       <DesignTimeSharedInput>True</DesignTimeSharedInput>
     </Compile>
-    <Compile Include="Tests\Core stream semantics\Foundation.vb" />
-    <Compile Include="Tests\Core stream semantics\SparseStorage.vb" />
-    <Compile Include="Tests\Correctness and survival\Durability.vb" />
-    <Compile Include="Tests\Correctness and survival\Recovery.vb" />
-    <Compile Include="Tests\Correctness and survival\Validation.vb" />
-    <Compile Include="Tests\Developer confidence\Diagnostics.vb" />
-    <Compile Include="Tests\Developer confidence\Hardening.vb" />
-    <Compile Include="Tests\Developer confidence\Visualization.vb" />
-    <Compile Include="Tests\Logical mutations and allocation\Allocation.vb" />
-    <Compile Include="Tests\Logical mutations and allocation\CopyOnWrite.vb" />
-    <Compile Include="Tests\Logical mutations and allocation\ExtentOperations.vb" />
-    <Compile Include="Tests\Logical mutations and allocation\Transactions.vb" />
-    <Compile Include="Tests\Physical layout operations\Defragmentation.vb" />
-    <Compile Include="Tests\Storage representation policies\Compression.vb" />
-    <Compile Include="Tests\Storage representation policies\Encryption.vb" />
-    <Compile Include="Tests\Storage representation policies\PolicyMigration.vb" />
+    <Compile Include="Tests\Logical mutations and allocation\Anchors.vb" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="My Project\Resources.resx">
@@ -141,6 +126,11 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Benchmarks\" />
+    <Folder Include="Tests\Core stream semantics\" />
+    <Folder Include="Tests\Correctness and survival\" />
+    <Folder Include="Tests\Developer confidence\" />
+    <Folder Include="Tests\Physical layout operations\" />
+    <Folder Include="Tests\Storage representation policies\" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.VisualBasic.targets" />
 </Project>

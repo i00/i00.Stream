@@ -487,8 +487,11 @@ Namespace Streams
 
             Dim Extent = _Extents(ExtentIndex)
 
-            If LogicalOffset = Extent.LogicalOffset OrElse LogicalOffset = GetExtentEnd(Extent) Then
+            If LogicalOffset = Extent.LogicalOffset OrElse
+               LogicalOffset = GetExtentEnd(Extent) Then
+
                 Return
+
             End If
 
             Dim LeftLength = CInt(LogicalOffset - Extent.LogicalOffset)
@@ -510,7 +513,8 @@ Namespace Streams
                     .LogicalOffset = Extent.LogicalOffset,
                     .LogicalLength = LeftLength,
                     .PhysicalRecordId = Extent.PhysicalRecordId,
-                    .PhysicalRecordOffset = LeftPhysicalRecordOffset
+                    .PhysicalRecordOffset = LeftPhysicalRecordOffset,
+                    .AnchorId = Extent.AnchorId
                 }
 
             Dim RightExtent =
@@ -518,7 +522,8 @@ Namespace Streams
                     .LogicalOffset = LogicalOffset,
                     .LogicalLength = RightLength,
                     .PhysicalRecordId = Extent.PhysicalRecordId,
-                    .PhysicalRecordOffset = RightPhysicalRecordOffset
+                    .PhysicalRecordOffset = RightPhysicalRecordOffset,
+                    .AnchorId = 0
                 }
 
             _Extents(ExtentIndex) = LeftExtent
@@ -528,10 +533,7 @@ Namespace Streams
                 IncrementPhysicalRecordRefCount(Extent.PhysicalRecordId)
             End If
 
-            '
-            ' Splitting inserts one extent into the dense extent table, so later extent
-            ' ordinals can shift. Only pages from the split point onward are affected.
-            '
+            RebuildAnchorIndex()
             MarkExtentPagesDirtyFromIndex(ExtentIndex)
 
         End Sub
@@ -634,26 +636,42 @@ Namespace Streams
         End Function
 
         Private Sub InsertSparseRange(LogicalOffset As Long,
-                                      Length As Long)
+                                      Length As Long,
+                                      Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway)
+
             If Length <= 0 Then Return
 
             Dim Extents = BuildSparseExtents(Length)
 
-            InsertExtentsCore(LogicalOffset, Extents)
+            InsertExtentsCore(LogicalOffset,
+                              Extents,
+                              AnchorActionAtLogicalOffset)
+
         End Sub
 
         Private Sub InsertExtentsCore(LogicalOffset As Long,
-                                      NewExtents As IList(Of ExtentIndexEntry))
+                                      NewExtents As IList(Of ExtentIndexEntry),
+                                      Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway)
 
-            If LogicalOffset < 0 OrElse LogicalOffset > _Length Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+            If LogicalOffset < 0 OrElse LogicalOffset > _Length Then
+                Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+            End If
+
             If NewExtents Is Nothing Then Throw New ArgumentNullException(NameOf(NewExtents))
             If NewExtents.Count = 0 Then Return
-
-            Dim OldExtentCount = _Extents.Count
 
             SplitExtentAt(LogicalOffset)
 
             Dim InsertIndex = FindExtentInsertIndex(LogicalOffset)
+            Dim ExistingAnchorId As Long = 0
+
+            If InsertIndex < _Extents.Count AndAlso
+               _Extents(InsertIndex).LogicalOffset = LogicalOffset Then
+
+                ExistingAnchorId = _Extents(InsertIndex).AnchorId
+
+            End If
+
             Dim InsertLength As Long = 0
             Dim Materialised As New List(Of ExtentIndexEntry)(NewExtents.Count)
 
@@ -671,8 +689,28 @@ Namespace Streams
 
             Next
 
-            If Materialised.Count = 0 Then Return
-            If InsertLength <= 0 Then Return
+            If Materialised.Count = 0 OrElse InsertLength <= 0 Then Return
+
+            If ExistingAnchorId > 0 AndAlso
+               AnchorActionAtLogicalOffset = AnchorActionsAtLogicalOffset.Use Then
+
+                Dim FirstInserted = Materialised(0)
+
+                If FirstInserted.AnchorId > 0 AndAlso
+                   FirstInserted.AnchorId <> ExistingAnchorId Then
+
+                    Throw New InvalidOperationException(
+                        "The inserted data already contains a different anchor at the target logical offset.")
+                End If
+
+                FirstInserted.AnchorId = ExistingAnchorId
+                Materialised(0) = FirstInserted
+
+                Dim ExistingExtent = _Extents(InsertIndex)
+                ExistingExtent.AnchorId = 0
+                _Extents(InsertIndex) = ExistingExtent
+
+            End If
 
             Dim NewLayout As New List(Of ExtentIndexEntry)(_Extents.Count + Materialised.Count)
 
@@ -693,11 +731,11 @@ Namespace Streams
 
             _Length += InsertLength
 
-            '
-            ' Appends dirty only the new tail pages. True middle inserts shift later
-            ' extents and therefore dirty pages from the insertion point onward.
-            '
-            MarkExtentPagesDirtyForReplacement(InsertIndex, 0, Materialised.Count)
+            RebuildAnchorIndex()
+
+            MarkExtentPagesDirtyForReplacement(InsertIndex,
+                                               0,
+                                               Materialised.Count)
 
         End Sub
 
@@ -741,22 +779,42 @@ Namespace Streams
                 Dim LeftExtent = _Extents(LeftBoundaryIndex)
                 Dim RightExtent = _Extents(RightBoundaryIndex)
 
-                If ShouldMaterialiseRemoveBoundaryFragments(LeftExtent.LogicalLength, RightExtent.LogicalLength) Then
+                '
+                ' The right boundary cannot be consumed into the left extent when it is
+                ' anchored, because that would destroy its anchored start.
+                '
+                If RightExtent.AnchorId = 0 AndAlso
+                   ShouldMaterialiseRemoveBoundaryFragments(LeftExtent.LogicalLength,
+                                                            RightExtent.LogicalLength) Then
 
-                    Dim CombinedLength = LeftExtent.LogicalLength + RightExtent.LogicalLength
+                    Dim CombinedLength =
+                        LeftExtent.LogicalLength +
+                        RightExtent.LogicalLength
+
                     Dim Combined(CombinedLength - 1) As Byte
 
-                    ReadExtentBytes(LeftExtent, 0, Combined, 0, LeftExtent.LogicalLength)
-                    ReadExtentBytes(RightExtent, 0, Combined, LeftExtent.LogicalLength, RightExtent.LogicalLength)
+                    ReadExtentBytes(LeftExtent,
+                                    0,
+                                    Combined,
+                                    0,
+                                    LeftExtent.LogicalLength)
 
-                    Dim Record = WritePhysicalRecord(Combined, CombinedLength)
+                    ReadExtentBytes(RightExtent,
+                                    0,
+                                    Combined,
+                                    LeftExtent.LogicalLength,
+                                    RightExtent.LogicalLength)
+
+                    Dim Record = WritePhysicalRecord(Combined,
+                                                     CombinedLength)
 
                     BoundaryReplacement =
                         New ExtentIndexEntry With {
                             .LogicalOffset = 0,
                             .LogicalLength = CombinedLength,
                             .PhysicalRecordId = Record.RecordId,
-                            .PhysicalRecordOffset = 0
+                            .PhysicalRecordOffset = 0,
+                            .AnchorId = LeftExtent.AnchorId
                         }
 
                     MaterialiseBoundaries = True
@@ -787,8 +845,7 @@ Namespace Streams
                 Next
 
                 For Index = LeftBoundaryIndex To RightBoundaryIndex
-                    Dim RemovedExtent = _Extents(Index)
-                    DecrementPhysicalRecordRefCount(RemovedExtent.PhysicalRecordId)
+                    DecrementPhysicalRecordRefCount(_Extents(Index).PhysicalRecordId)
                 Next
 
             Else
@@ -806,8 +863,7 @@ Namespace Streams
                 Next
 
                 For Index = StartIndex To EndIndex - 1
-                    Dim RemovedExtent = _Extents(Index)
-                    DecrementPhysicalRecordRefCount(RemovedExtent.PhysicalRecordId)
+                    DecrementPhysicalRecordRefCount(_Extents(Index).PhysicalRecordId)
                 Next
 
             End If
@@ -819,7 +875,11 @@ Namespace Streams
 
             _Length -= ActualLength
 
-            MarkExtentPagesDirtyForReplacement(DirtyStartIndex, RemovedExtentCount, InsertedExtentCount)
+            RebuildAnchorIndex()
+
+            MarkExtentPagesDirtyForReplacement(DirtyStartIndex,
+                                               RemovedExtentCount,
+                                               InsertedExtentCount)
 
         End Sub
 
@@ -836,6 +896,12 @@ Namespace Streams
             Dim ActualLength = Math.Min(Length, _Length - LogicalOffset)
             Dim EndOffset = LogicalOffset + ActualLength
 
+            Dim AnchoredBoundaries =
+                CaptureAnchoredBoundaries(LogicalOffset,
+                                          ActualLength,
+                                          True,
+                                          False)
+
             Dim Materialised As New List(Of ExtentIndexEntry)(NewExtents.Count)
             Dim InsertLength As Long = 0
 
@@ -847,6 +913,7 @@ Namespace Streams
 
                 Dim NewExtent = extent
                 NewExtent.LogicalOffset = 0
+                NewExtent.AnchorId = 0
 
                 Materialised.Add(NewExtent)
                 InsertLength += NewExtent.LogicalLength
@@ -854,8 +921,14 @@ Namespace Streams
             Next
 
             If InsertLength <> ActualLength Then
-                Throw New InvalidOperationException("Replacement extent length must match the replaced logical length.")
+                Throw New InvalidOperationException(
+                    "Replacement extent length must match the replaced logical length.")
             End If
+
+            Materialised =
+                ApplyAnchoredBoundariesToExtents(Materialised,
+                                                 AnchoredBoundaries,
+                                                 ActualLength)
 
             SplitExtentAt(LogicalOffset)
             SplitExtentAt(EndOffset)
@@ -865,10 +938,12 @@ Namespace Streams
             Dim RemovedExtentCount = EndIndex - StartIndex
 
             If RemovedExtentCount <= 0 Then
-                Throw New InvalidDataException("No extents were found for the replacement range.")
+                Throw New InvalidDataException(
+                    "No extents were found for the replacement range.")
             End If
 
-            Dim NewLayout As New List(Of ExtentIndexEntry)(_Extents.Count - RemovedExtentCount + Materialised.Count)
+            Dim NewLayout As New List(Of ExtentIndexEntry)(
+                _Extents.Count - RemovedExtentCount + Materialised.Count)
 
             For Index = 0 To StartIndex - 1
                 NewLayout.Add(_Extents(Index))
@@ -877,10 +952,14 @@ Namespace Streams
             Dim CurrentLogicalOffset = LogicalOffset
 
             For Each extent In Materialised
+
                 Dim NewExtent = extent
                 NewExtent.LogicalOffset = CurrentLogicalOffset
+
                 NewLayout.Add(NewExtent)
+
                 CurrentLogicalOffset += NewExtent.LogicalLength
+
             Next
 
             For Index = EndIndex To _Extents.Count - 1
@@ -888,19 +967,17 @@ Namespace Streams
             Next
 
             For Index = StartIndex To EndIndex - 1
-                Dim RemovedExtent = _Extents(Index)
-                DecrementPhysicalRecordRefCount(RemovedExtent.PhysicalRecordId)
+                DecrementPhysicalRecordRefCount(_Extents(Index).PhysicalRecordId)
             Next
 
             _Extents.Clear()
             _Extents.AddRange(NewLayout)
 
-            '
-            ' Logical length is unchanged. If the replacement uses the same number of
-            ' extents, only the replaced ordinal range is dirty. If the extent count
-            ' changed, later ordinals shift and pages from StartIndex onward are dirty.
-            '
-            MarkExtentPagesDirtyForReplacement(StartIndex, RemovedExtentCount, Materialised.Count)
+            RebuildAnchorIndex()
+
+            MarkExtentPagesDirtyForReplacement(StartIndex,
+                                               RemovedExtentCount,
+                                               Materialised.Count)
 
         End Sub
 
@@ -909,13 +986,28 @@ Namespace Streams
             If Extents Is Nothing Then Throw New ArgumentNullException(NameOf(Extents))
 
             Dim LogicalOffset As Long = 0
+            Dim AnchorIds As New HashSet(Of Long)()
 
             For Index = 0 To Extents.Count - 1
 
                 Dim Extent = Extents(Index)
 
                 If Extent.LogicalLength <= 0 Then
-                    Throw New InvalidDataException("Extent has an invalid logical length.")
+                    Throw New InvalidDataException(
+                        "Extent has an invalid logical length.")
+                End If
+
+                If Extent.AnchorId < 0 Then
+                    Throw New InvalidDataException(
+                        "Extent has an invalid anchor id.")
+                End If
+
+                If Extent.AnchorId > 0 AndAlso
+                   AnchorIds.Add(Extent.AnchorId) = False Then
+
+                    Throw New InvalidDataException(
+                        $"Duplicate anchor id {Extent.AnchorId}.")
+
                 End If
 
                 Extent.LogicalOffset = LogicalOffset
@@ -939,7 +1031,6 @@ Namespace Streams
 
             Dim SourceEndOffset = SourceLogicalOffset + Length
             Dim CurrentOffset = SourceLogicalOffset
-
             Dim Segments As New List(Of ExtentIndexEntry)()
 
             While CurrentOffset < SourceEndOffset
@@ -947,47 +1038,75 @@ Namespace Streams
                 Dim ExtentIndex = FindExtentIndex(CurrentOffset)
 
                 If ExtentIndex < 0 Then
-                    Throw New InvalidDataException($"No extent found for clone source offset {CurrentOffset}.")
+                    Throw New InvalidDataException(
+                        $"No extent found for clone source offset {CurrentOffset}.")
                 End If
 
                 Dim Extent = _Extents(ExtentIndex)
                 Dim OffsetInsideExtent = CInt(CurrentOffset - Extent.LogicalOffset)
-                Dim SegmentLength = CInt(Math.Min(CLng(Extent.LogicalLength - OffsetInsideExtent), SourceEndOffset - CurrentOffset))
+
+                Dim SegmentLength =
+                    CInt(Math.Min(CLng(Extent.LogicalLength - OffsetInsideExtent),
+                                  SourceEndOffset - CurrentOffset))
 
                 Dim SegmentPhysicalRecordOffset As Integer
 
                 If Extent.PhysicalRecordId = SparsePhysicalRecordId Then
                     SegmentPhysicalRecordOffset = 0
                 Else
-                    SegmentPhysicalRecordOffset = Extent.PhysicalRecordOffset + OffsetInsideExtent
+                    SegmentPhysicalRecordOffset =
+                        Extent.PhysicalRecordOffset + OffsetInsideExtent
                 End If
 
-                Segments.Add(New ExtentIndexEntry With {
-                    .LogicalLength = SegmentLength,
-                    .PhysicalRecordId = Extent.PhysicalRecordId,
-                    .PhysicalRecordOffset = SegmentPhysicalRecordOffset
-                })
+                '
+                ' Cloning copies bytes and physical-record references, not anchor identity.
+                '
+                Segments.Add(
+                    New ExtentIndexEntry With {
+                        .LogicalLength = SegmentLength,
+                        .PhysicalRecordId = Extent.PhysicalRecordId,
+                        .PhysicalRecordOffset = SegmentPhysicalRecordOffset,
+                        .AnchorId = 0
+                    })
 
                 CurrentOffset += SegmentLength
 
             End While
 
             If Segments.Count = 2 AndAlso
-               ShouldMaterialiseCloneAdjacentBoundaryFragments(Segments(0).LogicalLength, Segments(1).LogicalLength) Then
+               ShouldMaterialiseCloneAdjacentBoundaryFragments(
+                   Segments(0).LogicalLength,
+                   Segments(1).LogicalLength) Then
 
-                Dim CombinedLength = Segments(0).LogicalLength + Segments(1).LogicalLength
+                Dim CombinedLength =
+                    Segments(0).LogicalLength +
+                    Segments(1).LogicalLength
+
                 Dim Combined(CombinedLength - 1) As Byte
 
-                ReadExtentBytes(Segments(0), 0, Combined, 0, Segments(0).LogicalLength)
-                ReadExtentBytes(Segments(1), 0, Combined, Segments(0).LogicalLength, Segments(1).LogicalLength)
+                ReadExtentBytes(Segments(0),
+                                0,
+                                Combined,
+                                0,
+                                Segments(0).LogicalLength)
 
-                Dim Record = WritePhysicalRecord(Combined, CombinedLength)
+                ReadExtentBytes(Segments(1),
+                                0,
+                                Combined,
+                                Segments(0).LogicalLength,
+                                Segments(1).LogicalLength)
 
-                Result.Add(New ExtentIndexEntry With {
-                    .LogicalLength = CombinedLength,
-                    .PhysicalRecordId = Record.RecordId,
-                    .PhysicalRecordOffset = 0
-                })
+                Dim Record =
+                    WritePhysicalRecord(Combined,
+                                        CombinedLength)
+
+                Result.Add(
+                    New ExtentIndexEntry With {
+                        .LogicalLength = CombinedLength,
+                        .PhysicalRecordId = Record.RecordId,
+                        .PhysicalRecordOffset = 0,
+                        .AnchorId = 0
+                    })
 
                 Return Result
 
@@ -997,35 +1116,50 @@ Namespace Streams
 
                 If Segment.PhysicalRecordId = SparsePhysicalRecordId Then
 
-                    Result.Add(New ExtentIndexEntry With {
-                        .LogicalLength = Segment.LogicalLength,
-                        .PhysicalRecordId = SparsePhysicalRecordId,
-                        .PhysicalRecordOffset = 0
-                    })
+                    Result.Add(
+                        New ExtentIndexEntry With {
+                            .LogicalLength = Segment.LogicalLength,
+                            .PhysicalRecordId = SparsePhysicalRecordId,
+                            .PhysicalRecordOffset = 0,
+                            .AnchorId = 0
+                        })
 
                     Continue For
 
                 End If
 
-                If Options.BisectLimit > 0 AndAlso Segment.LogicalLength < Options.BisectLimit Then
+                If Options.BisectLimit > 0 AndAlso
+                   Segment.LogicalLength < Options.BisectLimit Then
 
                     Dim Buffer(Segment.LogicalLength - 1) As Byte
 
-                    ReadExtentBytes(Segment, 0, Buffer, 0, Segment.LogicalLength)
+                    ReadExtentBytes(Segment,
+                                    0,
+                                    Buffer,
+                                    0,
+                                    Segment.LogicalLength)
 
-                    Dim Record = WritePhysicalRecord(Buffer, Segment.LogicalLength)
+                    Dim Record =
+                        WritePhysicalRecord(Buffer,
+                                            Segment.LogicalLength)
 
-                    Result.Add(New ExtentIndexEntry With {
-                        .LogicalLength = Segment.LogicalLength,
-                        .PhysicalRecordId = Record.RecordId,
-                        .PhysicalRecordOffset = 0
-                    })
+                    Result.Add(
+                        New ExtentIndexEntry With {
+                            .LogicalLength = Segment.LogicalLength,
+                            .PhysicalRecordId = Record.RecordId,
+                            .PhysicalRecordOffset = 0,
+                            .AnchorId = 0
+                        })
 
                 Else
 
-                    IncrementPhysicalRecordRefCount(Segment.PhysicalRecordId)
+                    IncrementPhysicalRecordRefCount(
+                        Segment.PhysicalRecordId)
 
-                    Result.Add(Segment)
+                    Dim ClonedExtent = Segment
+                    ClonedExtent.AnchorId = 0
+
+                    Result.Add(ClonedExtent)
 
                 End If
 
@@ -1038,21 +1172,54 @@ Namespace Streams
         Private Sub ValidateExtentsAreSortedAndNonOverlapping()
 
             Dim ExpectedOffset As Long = 0
+            Dim AnchorIds As New HashSet(Of Long)()
+            Dim AnchorOffsets As New HashSet(Of Long)()
 
             For Each extent In _Extents
 
-                If extent.LogicalOffset < 0 Then Throw New InvalidDataException("Extent has a negative logical offset.")
-                If extent.LogicalOffset <> ExpectedOffset Then Throw New InvalidDataException($"Extent layout contains a gap or overlap at logical offset {ExpectedOffset}.")
+                If extent.LogicalOffset < 0 Then
+                    Throw New InvalidDataException(
+                        "Extent has a negative logical offset.")
+                End If
+
+                If extent.LogicalOffset <> ExpectedOffset Then
+                    Throw New InvalidDataException(
+                        $"Extent layout contains a gap or overlap at logical offset {ExpectedOffset}.")
+                End If
+
+                If extent.AnchorId < 0 Then
+                    Throw New InvalidDataException(
+                        "Extent has a negative anchor id.")
+                End If
+
+                If extent.AnchorId > 0 Then
+
+                    If AnchorIds.Add(extent.AnchorId) = False Then
+                        Throw New InvalidDataException(
+                            $"Duplicate anchor id {extent.AnchorId}.")
+                    End If
+
+                    If AnchorOffsets.Add(extent.LogicalOffset) = False Then
+                        Throw New InvalidDataException(
+                            $"Multiple anchors identify logical offset {extent.LogicalOffset}.")
+                    End If
+
+                End If
 
                 ValidateExtentReference(extent)
 
-                ExpectedOffset = extent.LogicalOffset + CLng(extent.LogicalLength)
+                ExpectedOffset =
+                    extent.LogicalOffset +
+                    CLng(extent.LogicalLength)
 
             Next
 
             If ExpectedOffset <> _Length Then
-                Throw New InvalidDataException($"Extent logical length mismatch. Expected {_Length}, found {ExpectedOffset}.")
+                Throw New InvalidDataException(
+                    $"Extent logical length mismatch. Expected {_Length}, found {ExpectedOffset}.")
             End If
+
+            ValidateAnchors()
 
         End Sub
 

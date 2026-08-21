@@ -208,6 +208,7 @@ Namespace Streams
             Public Property Extents As List(Of ExtentIndexEntry)
             Public Property PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry)
             Public Property NextPhysicalRecordId As Long
+            Public Property NextAnchorId As Long
 
             Public Sub Capture(Owner As ChunkedStream)
 
@@ -220,6 +221,7 @@ Namespace Streams
                 Extents = New List(Of ExtentIndexEntry)(Owner._Extents)
                 PhysicalRecords = Owner._PhysicalRecords.ToDictionary(Function(pair) pair.Key, Function(pair) pair.Value)
                 NextPhysicalRecordId = Owner._NextPhysicalRecordId
+                NextAnchorId = Owner._NextAnchorId
 
             End Sub
 
@@ -354,15 +356,19 @@ Namespace Streams
             _IndexOffset = State.IndexOffset
             _HeaderFlags = State.HeaderFlags
             _NextPhysicalRecordId = State.NextPhysicalRecordId
+            _NextAnchorId = State.NextAnchorId
 
             _Extents.Clear()
             _Extents.AddRange(State.Extents)
 
             _PhysicalRecords.Clear()
+
             For Each pair In State.PhysicalRecords
                 _PhysicalRecords(pair.Key) = pair.Value
             Next
+
             RebuildPhysicalRecordOrdinals()
+            RebuildAnchorIndex()
 
             _ExtentPageDescriptors.Clear()
             _ExtentDirectoryPageDescriptors.Clear()

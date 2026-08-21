@@ -772,6 +772,7 @@ Namespace Streams
                                               OriginalIndexOffset As Long,
                                               OriginalHeaderFlags As HeaderFlags,
                                               OriginalNextPhysicalRecordId As Long,
+                                              OriginalNextAnchorId As Long,
                                               OriginalChunkSize As Integer,
                                               OriginalIndexPageEntryCount As Integer,
                                               OriginalIndexDirectoryEntryCount As Integer,
@@ -780,12 +781,29 @@ Namespace Streams
                                               OriginalExtents As List(Of ExtentIndexEntry),
                                               OriginalPhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry))
 
+            If OriginalExtents Is Nothing Then
+                Throw New ArgumentNullException(NameOf(OriginalExtents))
+            End If
+
+            If OriginalPhysicalRecords Is Nothing Then
+                Throw New ArgumentNullException(NameOf(OriginalPhysicalRecords))
+            End If
+
             _IndexOffset = OriginalIndexOffset
             _HeaderFlags = OriginalHeaderFlags
-            _NextPhysicalRecordId = OriginalNextPhysicalRecordId
+
+            _NextPhysicalRecordId =
+                Math.Max(SparsePhysicalRecordId + 1,
+                         OriginalNextPhysicalRecordId)
+
+            _NextAnchorId =
+                Math.Max(1L,
+                         OriginalNextAnchorId)
+
             _ChunkSize = OriginalChunkSize
             _IndexPageEntryCount = OriginalIndexPageEntryCount
             _IndexDirectoryEntryCount = OriginalIndexDirectoryEntryCount
+
             _ChunkPlain = OriginalChunkPlain
             _CachedChunkPlain = OriginalCachedChunkPlain
 
@@ -793,14 +811,18 @@ Namespace Streams
             _Extents.AddRange(OriginalExtents)
 
             _PhysicalRecords.Clear()
+
             For Each pair In OriginalPhysicalRecords
                 _PhysicalRecords(pair.Key) = pair.Value
             Next
+
             RebuildPhysicalRecordOrdinals()
+            RebuildAnchorIndex()
 
             ClearFreeSpaceMaps()
             DiscardPendingPhysicalRecordReclaims()
             InvalidateChunkCache()
+
             MarkAllMetadataPagesDirty()
 
             If _Fs.Length > OriginalPhysicalLength Then
@@ -813,28 +835,57 @@ Namespace Streams
                                       CancellationToken As CancellationToken)
 
             If Options.ChunkSize <= 0 Then
-                Throw New InvalidOperationException("Chunk size must be greater than zero.")
+                Throw New InvalidOperationException(
+                    "Chunk size must be greater than zero.")
             End If
 
             If Options.IndexPageEntryCount <= 0 Then
-                Throw New InvalidOperationException("Index page entry count must be greater than zero.")
+                Throw New InvalidOperationException(
+                    "Index page entry count must be greater than zero.")
             End If
 
             If Options.IndexDirectoryEntryCount <= 0 Then
-                Throw New InvalidOperationException("Index directory entry count must be greater than zero.")
+                Throw New InvalidOperationException(
+                    "Index directory entry count must be greater than zero.")
             End If
 
             Dim OriginalPhysicalLength = _Fs.Length
             Dim OriginalIndexOffset = _IndexOffset
             Dim OriginalHeaderFlags = _HeaderFlags
             Dim OriginalNextPhysicalRecordId = _NextPhysicalRecordId
+            Dim OriginalNextAnchorId = _NextAnchorId
             Dim OriginalChunkSize = _ChunkSize
             Dim OriginalIndexPageEntryCount = _IndexPageEntryCount
             Dim OriginalIndexDirectoryEntryCount = _IndexDirectoryEntryCount
             Dim OriginalChunkPlain = _ChunkPlain
             Dim OriginalCachedChunkPlain = _CachedChunkPlain
-            Dim OriginalExtents = New List(Of ExtentIndexEntry)(_Extents)
-            Dim OriginalPhysicalRecords = _PhysicalRecords.ToDictionary(Function(pair) pair.Key, Function(pair) pair.Value)
+
+            Dim OriginalExtents =
+                New List(Of ExtentIndexEntry)(_Extents)
+
+            Dim OriginalPhysicalRecords =
+                _PhysicalRecords.ToDictionary(
+                    Function(pair) pair.Key,
+                    Function(pair) pair.Value)
+
+            '
+            ' Rebuild recreates the complete extent layout. Capture anchored logical
+            ' boundaries so the same immutable AnchorIds can be attached to the rebuilt
+            ' extents beginning at those positions.
+            '
+            Dim AnchoredOffsets =
+                _Extents.
+                Where(Function(extent) extent.AnchorId > 0).
+                Select(
+                    Function(extent)
+                        Return New AnchoredBoundary With {
+                            .AnchorId = extent.AnchorId,
+                            .RelativeOffset = extent.LogicalOffset
+                        }
+                    End Function).
+                OrderBy(Function(item) item.RelativeOffset).
+                ToList()
+
             Dim PublishedRebuild = False
 
             WriteChunkSizeRebuildRecoveryState(OriginalPhysicalLength)
@@ -853,33 +904,49 @@ Namespace Streams
                 While LogicalOffset < _Length
 
                     If CancellationToken.Cancel Then
-                        RestoreFailedRebuildState(OriginalPhysicalLength,
-                                                  OriginalIndexOffset,
-                                                  OriginalHeaderFlags,
-                                                  OriginalNextPhysicalRecordId,
-                                                  OriginalChunkSize,
-                                                  OriginalIndexPageEntryCount,
-                                                  OriginalIndexDirectoryEntryCount,
-                                                  OriginalChunkPlain,
-                                                  OriginalCachedChunkPlain,
-                                                  OriginalExtents,
-                                                  OriginalPhysicalRecords)
+
+                        RestoreFailedRebuildState(
+                            OriginalPhysicalLength,
+                            OriginalIndexOffset,
+                            OriginalHeaderFlags,
+                            OriginalNextPhysicalRecordId,
+                            OriginalNextAnchorId,
+                            OriginalChunkSize,
+                            OriginalIndexPageEntryCount,
+                            OriginalIndexDirectoryEntryCount,
+                            OriginalChunkPlain,
+                            OriginalCachedChunkPlain,
+                            OriginalExtents,
+                            OriginalPhysicalRecords)
 
                         ClearRecoveryState()
+
                         Return
+
                     End If
 
-                    Dim SegmentLength = CInt(Math.Min(CLng(TargetChunkSize), _Length - LogicalOffset))
+                    Dim SegmentLength =
+                        CInt(Math.Min(CLng(TargetChunkSize),
+                                      _Length - LogicalOffset))
+
                     Dim Buffer(SegmentLength - 1) As Byte
 
-                    Read(LogicalOffset, Buffer, 0, SegmentLength)
+                    Read(LogicalOffset,
+                         Buffer,
+                         0,
+                         SegmentLength)
 
-                    Dim SegmentExtents = BuildExtentsFromBuffer(Buffer, 0, SegmentLength)
+                    Dim SegmentExtents =
+                        BuildExtentsFromBuffer(Buffer,
+                                               0,
+                                               SegmentLength)
 
                     For Each extent In SegmentExtents
 
                         Dim NewExtent = extent
+
                         NewExtent.LogicalOffset = LogicalOffset
+                        NewExtent.AnchorId = 0
 
                         NewExtents.Add(NewExtent)
 
@@ -894,37 +961,65 @@ Namespace Streams
                     ProcessedBytes += SegmentLength
 
                     Dim FirstPhaseUnits =
-                        CLng((Math.Min(ProcessedBytes, TotalBytes) / CDbl(TotalBytes)) * (TotalBytes / 2.0R))
+                        CLng((Math.Min(ProcessedBytes, TotalBytes) /
+                              CDbl(TotalBytes)) *
+                             (TotalBytes / 2.0R))
 
-                    ReportProgress(ProgressCallback,
-                                   FirstPhaseUnits,
-                                   TotalBytes,
-                                   ProcessUnitTypes.Bytes,
-                                   CancellationToken)
+                    ReportProgress(
+                        ProgressCallback,
+                        FirstPhaseUnits,
+                        TotalBytes,
+                        ProcessUnitTypes.Bytes,
+                        CancellationToken)
 
                 End While
 
+                '
+                ' Recreate each anchored boundary in the rebuilt logical layout.
+                '
+                NewExtents =
+                    ApplyAnchoredBoundariesToExtents(
+                        NewExtents,
+                        AnchoredOffsets,
+                        _Length)
+
+                RebaseExtentLogicalOffsets(NewExtents)
+
                 Dim NewPhysicalRecords As New Dictionary(Of Long, PhysicalRecordEntry)()
 
-                For Each recordId In NewPhysicalRecordIds
-                    Dim Record = GetPhysicalRecord(recordId)
-                    NewPhysicalRecords(recordId) = Record
+                For Each RecordId In NewPhysicalRecordIds
+
+                    Dim Record = GetPhysicalRecord(RecordId)
+
+                    NewPhysicalRecords(RecordId) = Record
+
                 Next
 
                 _Extents.Clear()
                 _Extents.AddRange(NewExtents)
 
                 _PhysicalRecords.Clear()
+
                 For Each pair In NewPhysicalRecords
                     _PhysicalRecords(pair.Key) = pair.Value
                 Next
-                RebuildPhysicalRecordOrdinals()
 
                 _ChunkSize = TargetChunkSize
                 _IndexPageEntryCount = Options.IndexPageEntryCount
                 _IndexDirectoryEntryCount = Options.IndexDirectoryEntryCount
-                _ChunkPlain = New Byte(_ChunkSize - 1) {}
-                _CachedChunkPlain = New Byte(_ChunkSize - 1) {}
+
+                _ChunkPlain =
+                    New Byte(_ChunkSize - 1) {}
+
+                _CachedChunkPlain =
+                    New Byte(_ChunkSize - 1) {}
+
+                '
+                ' Rebuild after applying the new metadata page size so physical-record
+                ' page membership is calculated using the new page boundaries.
+                '
+                RebuildPhysicalRecordOrdinals()
+                RebuildAnchorIndex()
 
                 _ExtentPageDescriptors.Clear()
                 _ExtentDirectoryPageDescriptors.Clear()
@@ -935,44 +1030,52 @@ Namespace Streams
                 InvalidateChunkCache()
                 ClearFreeSpaceMaps()
                 DiscardPendingPhysicalRecordReclaims()
+
                 MarkAllMetadataPagesDirty()
 
                 ClearRecoveryAreaInMemory()
 
-                PersistIndexAndHeader(GetDataEndFromIndex(), True)
+                PersistIndexAndHeader(GetDataEndFromIndex(),
+                                      True)
 
                 PublishedRebuild = True
 
                 If CancellationToken.Cancel Then Return
 
-                DefragmentSequence(DefragmentSequenceProgressModes.RebuildFinalPhase,
-                                   ProgressCallback,
-                                   CancellationToken)
+                DefragmentSequence(
+                    DefragmentSequenceProgressModes.RebuildFinalPhase,
+                    ProgressCallback,
+                    CancellationToken)
 
                 If CancellationToken.Cancel Then Return
 
-                ReportProgress(ProgressCallback,
-                               TotalBytes,
-                               TotalBytes,
-                               ProcessUnitTypes.Bytes,
-                               CancellationToken)
+                ReportProgress(
+                    ProgressCallback,
+                    TotalBytes,
+                    TotalBytes,
+                    ProcessUnitTypes.Bytes,
+                    CancellationToken)
 
             Catch
 
                 If PublishedRebuild = False Then
-                    RestoreFailedRebuildState(OriginalPhysicalLength,
-                                              OriginalIndexOffset,
-                                              OriginalHeaderFlags,
-                                              OriginalNextPhysicalRecordId,
-                                              OriginalChunkSize,
-                                              OriginalIndexPageEntryCount,
-                                              OriginalIndexDirectoryEntryCount,
-                                              OriginalChunkPlain,
-                                              OriginalCachedChunkPlain,
-                                              OriginalExtents,
-                                              OriginalPhysicalRecords)
+
+                    RestoreFailedRebuildState(
+                        OriginalPhysicalLength,
+                        OriginalIndexOffset,
+                        OriginalHeaderFlags,
+                        OriginalNextPhysicalRecordId,
+                        OriginalNextAnchorId,
+                        OriginalChunkSize,
+                        OriginalIndexPageEntryCount,
+                        OriginalIndexDirectoryEntryCount,
+                        OriginalChunkPlain,
+                        OriginalCachedChunkPlain,
+                        OriginalExtents,
+                        OriginalPhysicalRecords)
 
                     ClearRecoveryState()
+
                 End If
 
                 Throw

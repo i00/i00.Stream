@@ -11,6 +11,7 @@ Namespace Streams
             Public Property Extents As List(Of ExtentIndexEntry)
             Public Property PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry)
             Public Property NextPhysicalRecordId As Long
+            Public Property NextAnchorId As Long
             Public Property ExtentPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)
             Public Property ExtentDirectoryPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)
             Public Property PhysicalRecordPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)
@@ -25,6 +26,7 @@ Namespace Streams
             Public Property ExtentCount As Integer
             Public Property PhysicalRecordCount As Integer
             Public Property NextPhysicalRecordId As Long
+            Public Property NextAnchorId As Long
             Public Property DirectExtentPageDescriptors As List(Of MetadataPageDescriptor)
             Public Property ExtentDirectoryPageDescriptors As List(Of MetadataPageDescriptor)
             Public Property DirectPhysicalRecordPageDescriptors As List(Of MetadataPageDescriptor)
@@ -184,12 +186,22 @@ Namespace Streams
         Private Function BuildExtentPage(PageNumber As Integer) As Byte()
 
             If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
-            If _IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid extent page entry count.")
 
-            Dim PageLengthWithoutMac = IndexPageHeaderSize + (_IndexPageEntryCount * ExtentEntrySize)
+            If _IndexPageEntryCount <= 0 Then
+                Throw New InvalidDataException("Invalid extent page entry count.")
+            End If
+
+            Dim PageLengthWithoutMac =
+                IndexPageHeaderSize +
+                (_IndexPageEntryCount * ExtentEntrySize)
+
             Dim Page(PageLengthWithoutMac + MacSize - 1) As Byte
             Dim FirstIndex = PageNumber * _IndexPageEntryCount
-            Dim EntryCount = Math.Max(0, Math.Min(_IndexPageEntryCount, _Extents.Count - FirstIndex))
+
+            Dim EntryCount =
+                Math.Max(0,
+                         Math.Min(_IndexPageEntryCount,
+                                  _Extents.Count - FirstIndex))
 
             Buffer.BlockCopy(IndexPageMagic, 0, Page, 0, IndexPageMagic.Length)
             Buffer.BlockCopy(BitConverter.GetBytes(CInt(DirectoryTypes.ExtentPages)), 0, Page, 8, 4)
@@ -200,22 +212,34 @@ Namespace Streams
             Dim EntryOffset = IndexPageHeaderSize
 
             For EntryIndex = 0 To _IndexPageEntryCount - 1
+
                 Dim SourceIndex = FirstIndex + EntryIndex
 
                 If SourceIndex < _Extents.Count Then
+
                     Dim Entry = _Extents(SourceIndex)
 
                     Buffer.BlockCopy(BitConverter.GetBytes(Entry.LogicalOffset), 0, Page, EntryOffset, 8)
                     Buffer.BlockCopy(BitConverter.GetBytes(Entry.LogicalLength), 0, Page, EntryOffset + 8, 4)
                     Buffer.BlockCopy(BitConverter.GetBytes(Entry.PhysicalRecordId), 0, Page, EntryOffset + 12, 8)
                     Buffer.BlockCopy(BitConverter.GetBytes(Entry.PhysicalRecordOffset), 0, Page, EntryOffset + 20, 4)
+                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.AnchorId), 0, Page, EntryOffset + 24, 8)
+
                 End If
 
                 EntryOffset += ExtentEntrySize
+
             Next
 
-            Dim Mac = ComputeMac(Page, PageLengthWithoutMac, PublicIntegrityKey)
-            Buffer.BlockCopy(Mac, 0, Page, PageLengthWithoutMac, MacSize)
+            Dim Mac = ComputeMac(Page,
+                                 PageLengthWithoutMac,
+                                 PublicIntegrityKey)
+
+            Buffer.BlockCopy(Mac,
+                             0,
+                             Page,
+                             PageLengthWithoutMac,
+                             MacSize)
 
             Return Page
 
@@ -559,13 +583,47 @@ Namespace Streams
                                            PhysicalRecordDirectoryDescriptors As IEnumerable(Of MetadataPageDescriptor),
                                            HoleDirectoryDescriptors As IEnumerable(Of MetadataPageDescriptor)) As Byte()
 
-            Dim DirectExtentList = If(DirectExtentPageDescriptors, Enumerable.Empty(Of MetadataPageDescriptor)()).OrderBy(Function(descriptor) descriptor.PageNumber).ToList()
-            Dim ExtentDirectoryList = If(ExtentDirectoryDescriptors, Enumerable.Empty(Of MetadataPageDescriptor)()).OrderBy(Function(descriptor) descriptor.PageNumber).ToList()
-            Dim DirectPhysicalRecordList = If(DirectPhysicalRecordPageDescriptors, Enumerable.Empty(Of MetadataPageDescriptor)()).OrderBy(Function(descriptor) descriptor.PageNumber).ToList()
-            Dim PhysicalRecordDirectoryList = If(PhysicalRecordDirectoryDescriptors, Enumerable.Empty(Of MetadataPageDescriptor)()).OrderBy(Function(descriptor) descriptor.PageNumber).ToList()
-            Dim HoleDirectoryList = If(HoleDirectoryDescriptors, Enumerable.Empty(Of MetadataPageDescriptor)()).OrderBy(Function(descriptor) descriptor.PageNumber).ToList()
-            Dim DescriptorCount = DirectExtentList.Count + ExtentDirectoryList.Count + DirectPhysicalRecordList.Count + PhysicalRecordDirectoryList.Count + HoleDirectoryList.Count
-            Dim RootLengthWithoutMac = MetadataRootHeaderSize + (DescriptorCount * MetadataRootDescriptorSize)
+            Dim DirectExtentList =
+                If(DirectExtentPageDescriptors,
+                   Enumerable.Empty(Of MetadataPageDescriptor)()).
+                OrderBy(Function(descriptor) descriptor.PageNumber).
+                ToList()
+
+            Dim ExtentDirectoryList =
+                If(ExtentDirectoryDescriptors,
+                   Enumerable.Empty(Of MetadataPageDescriptor)()).
+                OrderBy(Function(descriptor) descriptor.PageNumber).
+                ToList()
+
+            Dim DirectPhysicalRecordList =
+                If(DirectPhysicalRecordPageDescriptors,
+                   Enumerable.Empty(Of MetadataPageDescriptor)()).
+                OrderBy(Function(descriptor) descriptor.PageNumber).
+                ToList()
+
+            Dim PhysicalRecordDirectoryList =
+                If(PhysicalRecordDirectoryDescriptors,
+                   Enumerable.Empty(Of MetadataPageDescriptor)()).
+                OrderBy(Function(descriptor) descriptor.PageNumber).
+                ToList()
+
+            Dim HoleDirectoryList =
+                If(HoleDirectoryDescriptors,
+                   Enumerable.Empty(Of MetadataPageDescriptor)()).
+                OrderBy(Function(descriptor) descriptor.PageNumber).
+                ToList()
+
+            Dim DescriptorCount =
+                DirectExtentList.Count +
+                ExtentDirectoryList.Count +
+                DirectPhysicalRecordList.Count +
+                PhysicalRecordDirectoryList.Count +
+                HoleDirectoryList.Count
+
+            Dim RootLengthWithoutMac =
+                MetadataRootHeaderSize +
+                (DescriptorCount * MetadataRootDescriptorSize)
+
             Dim Root(RootLengthWithoutMac + MacSize - 1) As Byte
 
             Buffer.BlockCopy(MetadataRootMagic, 0, Root, 0, MetadataRootMagic.Length)
@@ -579,6 +637,11 @@ Namespace Streams
             Buffer.BlockCopy(BitConverter.GetBytes(DirectPhysicalRecordList.Count), 0, Root, 48, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(PhysicalRecordDirectoryList.Count), 0, Root, 52, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(HoleDirectoryList.Count), 0, Root, 56, 4)
+
+            '
+            ' Bytes 60 through 63 are reserved.
+            '
+            Buffer.BlockCopy(BitConverter.GetBytes(_NextAnchorId), 0, Root, 64, 8)
 
             Dim EntryOffset = MetadataRootHeaderSize
 
@@ -607,8 +670,15 @@ Namespace Streams
                 EntryOffset += MetadataRootDescriptorSize
             Next
 
-            Dim Mac = ComputeMac(Root, RootLengthWithoutMac, PublicIntegrityKey)
-            Buffer.BlockCopy(Mac, 0, Root, RootLengthWithoutMac, MacSize)
+            Dim Mac = ComputeMac(Root,
+                                 RootLengthWithoutMac,
+                                 PublicIntegrityKey)
+
+            Buffer.BlockCopy(Mac,
+                             0,
+                             Root,
+                             RootLengthWithoutMac,
+                             MacSize)
 
             Return Root
 
@@ -929,6 +999,7 @@ Namespace Streams
                 .Extents = Extents,
                 .PhysicalRecords = PhysicalRecords,
                 .NextPhysicalRecordId = Math.Max(1L, Root.NextPhysicalRecordId),
+                .NextAnchorId = Math.Max(1L, Root.NextAnchorId),
                 .ExtentPageDescriptors = ExtentPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
                 .ExtentDirectoryPageDescriptors = Root.ExtentDirectoryPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
                 .PhysicalRecordPageDescriptors = PhysicalRecordPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
@@ -939,6 +1010,7 @@ Namespace Streams
 
         End Function
 
+        'TODO: Check
         Private Shared Function ReadMetadataRoot(Fs As Stream,
                                                  RootOffset As Long,
                                                  RootLength As Integer,
@@ -951,6 +1023,7 @@ Namespace Streams
                     .ExtentCount = 0,
                     .PhysicalRecordCount = 0,
                     .NextPhysicalRecordId = 1,
+                    .NextAnchorId = 1,
                     .DirectExtentPageDescriptors = New List(Of MetadataPageDescriptor)(),
                     .ExtentDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
                     .DirectPhysicalRecordPageDescriptors = New List(Of MetadataPageDescriptor)(),
@@ -990,12 +1063,17 @@ Namespace Streams
                 .ExtentCount = CInt(BitConverter.ToInt64(Root, 16)),
                 .PhysicalRecordCount = CInt(BitConverter.ToInt64(Root, 24)),
                 .NextPhysicalRecordId = BitConverter.ToInt64(Root, 32),
+                .NextAnchorId = BitConverter.ToInt64(Root, 64),
                 .DirectExtentPageDescriptors = New List(Of MetadataPageDescriptor)(),
                 .ExtentDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
                 .DirectPhysicalRecordPageDescriptors = New List(Of MetadataPageDescriptor)(),
                 .PhysicalRecordDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
                 .HoleDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)()
             }
+
+            If Result.NextAnchorId <= 0 Then
+                Throw New InvalidDataException("Invalid next anchor id.")
+            End If
 
             Dim DirectExtentDescriptorCount = BitConverter.ToInt32(Root, 40)
             Dim ExtentDirectoryDescriptorCount = BitConverter.ToInt32(Root, 44)
@@ -1099,6 +1177,8 @@ Namespace Streams
                                                 ExtentCount As Integer,
                                                 PageEntryCount As Integer) As List(Of ExtentIndexEntry)
 
+            If Fs Is Nothing Then Throw New ArgumentNullException(NameOf(Fs))
+            If Descriptors Is Nothing Then Throw New ArgumentNullException(NameOf(Descriptors))
             If ExtentCount < 0 Then Throw New ArgumentOutOfRangeException(NameOf(ExtentCount))
             If PageEntryCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageEntryCount))
 
@@ -1109,50 +1189,82 @@ Namespace Streams
             Next
 
             For Each Descriptor In Descriptors.OrderBy(Function(x) x.PageNumber)
+
                 Dim Page(Descriptor.Length - 1) As Byte
 
                 Fs.Position = Descriptor.Offset
                 ReadExactly(Fs, Page, 0, Page.Length)
 
-                Dim Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
+                Dim Mac = ComputeMac(Page,
+                                     Page.Length - MacSize,
+                                     PublicIntegrityKey)
 
-                If FixedTimeEquals(Mac, 0, Descriptor.Mac, 0, MacSize) = False Then
-                    Throw New CryptographicException("Extent page MAC invalid.")
+                If FixedTimeEquals(Mac,
+                                   0,
+                                   Descriptor.Mac,
+                                   0,
+                                   MacSize) = False Then
+
+                    Throw New CryptographicException(
+                        "Extent page MAC invalid.")
+
                 End If
 
-                If FixedTimeEquals(IndexPageMagic, 0, Page, 0, IndexPageMagicSize) = False Then
-                    Throw New InvalidDataException("Invalid extent page magic.")
+                If FixedTimeEquals(IndexPageMagic,
+                                   0,
+                                   Page,
+                                   0,
+                                   IndexPageMagicSize) = False Then
+
+                    Throw New InvalidDataException(
+                        "Invalid extent page magic.")
+
                 End If
 
-                Dim DirectoryType = CType(BitConverter.ToInt32(Page, 8), DirectoryTypes)
+                Dim DirectoryType =
+                    CType(BitConverter.ToInt32(Page, 8),
+                          DirectoryTypes)
 
                 If DirectoryType <> DirectoryTypes.ExtentPages Then
-                    Throw New InvalidDataException("Unexpected directory type while reading extent page.")
+                    Throw New InvalidDataException(
+                        "Unexpected directory type while reading extent page.")
                 End If
 
                 Dim PageNumber = BitConverter.ToInt32(Page, 12)
                 Dim FirstIndex = BitConverter.ToInt32(Page, 16)
                 Dim EntryCount = BitConverter.ToInt32(Page, 20)
 
-                If PageNumber <> Descriptor.PageNumber Then Throw New InvalidDataException("Extent page number mismatch.")
-                If EntryCount < 0 OrElse EntryCount > PageEntryCount Then Throw New InvalidDataException("Invalid extent page entry count.")
+                If PageNumber <> Descriptor.PageNumber Then
+                    Throw New InvalidDataException(
+                        "Extent page number mismatch.")
+                End If
+
+                If EntryCount < 0 OrElse EntryCount > PageEntryCount Then
+                    Throw New InvalidDataException(
+                        "Invalid extent page entry count.")
+                End If
 
                 Dim EntryOffset = IndexPageHeaderSize
 
                 For EntryIndex = 0 To EntryCount - 1
+
                     Dim ExtentIndex = FirstIndex + EntryIndex
 
                     If ExtentIndex >= Result.Count Then Exit For
 
-                    Result(ExtentIndex) = New ExtentIndexEntry With {
-                        .LogicalOffset = BitConverter.ToInt64(Page, EntryOffset),
-                        .LogicalLength = BitConverter.ToInt32(Page, EntryOffset + 8),
-                        .PhysicalRecordId = BitConverter.ToInt64(Page, EntryOffset + 12),
-                        .PhysicalRecordOffset = BitConverter.ToInt32(Page, EntryOffset + 20)
-                    }
+                    Result(ExtentIndex) =
+                        New ExtentIndexEntry With {
+                            .LogicalOffset = BitConverter.ToInt64(Page, EntryOffset),
+                            .LogicalLength = BitConverter.ToInt32(Page, EntryOffset + 8),
+                            .PhysicalRecordId = BitConverter.ToInt64(Page, EntryOffset + 12),
+                            .PhysicalRecordOffset = BitConverter.ToInt32(Page, EntryOffset + 20),
+                            .AnchorId = BitConverter.ToInt64(Page, EntryOffset + 24)
+                        }
 
                     EntryOffset += ExtentEntrySize
+
                 Next
+
             Next
 
             Return Result

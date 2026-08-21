@@ -38,10 +38,13 @@ Namespace Streams
 
                 ValidateExtentsAreSortedAndNonOverlapping()
                 ValidatePhysicalRecordRefCounts()
+                ValidateAnchors()
 
                 Dim CancellationToken As New CancellationToken()
 
-                ValidateAllLivePhysicalRecords(ProgressCallback, CancellationToken)
+                ValidateAllLivePhysicalRecords(
+                    ProgressCallback,
+                    CancellationToken)
 
             End SyncLock
 

@@ -696,17 +696,42 @@ Namespace Streams
                                           CancellationToken As CancellationToken)
 
             If Options.ChunkSize <= 0 Then
-                Throw New InvalidOperationException("Chunk size must be greater than zero.")
+                Throw New InvalidOperationException(
+                    "Chunk size must be greater than zero.")
             End If
 
             Dim OriginalExtents = New List(Of ExtentIndexEntry)(_Extents)
-            Dim OriginalPhysicalRecords = _PhysicalRecords.ToDictionary(Function(pair) pair.Key, Function(pair) pair.Value)
+
+            Dim OriginalPhysicalRecords =
+                _PhysicalRecords.ToDictionary(
+                    Function(pair) pair.Key,
+                    Function(pair) pair.Value)
+
             Dim OriginalNextPhysicalRecordId = _NextPhysicalRecordId
+            Dim OriginalNextAnchorId = _NextAnchorId
             Dim OriginalIndexOffset = _IndexOffset
             Dim OriginalPhysicalLength = _Fs.Length
             Dim OriginalChunkSize = _ChunkSize
             Dim OriginalChunkPlain = _ChunkPlain
             Dim OriginalCachedChunkPlain = _CachedChunkPlain
+
+            '
+            ' Anchors identify logical boundaries. The rebuilt extent layout must retain
+            ' those boundaries even when the new chunk-size policy would normally place
+            ' extent boundaries elsewhere.
+            '
+            Dim AnchoredOffsets =
+                _Extents.
+                Where(Function(extent) extent.AnchorId > 0).
+                Select(
+                    Function(extent)
+                        Return New AnchoredBoundary With {
+                            .AnchorId = extent.AnchorId,
+                            .RelativeOffset = extent.LogicalOffset
+                        }
+                    End Function).
+                OrderBy(Function(item) item.RelativeOffset).
+                ToList()
 
             Try
 
@@ -719,28 +744,44 @@ Namespace Streams
                 While LogicalOffset < _Length
 
                     If CancellationToken.Cancel Then
-                        RestoreApplyOptionsRewriteState(OriginalExtents,
-                                                        OriginalPhysicalRecords,
-                                                        OriginalNextPhysicalRecordId,
-                                                        OriginalIndexOffset,
-                                                        OriginalPhysicalLength,
-                                                        OriginalChunkSize,
-                                                        OriginalChunkPlain,
-                                                        OriginalCachedChunkPlain)
+
+                        RestoreApplyOptionsRewriteState(
+                            OriginalExtents,
+                            OriginalPhysicalRecords,
+                            OriginalNextPhysicalRecordId,
+                            OriginalNextAnchorId,
+                            OriginalIndexOffset,
+                            OriginalPhysicalLength,
+                            OriginalChunkSize,
+                            OriginalChunkPlain,
+                            OriginalCachedChunkPlain)
+
                         Return
+
                     End If
 
-                    Dim SegmentLength = CInt(Math.Min(CLng(Options.ChunkSize), _Length - LogicalOffset))
+                    Dim SegmentLength =
+                        CInt(Math.Min(CLng(Options.ChunkSize),
+                                      _Length - LogicalOffset))
+
                     Dim Buffer(SegmentLength - 1) As Byte
 
-                    Read(LogicalOffset, Buffer, 0, SegmentLength)
+                    Read(LogicalOffset,
+                         Buffer,
+                         0,
+                         SegmentLength)
 
-                    Dim SegmentExtents = BuildExtentsFromBuffer(Buffer, 0, SegmentLength)
+                    Dim SegmentExtents =
+                        BuildExtentsFromBuffer(Buffer,
+                                               0,
+                                               SegmentLength)
 
                     For Each extent In SegmentExtents
 
                         Dim NewExtent = extent
+
                         NewExtent.LogicalOffset = LogicalOffset
+                        NewExtent.AnchorId = 0
 
                         NewExtents.Add(NewExtent)
 
@@ -758,49 +799,82 @@ Namespace Streams
 
                     ProcessedBytes += SegmentLength
 
-                    ReportProgress(ProgressCallback,
-                                   Math.Min(ProcessedBytes, TotalBytes),
-                                   TotalBytes,
-                                   ProcessUnitTypes.Bytes,
-                                   CancellationToken)
+                    ReportProgress(
+                        ProgressCallback,
+                        Math.Min(ProcessedBytes, TotalBytes),
+                        TotalBytes,
+                        ProcessUnitTypes.Bytes,
+                        CancellationToken)
 
                 End While
 
-                Dim OldPhysicalRecords = _PhysicalRecords.ToDictionary(Function(pair) pair.Key, Function(pair) pair.Value)
+                '
+                ' Split the rebuilt layout at every anchored logical boundary and restore
+                ' each immutable AnchorId to the extent beginning at that boundary.
+                '
+                NewExtents =
+                    ApplyAnchoredBoundariesToExtents(
+                        NewExtents,
+                        AnchoredOffsets,
+                        _Length)
+
+                RebaseExtentLogicalOffsets(NewExtents)
+
+                Dim OldPhysicalRecords =
+                    _PhysicalRecords.ToDictionary(
+                        Function(pair) pair.Key,
+                        Function(pair) pair.Value)
+
                 Dim NewPhysicalRecords As New Dictionary(Of Long, PhysicalRecordEntry)()
 
-                For Each recordId In NewRecordIds
-                    NewPhysicalRecords(recordId) = GetPhysicalRecord(recordId)
+                For Each RecordId In NewRecordIds
+
+                    Dim Record = GetPhysicalRecord(RecordId)
+
+                    NewPhysicalRecords(RecordId) = Record
+
                 Next
 
                 _Extents.Clear()
                 _Extents.AddRange(NewExtents)
 
                 _PhysicalRecords.Clear()
+
                 For Each pair In NewPhysicalRecords
                     _PhysicalRecords(pair.Key) = pair.Value
                 Next
-                RebuildPhysicalRecordOrdinals()
 
                 _ChunkSize = Options.ChunkSize
-                _ChunkPlain = New Byte(_ChunkSize - 1) {}
-                _CachedChunkPlain = New Byte(_ChunkSize - 1) {}
 
-                ReleaseOldPhysicalRecordSpaces(OldPhysicalRecords.Values, NewRecordIds)
+                _ChunkPlain =
+                    New Byte(_ChunkSize - 1) {}
+
+                _CachedChunkPlain =
+                    New Byte(_ChunkSize - 1) {}
+
+                RebuildPhysicalRecordOrdinals()
+                RebuildAnchorIndex()
+
+                ReleaseOldPhysicalRecordSpaces(
+                    OldPhysicalRecords.Values,
+                    NewRecordIds)
 
                 InvalidateChunkCache()
                 MarkAllMetadataPagesDirty()
 
             Catch
 
-                RestoreApplyOptionsRewriteState(OriginalExtents,
-                                                OriginalPhysicalRecords,
-                                                OriginalNextPhysicalRecordId,
-                                                OriginalIndexOffset,
-                                                OriginalPhysicalLength,
-                                                OriginalChunkSize,
-                                                OriginalChunkPlain,
-                                                OriginalCachedChunkPlain)
+                RestoreApplyOptionsRewriteState(
+                    OriginalExtents,
+                    OriginalPhysicalRecords,
+                    OriginalNextPhysicalRecordId,
+                    OriginalNextAnchorId,
+                    OriginalIndexOffset,
+                    OriginalPhysicalLength,
+                    OriginalChunkSize,
+                    OriginalChunkPlain,
+                    OriginalCachedChunkPlain)
+
                 Throw
 
             End Try
@@ -810,30 +884,50 @@ Namespace Streams
         Private Sub RestoreApplyOptionsRewriteState(OriginalExtents As List(Of ExtentIndexEntry),
                                                     OriginalPhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry),
                                                     OriginalNextPhysicalRecordId As Long,
+                                                    OriginalNextAnchorId As Long,
                                                     OriginalIndexOffset As Long,
                                                     OriginalPhysicalLength As Long,
                                                     OriginalChunkSize As Integer,
                                                     OriginalChunkPlain As Byte(),
                                                     OriginalCachedChunkPlain As Byte())
 
+            If OriginalExtents Is Nothing Then
+                Throw New ArgumentNullException(NameOf(OriginalExtents))
+            End If
+
+            If OriginalPhysicalRecords Is Nothing Then
+                Throw New ArgumentNullException(NameOf(OriginalPhysicalRecords))
+            End If
+
             _Extents.Clear()
             _Extents.AddRange(OriginalExtents)
 
             _PhysicalRecords.Clear()
+
             For Each pair In OriginalPhysicalRecords
                 _PhysicalRecords(pair.Key) = pair.Value
             Next
-            RebuildPhysicalRecordOrdinals()
 
-            _NextPhysicalRecordId = OriginalNextPhysicalRecordId
+            _NextPhysicalRecordId =
+                Math.Max(SparsePhysicalRecordId + 1,
+                         OriginalNextPhysicalRecordId)
+
+            _NextAnchorId =
+                Math.Max(1L,
+                         OriginalNextAnchorId)
+
             _IndexOffset = OriginalIndexOffset
             _ChunkSize = OriginalChunkSize
             _ChunkPlain = OriginalChunkPlain
             _CachedChunkPlain = OriginalCachedChunkPlain
 
+            RebuildPhysicalRecordOrdinals()
+            RebuildAnchorIndex()
+
             ClearFreeSpaceMaps()
             DiscardPendingPhysicalRecordReclaims()
             InvalidateChunkCache()
+
             MarkAllMetadataPagesDirty()
 
             If _Fs.Length > OriginalPhysicalLength Then
