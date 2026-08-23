@@ -11,7 +11,7 @@
             End If
         Next
 
-        Return "< 1 KB"
+        Return $"{size} B"
     End Function
 
     <System.Runtime.CompilerServices.Extension>

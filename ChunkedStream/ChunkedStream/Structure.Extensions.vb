@@ -293,8 +293,8 @@ Namespace Streams
                 Dim RegionColor = GetRegionColor(Region.RegionType, Options)
 
                 RenderSegments.Add(New RenderSegment With {
-                    .Offset = Region.Offset,
-                    .EndOffset = Region.EndOffset,
+                    .Offset = Region.PhysicalOffset,
+                    .EndOffset = Region.PhysicalEndOffset,
                     .Color = RegionColor,
                     .Region = Region
                 })

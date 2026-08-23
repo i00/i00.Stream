@@ -6,37 +6,49 @@ Namespace Tests
 
 
         <UnitTester.SimpleBenchmark()>
-        Public Shared Function BaseFileSizes() As UnitTester.SimpleTest.BenchmarkResult
+        Public Shared Function BaseFileSizesWithoutCompression() As UnitTester.SimpleTest.BenchmarkResult
             Dim Results As New Dictionary(Of String, String)
 
+            Dim Options = New ChunkedStream.ChunkedStreamOptions() With {
+                .ChunkSize = ChunkedStream.DefaultChunkSize,
+                .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.None
+            }
+
             Dim Tests = {
+                New With {.Test = "No Data",
+                          .Action = Sub(Cs As ChunkedStream)
+
+                                    End Sub},
+                New With {.Test = "Single Sparse Byte",
+                          .Action = Sub(Cs As ChunkedStream)
+                                        Cs.SetLength(1)
+                                    End Sub},
                 New With {.Test = "Single Byte",
                           .Action = Sub(Cs As ChunkedStream)
-                                        Cs.Options.IndexPageEntryCount
                                         Cs.Write(0, New Byte() {1})
+                                    End Sub},
+                New With {.Test = $"1 {CLng(Options.ChunkSize).FormatFileSizeFromBytes} Chunk",
+                          .Action = Sub(Cs As ChunkedStream)
+                                        Cs.Write(0, GenerateRandomData(Options.ChunkSize, 1234))
+                                    End Sub},
+                New With {.Test = "1 Chunk + 1 Byte",
+                          .Action = Sub(Cs As ChunkedStream)
+                                        Cs.Write(0, GenerateRandomData(Options.ChunkSize + 1, 1234))
                                     End Sub}
             }
-            'New With {.Test = "No Data",
-            '          .Action = Sub(Cs As ChunkedStream)
-
-            '                    End Sub},
-            'New With {.Test = "Single Sparse Byte",
-            '          .Action = Sub(Cs As ChunkedStream)
-            '                        Cs.SetLength(1)
-            '                    End Sub},
 
             For Each Test In Tests
                 Using Ms As New MemoryStream()
-                    Using Cs = ChunkedStream.Open(Ms)
+                    Using Cs = ChunkedStream.Open(Ms, Options)
                         Test.Action.Invoke(Cs)
-                        Results.Add(Test.Test, $"{Ms.Length:N0} B")
                         Dim struct = Cs.GetStructure()
-                        Dim qwe = ""
+                        Dim RegionString = Join(struct.Regions.GroupBy(Function(x) x.RegionType).Select(Function(x) $"{x.Key}({x.Count})").ToArray(), ", ")
+                        Results.Add(Test.Test, $"{Ms.Length:N0}    {RegionString}")
                     End Using
                 End Using
             Next
 
-            Return New UnitTester.SimpleTest.BenchmarkResult($"{Join(Results.Select(Function(x) $"{x.Key}: {x.Value}").ToArray, vbCrLf)}")
+            Return New UnitTester.SimpleTest.BenchmarkResult($"{Join(Results.Select(Function(x) $"{x.Key,-20}: {x.Value}").ToArray, vbCrLf)}")
         End Function
 
         '''' <summary>

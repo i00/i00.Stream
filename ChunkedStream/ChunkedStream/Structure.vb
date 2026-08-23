@@ -3,26 +3,32 @@
 ' ================================================================================
 '
 ' Purpose
-'   - Immutable diagnostic view of a ChunkedStream.
+'   - Provides an immutable diagnostic view of a ChunkedStream.
+'   - Exposes the logical extent view and a master physical walk of the backing stream.
 '
 ' Design
-'   - Produces a read-only snapshot of logical and physical structure.
-'   - Reads physical record headers only.
-'   - Does not read plaintext physical record payloads.
-'   - Does not decrypt or decompress physical record contents.
+'   - Produces read-only snapshots of logical chunks, physical regions and metadata pages.
+'   - Regions are ordered by physical offset and represent the authoritative file-layout view.
+'   - Allocated logical chunks are associated with their physical-record regions.
+'   - Sparse chunks remain available through Chunks because they have no physical region.
+'   - Reads physical-record and metadata-page headers only.
+'   - Does not read plaintext physical-record payloads.
+'   - Does not decrypt or decompress physical-record contents.
 '
 ' Features
-'   - Extent metadata inspection.
-'   - Physical-region inspection.
+'   - Extent and anchor metadata inspection.
+'   - Complete physical-region inspection.
+'   - Metadata-page location, capacity and utilisation inspection.
 '   - Compression and encryption statistics.
-'   - Fragmentation analysis.
+'   - Fragmentation and hole analysis.
 '
 ' Notes
 '   - Intended for diagnostics, reporting, visualisation and debugging.
 '   - Returned objects are immutable snapshots.
+'   - Region physical names use PhysicalOffset, PhysicalLength and PhysicalEndOffset
+'     consistently with chunk and metadata-page snapshots.
 '
 ' ================================================================================
-
 Imports System.Collections.ObjectModel
 Imports System.IO
 
@@ -61,6 +67,7 @@ Namespace Streams
             Public CompressionEvaluatedPercent As Integer
             Public EncryptionMethod As ChunkEncryptionMethods
             Public ChunkFlags As ChunkFlags
+            Public Chunks As IList(Of ChunkedStreamStructure.Chunk)
         End Structure
 
         Friend Structure ChunkHeaderSnapshot
@@ -74,12 +81,20 @@ Namespace Streams
         End Structure
 
         Private Structure MetadataRegionBuildInfo
-            Public Offset As Long
-            Public Length As Long
+            Public PhysicalOffset As Long
+            Public PhysicalLength As Long
             Public RegionType As ChunkedStreamStructure.RegionTypes
             Public Description As String
+            Public MetadataPage As ChunkedStreamStructure.MetadataPage
         End Structure
 
+        ''' <summary>
+        ''' Creates an immutable snapshot of the logical and physical stream structure.
+        ''' </summary>
+        ''' <returns>
+        ''' A snapshot containing logical chunks, the ordered physical-region walk,
+        ''' metadata-page utilisation and aggregate storage statistics.
+        ''' </returns>
         Public Function GetStructure() As ChunkedStreamStructure
 
             SyncLock _SyncRoot
@@ -384,6 +399,25 @@ Namespace Streams
 
                 Next
 
+                Dim ChunksByPhysicalRecordId =
+                    Chunks.
+                    Where(Function(chunk) chunk.IsAllocated AndAlso chunk.PhysicalRecordId.HasValue).
+                    GroupBy(Function(chunk) chunk.PhysicalRecordId.Value).
+                    ToDictionary(Function(group) group.Key,
+                                 Function(group) DirectCast(group.OrderBy(Function(chunk) chunk.Index).ToList(), IList(Of ChunkedStreamStructure.Chunk)))
+
+                For Index = 0 To PhysicalRecordBuildInfos.Count - 1
+                    Dim BuildInfo = PhysicalRecordBuildInfos(Index)
+                    Dim RecordChunks As IList(Of ChunkedStreamStructure.Chunk) = Nothing
+
+                    If ChunksByPhysicalRecordId.TryGetValue(BuildInfo.RecordId, RecordChunks) = False Then
+                        RecordChunks = New List(Of ChunkedStreamStructure.Chunk)()
+                    End If
+
+                    BuildInfo.Chunks = RecordChunks
+                    PhysicalRecordBuildInfos(Index) = BuildInfo
+                Next
+
                 Dim MetadataRegions = GetMetadataRegionBuildInfos()
 
                 Dim PhysicalHeaderBytes = CLng(DataStartOffset)
@@ -408,7 +442,7 @@ Namespace Streams
                               Return region.RegionType =
                                      ChunkedStreamStructure.RegionTypes.MetadataRoot
                           End Function).
-                    Sum(Function(region) region.Length)
+                    Sum(Function(region) region.PhysicalLength)
 
                 Dim IndexPageBytes =
                     MetadataRegions.
@@ -416,7 +450,7 @@ Namespace Streams
                               Return region.RegionType =
                                      ChunkedStreamStructure.RegionTypes.IndexPage
                           End Function).
-                    Sum(Function(region) region.Length)
+                    Sum(Function(region) region.PhysicalLength)
 
                 Dim DirectoryPageBytes =
                     MetadataRegions.
@@ -426,7 +460,7 @@ Namespace Streams
                                      region.RegionType =
                                          ChunkedStreamStructure.RegionTypes.HoleDirectoryPage
                           End Function).
-                    Sum(Function(region) region.Length)
+                    Sum(Function(region) region.PhysicalLength)
 
                 Dim HoleDirectoryBytes =
                     MetadataRegions.
@@ -434,7 +468,7 @@ Namespace Streams
                               Return region.RegionType =
                                      ChunkedStreamStructure.RegionTypes.HoleDirectoryPage
                           End Function).
-                    Sum(Function(region) region.Length)
+                    Sum(Function(region) region.PhysicalLength)
 
                 Dim PhysicalMetadataBytes =
                     MetadataRootBytes +
@@ -448,8 +482,7 @@ Namespace Streams
 
                 Dim Regions =
                     BuildPhysicalRegions(
-                        AllocatedRecordsInPhysicalOrder,
-                        Chunks,
+                        PhysicalRecordBuildInfos,
                         MetadataRegions)
 
                 Dim HoleRegions =
@@ -465,12 +498,12 @@ Namespace Streams
                 Dim LargestHoleBytes =
                     If(HoleCount = 0,
                        0L,
-                       HoleRegions.Max(Function(region) region.Length))
+                       HoleRegions.Max(Function(region) region.PhysicalLength))
 
                 Dim AverageHoleBytes =
                     If(HoleCount = 0,
                        0L,
-                       CLng(HoleRegions.Average(Function(region) CDbl(region.Length))))
+                       CLng(HoleRegions.Average(Function(region) CDbl(region.PhysicalLength))))
 
                 Dim WrapMode =
                     CType(BitConverter.ToInt32(
@@ -530,7 +563,7 @@ Namespace Streams
                     DataStartOffset:=DataStartOffset,
                     DataAreaEndOffset:=LivePhysicalEndOffset,
                     LiveDataEndOffset:=LiveDataEndOffset,
-                    Chunks:=Chunks,
+                    SparseChunks:=Chunks.Where(Function(chunk) chunk.IsSparse).ToList(),
                     Regions:=Regions)
 
             End SyncLock
@@ -644,87 +677,153 @@ Namespace Streams
         ''' <summary>
         ''' Builds a physical-region description of all persisted metadata structures.
         ''' </summary>
+        ''' <summary>
+        ''' Builds descriptions of every active persisted metadata structure.
+        ''' </summary>
         Private Function GetMetadataRegionBuildInfos() As List(Of MetadataRegionBuildInfo)
 
-            Dim Result As New List(Of MetadataRegionBuildInfo)
+            Dim Result As New List(Of MetadataRegionBuildInfo)()
 
             For Each Descriptor In _ExtentPageDescriptors.Values
-
-                If Descriptor.Offset <= 0 OrElse Descriptor.Length <= 0 Then Continue For
-
-                Result.Add(New MetadataRegionBuildInfo With {
-                    .Offset = Descriptor.Offset,
-                    .Length = Descriptor.Length,
-                    .RegionType = ChunkedStreamStructure.RegionTypes.IndexPage,
-                    .Description = $"Extent Page {Descriptor.PageNumber}"
-                })
-
+                AddMetadataRegion(Result,
+                                  Descriptor,
+                                  ChunkedStreamStructure.MetadataPageTypes.ExtentPage,
+                                  ChunkedStreamStructure.RegionTypes.IndexPage,
+                                  $"Extent Page {Descriptor.PageNumber}",
+                                  ExtentEntrySize,
+                                  _IndexPageEntryCount)
             Next
 
             For Each Descriptor In _PhysicalRecordPageDescriptors.Values
-
-                If Descriptor.Offset <= 0 OrElse Descriptor.Length <= 0 Then Continue For
-
-                Result.Add(New MetadataRegionBuildInfo With {
-                    .Offset = Descriptor.Offset,
-                    .Length = Descriptor.Length,
-                    .RegionType = ChunkedStreamStructure.RegionTypes.IndexPage,
-                    .Description = $"Physical Record Page {Descriptor.PageNumber}"
-                })
-
+                AddMetadataRegion(Result,
+                                  Descriptor,
+                                  ChunkedStreamStructure.MetadataPageTypes.PhysicalRecordPage,
+                                  ChunkedStreamStructure.RegionTypes.IndexPage,
+                                  $"Physical Record Page {Descriptor.PageNumber}",
+                                  PhysicalRecordEntrySize,
+                                  _IndexPageEntryCount)
             Next
 
             For Each Descriptor In _ExtentDirectoryPageDescriptors.Values
-
-                If Descriptor.Offset <= 0 OrElse Descriptor.Length <= 0 Then Continue For
-
-                Result.Add(New MetadataRegionBuildInfo With {
-                    .Offset = Descriptor.Offset,
-                    .Length = Descriptor.Length,
-                    .RegionType = ChunkedStreamStructure.RegionTypes.ChunkIndexDirectoryPage,
-                    .Description = $"Extent Directory Page {Descriptor.PageNumber}"
-                })
-
+                AddMetadataRegion(Result,
+                                  Descriptor,
+                                  ChunkedStreamStructure.MetadataPageTypes.ExtentDirectoryPage,
+                                  ChunkedStreamStructure.RegionTypes.ChunkIndexDirectoryPage,
+                                  $"Extent Directory Page {Descriptor.PageNumber}",
+                                  Nothing,
+                                  _IndexDirectoryEntryCount)
             Next
 
             For Each Descriptor In _PhysicalRecordDirectoryPageDescriptors.Values
-
-                If Descriptor.Offset <= 0 OrElse Descriptor.Length <= 0 Then Continue For
-
-                Result.Add(New MetadataRegionBuildInfo With {
-                    .Offset = Descriptor.Offset,
-                    .Length = Descriptor.Length,
-                    .RegionType = ChunkedStreamStructure.RegionTypes.ChunkIndexDirectoryPage,
-                    .Description = $"Physical Record Directory Page {Descriptor.PageNumber}"
-                })
-
+                AddMetadataRegion(Result,
+                                  Descriptor,
+                                  ChunkedStreamStructure.MetadataPageTypes.PhysicalRecordDirectoryPage,
+                                  ChunkedStreamStructure.RegionTypes.ChunkIndexDirectoryPage,
+                                  $"Physical Record Directory Page {Descriptor.PageNumber}",
+                                  Nothing,
+                                  _IndexDirectoryEntryCount)
             Next
 
             For Each Descriptor In _HoleDirectoryPageDescriptors.Values
-
-                If Descriptor.Offset <= 0 OrElse Descriptor.Length <= 0 Then Continue For
-
-                Result.Add(New MetadataRegionBuildInfo With {
-                    .Offset = Descriptor.Offset,
-                    .Length = Descriptor.Length,
-                    .RegionType = ChunkedStreamStructure.RegionTypes.HoleDirectoryPage,
-                    .Description = $"Hole Directory Page {Descriptor.PageNumber}"
-                })
-
+                AddMetadataRegion(Result,
+                                  Descriptor,
+                                  ChunkedStreamStructure.MetadataPageTypes.HoleDirectoryPage,
+                                  ChunkedStreamStructure.RegionTypes.HoleDirectoryPage,
+                                  $"Hole Directory Page {Descriptor.PageNumber}",
+                                  Nothing,
+                                  _IndexDirectoryEntryCount)
             Next
 
             If _MetadataRootOffset > 0 AndAlso _MetadataRootLength > 0 Then
+                Dim MetadataPage =
+                    New ChunkedStreamStructure.MetadataPage(
+                        MetadataPageType:=ChunkedStreamStructure.MetadataPageTypes.MetadataRoot,
+                        PageNumber:=Nothing,
+                        PhysicalOffset:=_MetadataRootOffset,
+                        PhysicalLength:=_MetadataRootLength,
+                        EntriesUsed:=Nothing,
+                        EntryCapacity:=Nothing,
+                        EntrySize:=Nothing,
+                        Description:="Metadata Root")
 
-                Result.Add(New MetadataRegionBuildInfo With {
-                    .Offset = _MetadataRootOffset,
-                    .Length = _MetadataRootLength,
-                    .RegionType = ChunkedStreamStructure.RegionTypes.MetadataRoot,
-                    .Description = "Metadata Root"
-                })
-
+                Result.Add(
+                    New MetadataRegionBuildInfo With {
+                        .PhysicalOffset = _MetadataRootOffset,
+                        .PhysicalLength = _MetadataRootLength,
+                        .RegionType = ChunkedStreamStructure.RegionTypes.MetadataRoot,
+                        .Description = "Metadata Root",
+                        .MetadataPage = MetadataPage
+                    })
             End If
 
-            Result.Sort(Function(left, right) left.Offset.CompareTo(right.Offset))
+            Return Result
+
+        End Function
+
+        Private Sub AddMetadataRegion(Result As IList(Of MetadataRegionBuildInfo),
+                                      Descriptor As MetadataPageDescriptor,
+                                      MetadataPageType As ChunkedStreamStructure.MetadataPageTypes,
+                                      RegionType As ChunkedStreamStructure.RegionTypes,
+                                      Description As String,
+                                      EntrySize As Integer?,
+                                      EntryCapacity As Integer)
+
+            If Result Is Nothing Then Throw New ArgumentNullException(NameOf(Result))
+            If Descriptor.Offset <= 0 OrElse Descriptor.Length <= 0 Then Return
+
+            Dim EntriesUsed = ReadMetadataPageEntryCount(Descriptor, MetadataPageType)
+            Dim MetadataPage =
+                New ChunkedStreamStructure.MetadataPage(
+                    MetadataPageType:=MetadataPageType,
+                    PageNumber:=Descriptor.PageNumber,
+                    PhysicalOffset:=Descriptor.Offset,
+                    PhysicalLength:=Descriptor.Length,
+                    EntriesUsed:=EntriesUsed,
+                    EntryCapacity:=EntryCapacity,
+                    EntrySize:=EntrySize,
+                    Description:=Description)
+
+            Result.Add(
+                New MetadataRegionBuildInfo With {
+                    .PhysicalOffset = Descriptor.Offset,
+                    .PhysicalLength = Descriptor.Length,
+                    .RegionType = RegionType,
+                    .Description = Description,
+                    .MetadataPage = MetadataPage
+                })
+
+        End Sub
+
+        Private Function ReadMetadataPageEntryCount(Descriptor As MetadataPageDescriptor,
+                                                     MetadataPageType As ChunkedStreamStructure.MetadataPageTypes) As Integer
+
+            Dim EntryCountOffset As Integer
+
+            Select Case MetadataPageType
+                Case ChunkedStreamStructure.MetadataPageTypes.ExtentPage,
+                     ChunkedStreamStructure.MetadataPageTypes.PhysicalRecordPage
+                    EntryCountOffset = 20
+                Case ChunkedStreamStructure.MetadataPageTypes.ExtentDirectoryPage,
+                     ChunkedStreamStructure.MetadataPageTypes.PhysicalRecordDirectoryPage,
+                     ChunkedStreamStructure.MetadataPageTypes.HoleDirectoryPage
+                    EntryCountOffset = 16
+                Case Else
+                    Throw New ArgumentOutOfRangeException(NameOf(MetadataPageType))
+            End Select
+
+            If Descriptor.Length < EntryCountOffset + 4 Then
+                Throw New InvalidDataException($"Metadata page {Descriptor.PageNumber} is too short to contain its entry count.")
+            End If
+
+            Dim Buffer(3) As Byte
+            _Fs.Position = Descriptor.Offset + EntryCountOffset
+            ReadExactly(_Fs, Buffer, 0, Buffer.Length)
+
+            Dim Result = BitConverter.ToInt32(Buffer, 0)
+
+            If Result < 0 Then
+                Throw New InvalidDataException($"Metadata page {Descriptor.PageNumber} has an invalid entry count.")
+            End If
 
             Return Result
 
@@ -735,130 +834,122 @@ Namespace Streams
             Dim Result = GetDataEndFromIndex()
 
             For Each MetadataRegion In GetMetadataRegionBuildInfos()
-                Result = Math.Max(Result, MetadataRegion.Offset + MetadataRegion.Length)
+                Result = Math.Max(Result, MetadataRegion.PhysicalOffset + MetadataRegion.PhysicalLength)
             Next
 
             Return Math.Max(Result, CLng(DataStartOffset))
 
         End Function
 
-        Private Function CalculateFragmentedBytes(AllocatedInPhysicalOrder As IList(Of PhysicalRecordStructureBuildInfo),
-                                                  MetadataRegions As IList(Of MetadataRegionBuildInfo)) As Long
+        Private Function CalculateFragmentedBytes(AllocatedRecords As IEnumerable(Of PhysicalRecordStructureBuildInfo),
+                                                  MetadataRegions As IEnumerable(Of MetadataRegionBuildInfo)) As Long
 
-            Dim UsedBytes As Long = 0
+            If AllocatedRecords Is Nothing Then Throw New ArgumentNullException(NameOf(AllocatedRecords))
+            If MetadataRegions Is Nothing Then Throw New ArgumentNullException(NameOf(MetadataRegions))
 
-            For Each Entry In AllocatedInPhysicalOrder
-                UsedBytes += Entry.PhysicalLength
-            Next
-
-            For Each MetadataRegion In MetadataRegions
-                UsedBytes += MetadataRegion.Length
-            Next
+            Dim UsedBytes = AllocatedRecords.Sum(Function(entry) CLng(entry.PhysicalLength)) +
+                            MetadataRegions.Sum(Function(entry) entry.PhysicalLength)
 
             Dim PhysicalDataAreaBytes = Math.Max(0L, GetLivePhysicalEndOffset() - DataStartOffset)
-
             Return Math.Max(0L, PhysicalDataAreaBytes - UsedBytes)
 
         End Function
 
-        Private Function BuildPhysicalRegions(AllocatedInPhysicalOrder As IList(Of PhysicalRecordStructureBuildInfo),
-                                              Chunks As IList(Of ChunkedStreamStructure.Chunk),
-                                              MetadataRegions As IList(Of MetadataRegionBuildInfo)) As List(Of ChunkedStreamStructure.Region)
+        Private Function BuildPhysicalRegions(AllocatedRecords As IEnumerable(Of PhysicalRecordStructureBuildInfo),
+                                              MetadataRegions As IEnumerable(Of MetadataRegionBuildInfo)) As List(Of ChunkedStreamStructure.Region)
 
-            Dim Regions As New List(Of ChunkedStreamStructure.Region)
+            If AllocatedRecords Is Nothing Then Throw New ArgumentNullException(NameOf(AllocatedRecords))
+            If MetadataRegions Is Nothing Then Throw New ArgumentNullException(NameOf(MetadataRegions))
 
-            Dim ChunkLookup =
-                Chunks.
-                Where(Function(chunk) chunk.IsAllocated AndAlso chunk.PhysicalRecordId.HasValue).
-                GroupBy(Function(chunk) chunk.PhysicalRecordId.Value).
-                ToDictionary(Function(group) group.Key, Function(group) group.First())
-
-            Regions.Add(New ChunkedStreamStructure.Region(Offset:=0,
-                                                          Length:=HeaderSize,
-                                                          RegionType:=ChunkedStreamStructure.RegionTypes.Header,
-                                                          Chunk:=Nothing,
-                                                          Description:="Header A"))
-
-            Regions.Add(New ChunkedStreamStructure.Region(Offset:=HeaderSize,
-                                                          Length:=HeaderSize,
-                                                          RegionType:=ChunkedStreamStructure.RegionTypes.Header,
-                                                          Chunk:=Nothing,
-                                                          Description:="Header B"))
+            Dim Regions As New List(Of ChunkedStreamStructure.Region) From {
+                New ChunkedStreamStructure.Region(PhysicalOffset:=0,
+                                                  PhysicalLength:=HeaderSize,
+                                                  RegionType:=ChunkedStreamStructure.RegionTypes.Header,
+                                                  Chunks:=Nothing,
+                                                  MetadataPage:=Nothing,
+                                                  Description:="Header A"),
+                New ChunkedStreamStructure.Region(PhysicalOffset:=HeaderSize,
+                                                  PhysicalLength:=HeaderSize,
+                                                  RegionType:=ChunkedStreamStructure.RegionTypes.Header,
+                                                  Chunks:=Nothing,
+                                                  MetadataPage:=Nothing,
+                                                  Description:="Header B")
+            }
 
             Dim PhysicalSegments As New List(Of ChunkedStreamStructure.Region)()
 
-            For Each Entry In AllocatedInPhysicalOrder
-
-                Dim Chunk As ChunkedStreamStructure.Chunk = Nothing
-                ChunkLookup.TryGetValue(Entry.RecordId, Chunk)
-
-                PhysicalSegments.Add(New ChunkedStreamStructure.Region(Offset:=Entry.PhysicalOffset,
-                                                                       Length:=Entry.PhysicalLength,
-                                                                       RegionType:=ChunkedStreamStructure.RegionTypes.Chunk,
-                                                                       Chunk:=Chunk,
-                                                                       Description:=$"Physical Record {Entry.RecordId}"))
-
+            For Each Entry In AllocatedRecords
+                PhysicalSegments.Add(
+                    New ChunkedStreamStructure.Region(
+                        PhysicalOffset:=Entry.PhysicalOffset,
+                        PhysicalLength:=Entry.PhysicalLength,
+                        RegionType:=ChunkedStreamStructure.RegionTypes.Chunk,
+                        Chunks:=Entry.Chunks,
+                        MetadataPage:=Nothing,
+                        Description:=$"Physical Record {Entry.RecordId}"))
             Next
 
             For Each MetadataRegion In MetadataRegions
-
-                PhysicalSegments.Add(New ChunkedStreamStructure.Region(Offset:=MetadataRegion.Offset,
-                                                                       Length:=MetadataRegion.Length,
-                                                                       RegionType:=MetadataRegion.RegionType,
-                                                                       Chunk:=Nothing,
-                                                                       Description:=MetadataRegion.Description))
-
+                PhysicalSegments.Add(
+                    New ChunkedStreamStructure.Region(
+                        PhysicalOffset:=MetadataRegion.PhysicalOffset,
+                        PhysicalLength:=MetadataRegion.PhysicalLength,
+                        RegionType:=MetadataRegion.RegionType,
+                        Chunks:=Nothing,
+                        MetadataPage:=MetadataRegion.MetadataPage,
+                        Description:=MetadataRegion.Description))
             Next
 
-            PhysicalSegments = PhysicalSegments.
-                               OrderBy(Function(region) region.Offset).
-                               ThenBy(Function(region) region.EndOffset).
-                               ToList()
+            PhysicalSegments = PhysicalSegments.OrderBy(Function(region) region.PhysicalOffset).
+                                                ThenBy(Function(region) region.PhysicalEndOffset).
+                                                ToList()
 
             Dim Cursor = CLng(DataStartOffset)
 
             For Each Segment In PhysicalSegments
+                If Segment.PhysicalOffset > Cursor Then
+                    Regions.Add(
+                        New ChunkedStreamStructure.Region(
+                            PhysicalOffset:=Cursor,
+                            PhysicalLength:=Segment.PhysicalOffset - Cursor,
+                            RegionType:=ChunkedStreamStructure.RegionTypes.Hole,
+                            Chunks:=Nothing,
+                            MetadataPage:=Nothing,
+                            Description:="Unreferenced data area"))
+                ElseIf Segment.PhysicalOffset < Cursor Then
+                    Regions.Add(
+                        New ChunkedStreamStructure.Region(
+                            PhysicalOffset:=Segment.PhysicalOffset,
+                            PhysicalLength:=Segment.PhysicalLength,
+                            RegionType:=ChunkedStreamStructure.RegionTypes.Unknown,
+                            Chunks:=Nothing,
+                            MetadataPage:=Nothing,
+                            Description:=$"Overlapping region: {Segment.Description}"))
 
-                If Segment.Offset > Cursor Then
-
-                    Regions.Add(New ChunkedStreamStructure.Region(Offset:=Cursor,
-                                                                  Length:=Segment.Offset - Cursor,
-                                                                  RegionType:=ChunkedStreamStructure.RegionTypes.Hole,
-                                                                  Chunk:=Nothing,
-                                                                  Description:="Unreferenced data area"))
-
-                ElseIf Segment.Offset < Cursor Then
-
-                    Regions.Add(New ChunkedStreamStructure.Region(Offset:=Segment.Offset,
-                                                                  Length:=Segment.Length,
-                                                                  RegionType:=ChunkedStreamStructure.RegionTypes.Unknown,
-                                                                  Chunk:=Nothing,
-                                                                  Description:=$"Overlapping region: {Segment.Description}"))
-
-                    Cursor = Math.Max(Cursor, Segment.EndOffset)
+                    Cursor = Math.Max(Cursor, Segment.PhysicalEndOffset)
                     Continue For
-
                 End If
 
                 Regions.Add(Segment)
-                Cursor = Math.Max(Cursor, Segment.EndOffset)
-
+                Cursor = Math.Max(Cursor, Segment.PhysicalEndOffset)
             Next
 
             If _Fs.Length > Cursor Then
-
-                Regions.Add(New ChunkedStreamStructure.Region(Offset:=Cursor,
-                                                              Length:=_Fs.Length - Cursor,
-                                                              RegionType:=ChunkedStreamStructure.RegionTypes.Unused,
-                                                              Chunk:=Nothing,
-                                                              Description:="Unused trailing space"))
-
+                Regions.Add(
+                    New ChunkedStreamStructure.Region(
+                        PhysicalOffset:=Cursor,
+                        PhysicalLength:=_Fs.Length - Cursor,
+                        RegionType:=ChunkedStreamStructure.RegionTypes.Unused,
+                        Chunks:=Nothing,
+                        MetadataPage:=Nothing,
+                        Description:="Unused trailing space"))
             End If
 
-            Return Regions
+            Return Regions.OrderBy(Function(region) region.PhysicalOffset).
+                           ThenBy(Function(region) region.PhysicalEndOffset).
+                           ToList()
 
         End Function
-
     End Class
 
     ''' <summary>
@@ -924,6 +1015,36 @@ Namespace Streams
 
         End Enum
 
+        ''' <summary>
+        ''' Classification of an active persisted metadata structure.
+        ''' </summary>
+        Public Enum MetadataPageTypes
+            ''' <summary>
+            ''' Authenticated metadata root record.
+            ''' </summary>
+            MetadataRoot = 0
+            ''' <summary>
+            ''' Authenticated logical extent page.
+            ''' </summary>
+            ExtentPage = 1
+            ''' <summary>
+            ''' Authenticated physical-record page.
+            ''' </summary>
+            PhysicalRecordPage = 2
+            ''' <summary>
+            ''' Authenticated extent-page directory page.
+            ''' </summary>
+            ExtentDirectoryPage = 3
+            ''' <summary>
+            ''' Authenticated physical-record-page directory page.
+            ''' </summary>
+            PhysicalRecordDirectoryPage = 4
+            ''' <summary>
+            ''' Authenticated persisted hole-directory page.
+            ''' </summary>
+            HoleDirectoryPage = 5
+        End Enum
+
         Friend Sub New(LogicalLength As Long,
                        PhysicalLength As Long,
                        ChunkSize As Integer,
@@ -967,7 +1088,7 @@ Namespace Streams
                        DataStartOffset As Long,
                        DataAreaEndOffset As Long,
                        LiveDataEndOffset As Long,
-                       Chunks As IList(Of Chunk),
+                       SparseChunks As IList(Of Chunk),
                        Regions As IList(Of Region))
 
             Me.LogicalLength = LogicalLength
@@ -1028,8 +1149,23 @@ Namespace Streams
             Me.DataAreaEndOffset = DataAreaEndOffset
             Me.LiveDataEndOffset = LiveDataEndOffset
 
-            _Chunks = New ReadOnlyCollection(Of Chunk)(Chunks)
-            _Regions = New ReadOnlyCollection(Of Region)(Regions)
+            If SparseChunks Is Nothing Then Throw New ArgumentNullException(NameOf(SparseChunks))
+            If Regions Is Nothing Then Throw New ArgumentNullException(NameOf(Regions))
+
+            Dim AllChunks =
+                Regions.SelectMany(Function(region) region.Chunks).
+                        Concat(SparseChunks).
+                        GroupBy(Function(chunk) chunk.Index).
+                        Select(Function(group) group.First()).
+                        OrderBy(Function(chunk) chunk.Index).
+                        ToList()
+
+            _Chunks = New ReadOnlyCollection(Of Chunk)(AllChunks)
+            _Regions = New ReadOnlyCollection(Of Region)(Regions.ToList())
+            _MetadataPages = New ReadOnlyCollection(Of MetadataPage)(
+                Regions.Where(Function(region) region.MetadataPage IsNot Nothing).
+                        Select(Function(region) region.MetadataPage).
+                        ToList())
 
         End Sub
 
@@ -1442,6 +1578,17 @@ Namespace Streams
         ''' <summary>
         ''' Returns a concise diagnostic summary of the stream structure.
         ''' </summary>
+        Private ReadOnly _MetadataPages As ReadOnlyCollection(Of MetadataPage)
+
+        ''' <summary>
+        ''' Active persisted metadata structures in physical file order.
+        ''' </summary>
+        Public ReadOnly Property MetadataPages As IReadOnlyList(Of MetadataPage)
+            Get
+                Return _MetadataPages
+            End Get
+        End Property
+
         Public Overrides Function ToString() As String
 
             Return $"ChunkedStream [{LogicalLength.FormatFileSizeFromBytes()} logical, " &
@@ -1766,52 +1913,214 @@ Namespace Streams
         End Class
 
         ''' <summary>
+        ''' Immutable read-only snapshot of an active persisted metadata structure.
+        ''' </summary>
+        Public NotInheritable Class MetadataPage
+
+            Friend Sub New(MetadataPageType As MetadataPageTypes,
+                           PageNumber As Integer?,
+                           PhysicalOffset As Long,
+                           PhysicalLength As Long,
+                           EntriesUsed As Integer?,
+                           EntryCapacity As Integer?,
+                           EntrySize As Integer?,
+                           Description As String)
+
+                Me.MetadataPageType = MetadataPageType
+                Me.PageNumber = PageNumber
+                Me.PhysicalOffset = PhysicalOffset
+                Me.PhysicalLength = PhysicalLength
+                Me.PhysicalEndOffset = PhysicalOffset + PhysicalLength
+                Me.EntriesUsed = EntriesUsed
+                Me.EntryCapacity = EntryCapacity
+                Me.EntrySize = EntrySize
+                Me.Description = Description
+
+            End Sub
+
+            ''' <summary>
+            ''' Metadata structure classification.
+            ''' </summary>
+            Public ReadOnly Property MetadataPageType As MetadataPageTypes
+
+            ''' <summary>
+            ''' Metadata page number, or Nothing for the metadata root.
+            ''' </summary>
+            Public ReadOnly Property PageNumber As Integer?
+
+            ''' <summary>
+            ''' Physical start offset of the metadata structure.
+            ''' </summary>
+            Public ReadOnly Property PhysicalOffset As Long
+
+            ''' <summary>
+            ''' Physical length of the metadata structure.
+            ''' </summary>
+            Public ReadOnly Property PhysicalLength As Long
+
+            ''' <summary>
+            ''' Physical end offset of the metadata structure.
+            ''' </summary>
+            Public ReadOnly Property PhysicalEndOffset As Long
+
+            ''' <summary>
+            ''' Number of populated entries, or Nothing when the structure is not entry based.
+            ''' </summary>
+            Public ReadOnly Property EntriesUsed As Integer?
+
+            ''' <summary>
+            ''' Maximum entry capacity, or Nothing when the structure is not entry based.
+            ''' </summary>
+            Public ReadOnly Property EntryCapacity As Integer?
+
+            ''' <summary>
+            ''' Serialized bytes reserved for each entry, or Nothing when the structure is not entry based.
+            ''' </summary>
+            Public ReadOnly Property EntrySize As Integer?
+
+            ''' <summary>
+            ''' Human-readable metadata structure description.
+            ''' </summary>
+            Public ReadOnly Property Description As String
+
+            ''' <summary>
+            ''' Number of unused entry slots.
+            ''' </summary>
+            Public ReadOnly Property UnusedEntries As Integer?
+                Get
+                    If EntriesUsed.HasValue = False OrElse EntryCapacity.HasValue = False Then Return Nothing
+                    Return Math.Max(0, EntryCapacity.Value - EntriesUsed.Value)
+                End Get
+            End Property
+
+            ''' <summary>
+            ''' Serialized bytes occupied by populated entry slots.
+            ''' </summary>
+            Public ReadOnly Property UsedEntryBytes As Long?
+                Get
+                    If EntriesUsed.HasValue = False OrElse EntrySize.HasValue = False Then Return Nothing
+                    Return CLng(EntriesUsed.Value) * EntrySize.Value
+                End Get
+            End Property
+
+            ''' <summary>
+            ''' Serialized bytes reserved by unused entry slots.
+            ''' </summary>
+            Public ReadOnly Property UnusedEntryBytes As Long?
+                Get
+                    If UnusedEntries.HasValue = False OrElse EntrySize.HasValue = False Then Return Nothing
+                    Return CLng(UnusedEntries.Value) * EntrySize.Value
+                End Get
+            End Property
+
+            ''' <summary>
+            ''' Populated entry slots as a ratio of entry capacity.
+            ''' </summary>
+            Public ReadOnly Property EntryUsageRatio As Double?
+                Get
+                    If EntriesUsed.HasValue = False OrElse EntryCapacity.HasValue = False Then Return Nothing
+                    If EntryCapacity.Value <= 0 Then Return 0.0R
+                    Return Math.Min(1.0R, EntriesUsed.Value / CDbl(EntryCapacity.Value))
+                End Get
+            End Property
+
+            ''' <summary>
+            ''' Unused entry slots as a ratio of entry capacity.
+            ''' </summary>
+            Public ReadOnly Property EntryWasteRatio As Double?
+                Get
+                    If EntryUsageRatio.HasValue = False Then Return Nothing
+                    Return Math.Max(0.0R, 1.0R - EntryUsageRatio.Value)
+                End Get
+            End Property
+
+            ''' <summary>
+            ''' Returns a concise diagnostic summary of the metadata structure.
+            ''' </summary>
+            Public Overrides Function ToString() As String
+                If EntriesUsed.HasValue AndAlso EntryCapacity.HasValue Then
+                    Return $"{Description} [{PhysicalLength.FormatFileSizeFromBytes()}, {EntriesUsed.Value}/{EntryCapacity.Value} entries]"
+                End If
+
+                Return $"{Description} [{PhysicalLength.FormatFileSizeFromBytes()}]"
+            End Function
+
+        End Class
+
+        ''' <summary>
         ''' Immutable read-only snapshot of a physical region in the backing stream.
         ''' </summary>
         Public NotInheritable Class Region
 
-            Friend Sub New(Offset As Long,
-                           Length As Long,
+            Friend Sub New(PhysicalOffset As Long,
+                           PhysicalLength As Long,
                            RegionType As RegionTypes,
-                           Chunk As Chunk,
+                           Chunks As IEnumerable(Of Chunk),
+                           MetadataPage As MetadataPage,
                            Description As String)
 
-                Me.Offset = Offset
-                Me.Length = Length
-                Me.EndOffset = Offset + Length
+                Me.PhysicalOffset = PhysicalOffset
+                Me.PhysicalLength = PhysicalLength
+                Me.PhysicalEndOffset = PhysicalOffset + PhysicalLength
                 Me.RegionType = RegionType
-                Me.Chunk = Chunk
+                Me.MetadataPage = MetadataPage
                 Me.Description = Description
+
+                Dim ChunkList = If(Chunks, Enumerable.Empty(Of Chunk)()).OrderBy(Function(chunk) chunk.Index).ToList()
+                _Chunks = New ReadOnlyCollection(Of Chunk)(ChunkList)
 
             End Sub
 
             ''' <summary>
             ''' Physical region start offset.
             ''' </summary>
-            Public ReadOnly Property Offset As Long
+            Public ReadOnly Property PhysicalOffset As Long
 
             ''' <summary>
             ''' Physical region length.
             ''' </summary>
-            Public ReadOnly Property Length As Long
+            Public ReadOnly Property PhysicalLength As Long
 
             ''' <summary>
             ''' Physical region end offset.
             ''' </summary>
-            Public ReadOnly Property EndOffset As Long
+            Public ReadOnly Property PhysicalEndOffset As Long
 
             ''' <summary>
             ''' Region classification.
             ''' </summary>
             Public ReadOnly Property RegionType As RegionTypes
 
-            ''' <summary>
-            ''' Populated only when RegionType = Chunk. Otherwise Nothing.
-            ''' </summary>
-            Public ReadOnly Property Chunk As Chunk
+            Private ReadOnly _Chunks As ReadOnlyCollection(Of Chunk)
 
             ''' <summary>
-            ''' Human-readable description.
+            ''' Logical chunks referencing this physical chunk-record region.
+            ''' Empty for non-chunk regions.
+            ''' </summary>
+            Public ReadOnly Property Chunks As IReadOnlyList(Of Chunk)
+                Get
+                    Return _Chunks
+                End Get
+            End Property
+
+            ''' <summary>
+            ''' First logical chunk referencing this physical chunk-record region.
+            ''' Nothing for non-chunk regions or when no logical chunk is associated.
+            ''' Use Chunks when shared physical records may have multiple logical references.
+            ''' </summary>
+            Public ReadOnly Property Chunk As Chunk
+                Get
+                    Return _Chunks.FirstOrDefault()
+                End Get
+            End Property
+
+            ''' <summary>
+            ''' Metadata-page snapshot for metadata regions. Nothing for other region types.
+            ''' </summary>
+            Public ReadOnly Property MetadataPage As MetadataPage
+
+            ''' <summary>
+            ''' Human-readable region description.
             ''' </summary>
             Public ReadOnly Property Description As String
 
@@ -1819,13 +2128,13 @@ Namespace Streams
             ''' Returns a concise diagnostic summary of the physical region.
             ''' </summary>
             Public Overrides Function ToString() As String
-
                 If RegionType = RegionTypes.Chunk AndAlso Chunk IsNot Nothing Then
-                    Return $"Chunk {Chunk.Index} region [{Length.FormatFileSizeFromBytes()}]"
+                    Dim SharedText = If(_Chunks.Count > 1, $", {_Chunks.Count} logical chunks", "")
+                    Return $"Chunk {Chunk.Index} region [{PhysicalLength.FormatFileSizeFromBytes()}{SharedText}]"
                 End If
 
-                Return $"{RegionType} [{Length.FormatFileSizeFromBytes()}]"
-
+                If MetadataPage IsNot Nothing Then Return MetadataPage.ToString()
+                Return $"{RegionType} [{PhysicalLength.FormatFileSizeFromBytes()}]"
             End Function
 
         End Class

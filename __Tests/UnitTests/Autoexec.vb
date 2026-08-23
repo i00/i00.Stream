@@ -7,7 +7,7 @@ Public Class Autoexec
 
         'because we are not testing PBKDF2 key generation speed :P:
         ChunkedStream.EncryptionInfo.DefaultPBKDF2Iterations = 1
-        UnitTester.SimpleTest.TestTypesToRun = UnitTester.SimpleTest.TestTypes.Benchmark
+        UnitTester.SimpleTest.TestTypesToRun = UnitTester.SimpleTest.TestTypes.Test
 
         'Test()
 

@@ -538,22 +538,8 @@ Namespace Streams
 
         End Sub
 
-        Private Function ShouldMaterialiseRemoveBoundaryFragments(LeftLength As Integer,
-                                                                  RightLength As Integer) As Boolean
-
-            If Options.BisectLimit <= 0 Then Return False
-            If LeftLength <= 0 OrElse RightLength <= 0 Then Return False
-
-            Dim CombinedLength = LeftLength + RightLength
-
-            If CombinedLength > Options.ChunkSize Then Return False
-
-            Return LeftLength < Options.BisectLimit OrElse RightLength < Options.BisectLimit
-
-        End Function
-
-        Private Function ShouldMaterialiseCloneAdjacentBoundaryFragments(LeftLength As Integer,
-                                                                         RightLength As Integer) As Boolean
+        Private Function ShouldMaterialiseAdjacentBoundaryFragments(LeftLength As Integer,
+                                                                    RightLength As Integer) As Boolean
 
             If Options.BisectLimit <= 0 Then Return False
             If LeftLength <= 0 OrElse RightLength <= 0 Then Return False
@@ -784,8 +770,8 @@ Namespace Streams
                 ' anchored, because that would destroy its anchored start.
                 '
                 If RightExtent.AnchorId = 0 AndAlso
-                   ShouldMaterialiseRemoveBoundaryFragments(LeftExtent.LogicalLength,
-                                                            RightExtent.LogicalLength) Then
+                   ShouldMaterialiseAdjacentBoundaryFragments(LeftExtent.LogicalLength,
+                                                              RightExtent.LogicalLength) Then
 
                     Dim CombinedLength =
                         LeftExtent.LogicalLength +
@@ -1074,7 +1060,7 @@ Namespace Streams
             End While
 
             If Segments.Count = 2 AndAlso
-               ShouldMaterialiseCloneAdjacentBoundaryFragments(
+               ShouldMaterialiseAdjacentBoundaryFragments(
                    Segments(0).LogicalLength,
                    Segments(1).LogicalLength) Then
 
