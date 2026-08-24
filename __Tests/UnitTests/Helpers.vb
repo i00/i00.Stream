@@ -5,36 +5,20 @@ Namespace Tests
 
     Public Module Helpers
 
-        Private ReadOnly FormatFileSizeLimits As Long() =
-            New Long() {
-                1099511627776L,
-                1073741824L,
-                1048576L,
-                1024L
-            }
+        '<System.Runtime.CompilerServices.Extension>
+        'Public Function FormatFileSizeFromBytes(Size As Long, Optional DecimalPlaces As Integer = 1) As String
+        '    Return i00.Extensions.FormatFileSizeFromBytes(Size, DecimalPlaces)
+        '    'For Index As Integer = 0 To FormatFileSizeLimits.Length - 1
+        '    '    If Size >= FormatFileSizeLimits(Index) Then
+        '    '        Return String.Format(
+        '    '            "{0:#,##0." & New String("#"c, DecimalPlaces) & "} " & FormatFileSizeUnits(Index),
+        '    '            Size / CDbl(FormatFileSizeLimits(Index)))
+        '    '    End If
+        '    'Next
 
-        Private ReadOnly FormatFileSizeUnits As String() =
-            New String() {
-                "TB",
-                "GB",
-                "MB",
-                "KB"
-            }
+        '    'Return "< 1 KB"
 
-        <System.Runtime.CompilerServices.Extension>
-        Public Function FormatFileSizeFromBytes(Size As Long, Optional DecimalPlaces As Integer = 1) As String
-
-            For Index As Integer = 0 To FormatFileSizeLimits.Length - 1
-                If Size >= FormatFileSizeLimits(Index) Then
-                    Return String.Format(
-                        "{0:#,##0." & New String("#"c, DecimalPlaces) & "} " & FormatFileSizeUnits(Index),
-                        Size / CDbl(FormatFileSizeLimits(Index)))
-                End If
-            Next
-
-            Return "< 1 KB"
-
-        End Function
+        'End Function
 
 #Region "Primitive data generators"
 

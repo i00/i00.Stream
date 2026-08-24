@@ -1,5 +1,6 @@
 ﻿Imports System.IO
 Imports i00.Streams
+Imports i00
 
 Namespace Tests
     Partial Public NotInheritable Class StreamChunked
@@ -7,6 +8,7 @@ Namespace Tests
 
         <UnitTester.SimpleBenchmark()>
         Public Shared Function BaseFileSizesWithoutCompression() As UnitTester.SimpleTest.BenchmarkResult
+
             Dim Results As New Dictionary(Of String, String)
 
             Dim Options = New ChunkedStream.ChunkedStreamOptions() With {
@@ -16,39 +18,109 @@ Namespace Tests
 
             Dim Tests = {
                 New With {.Test = "No Data",
+                          .ExpectedIndexPageCount = 0,
                           .Action = Sub(Cs As ChunkedStream)
-
                                     End Sub},
                 New With {.Test = "Single Sparse Byte",
+                          .ExpectedIndexPageCount = 1,
                           .Action = Sub(Cs As ChunkedStream)
                                         Cs.SetLength(1)
                                     End Sub},
                 New With {.Test = "Single Byte",
+                          .ExpectedIndexPageCount = 1,
                           .Action = Sub(Cs As ChunkedStream)
                                         Cs.Write(0, New Byte() {1})
                                     End Sub},
                 New With {.Test = $"1 {CLng(Options.ChunkSize).FormatFileSizeFromBytes} Chunk",
+                          .ExpectedIndexPageCount = 1,
                           .Action = Sub(Cs As ChunkedStream)
                                         Cs.Write(0, GenerateRandomData(Options.ChunkSize, 1234))
                                     End Sub},
+                New With {.Test = "1 Chunk + 1 Byte(demoting)",
+                          .ExpectedIndexPageCount = 1,
+                          .Action = Sub(Cs As ChunkedStream)
+                                        Cs.Write(0, GenerateRandomData(Options.ChunkSize, 1234))
+                                        Cs.Write(Options.ChunkSize, New Byte() {5})
+                                        Cs.SetLength(Options.ChunkSize)
+                                    End Sub},
                 New With {.Test = "1 Chunk + 1 Byte",
+                          .ExpectedIndexPageCount = 2,
                           .Action = Sub(Cs As ChunkedStream)
                                         Cs.Write(0, GenerateRandomData(Options.ChunkSize + 1, 1234))
+                                    End Sub},
+                New With {.Test = "1 Chunk + 1 Byte(promoting)",
+                          .ExpectedIndexPageCount = 2,
+                          .Action = Sub(Cs As ChunkedStream)
+                                        ' Two separate Write calls, not one combined write - this
+                                        ' specifically forces the first write to land in the elided
+                                        ' single-record state, then forces graduation to real paging
+                                        ' mid-session on the second write, rather than only testing
+                                        ' what a fresh two-record file looks like from scratch.
+                                        Cs.Write(0, GenerateRandomData(Options.ChunkSize, 1234))
+                                        Cs.Write(Options.ChunkSize, New Byte() {5})
                                     End Sub}
             }
 
             For Each Test In Tests
+
                 Using Ms As New MemoryStream()
+
+                    Dim Expected As Byte()
+
                     Using Cs = ChunkedStream.Open(Ms, Options)
+
                         Test.Action.Invoke(Cs)
-                        Dim struct = Cs.GetStructure()
-                        Dim RegionString = Join(struct.Regions.GroupBy(Function(x) x.RegionType).Select(Function(x) $"{x.Key}({x.Count})").ToArray(), ", ")
-                        Results.Add(Test.Test, $"{Ms.Length:N0}    {RegionString}")
+
+                        Expected = Cs.ToArray()
+
+                        Cs.Validate()
+
+                        Dim StructBeforeReopen = Cs.GetStructure()
+
+                        AssertEqual(
+                            Test.ExpectedIndexPageCount,
+                            StructBeforeReopen.Regions.Where(Function(r) r.RegionType = ChunkedStreamStructure.RegionTypes.IndexPage).Count,
+                            $"[{Test.Test}] Unexpected IndexPage count before reopen - elision did not engage/disengage as expected.")
+
                     End Using
+
+                    ' The size numbers alone only prove the write side elided or graduated as
+                    ' expected. Reopening is what actually exercises ReadPagedMetadata's
+                    ' synthesis path for the elided case, and confirms the graduated case
+                    ' didn't leave anything behind from the transition.
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                        AssertBytesEqual(
+                            Expected,
+                            Reopened.ToArray(),
+                            $"[{Test.Test}] Data mismatch after reopen.")
+
+                        Reopened.Validate()
+
+                        Reopened.Defragment(ChunkedStream.DefragTypes.Sequence)
+                        Dim StructAfterReopen = Reopened.GetStructure()
+
+                        AssertEqual(
+                            Test.ExpectedIndexPageCount,
+                            StructAfterReopen.Regions.Where(Function(r) r.RegionType = ChunkedStreamStructure.RegionTypes.IndexPage).Count,
+                            $"[{Test.Test}] Unexpected IndexPage count after reopen.")
+
+                        Dim RegionString =
+                            Join(StructAfterReopen.Regions.GroupBy(Function(x) x.RegionType).
+                                                           Select(Function(x) $"{x.Key}({x.Count})").
+                                                           ToArray(), ", ")
+
+                        Results.Add(Test.Test, $"{Ms.Length:N0} B {RegionString}")
+
+                    End Using
+
                 End Using
+
             Next
 
-            Return New UnitTester.SimpleTest.BenchmarkResult($"{Join(Results.Select(Function(x) $"{x.Key,-20}: {x.Value}").ToArray, vbCrLf)}")
+            Return New UnitTester.SimpleTest.BenchmarkResult(
+                $"{Join(Results.Select(Function(x) $"{x.Key}: {x.Value}").ToArray, vbCrLf)}")
+
         End Function
 
         '''' <summary>

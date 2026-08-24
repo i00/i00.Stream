@@ -577,6 +577,30 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' True when the entire file's physical-record state is exactly one unshared record
+        ''' sitting at the deterministic start of the data area. In this state, no physical
+        ''' record page or descriptor needs to be persisted at all - the record's own
+        ''' self-describing header (PlainLength/PayloadLength) plus its fixed offset are enough
+        ''' to reconstruct its index entry on Open(), and RefCount is trivially 1.
+        ''' </summary>
+        Private Function CanElidePhysicalRecordPaging() As Boolean
+
+            If _Extents.Count <> 1 Then Return False
+            If _Extents(0).PhysicalRecordId = SparsePhysicalRecordId Then Return False
+            If _PhysicalRecords.Count <> 1 Then Return False
+
+            Dim Record As PhysicalRecordEntry
+
+            If _PhysicalRecords.TryGetValue(_Extents(0).PhysicalRecordId, Record) = False Then Return False
+
+            If Record.RefCount <> 1 Then Return False
+            If Record.PhysicalOffset <> DataStartOffset Then Return False
+
+            Return True
+
+        End Function
+
         Private Function BuildMetadataRoot(DirectExtentPageDescriptors As IEnumerable(Of MetadataPageDescriptor),
                                            ExtentDirectoryDescriptors As IEnumerable(Of MetadataPageDescriptor),
                                            DirectPhysicalRecordPageDescriptors As IEnumerable(Of MetadataPageDescriptor),
@@ -626,11 +650,14 @@ Namespace Streams
 
             Dim Root(RootLengthWithoutMac + MacSize - 1) As Byte
 
+            Dim EffectivePhysicalRecordCount =
+                If(CanElidePhysicalRecordPaging(), 0, _PhysicalRecords.Count)
+
             Buffer.BlockCopy(MetadataRootMagic, 0, Root, 0, MetadataRootMagic.Length)
             Buffer.BlockCopy(BitConverter.GetBytes(_IndexPageEntryCount), 0, Root, 8, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(_IndexDirectoryEntryCount), 0, Root, 12, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(CLng(_Extents.Count)), 0, Root, 16, 8)
-            Buffer.BlockCopy(BitConverter.GetBytes(CLng(_PhysicalRecords.Count)), 0, Root, 24, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(CLng(EffectivePhysicalRecordCount)), 0, Root, 24, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(_NextPhysicalRecordId), 0, Root, 32, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(DirectExtentList.Count), 0, Root, 40, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(ExtentDirectoryList.Count), 0, Root, 44, 4)
@@ -734,6 +761,8 @@ Namespace Streams
             Dim RequiredPhysicalRecordPageCount =
                 GetIndexPageCount(_PhysicalRecords.Count,
                                     _IndexPageEntryCount)
+
+            If CanElidePhysicalRecordPaging() Then RequiredPhysicalRecordPageCount = 0
 
             Dim RemovedPhysicalRecordPages =
                 _PhysicalRecordPageDescriptors.Keys.
@@ -992,6 +1021,37 @@ Namespace Streams
             Dim Extents = ReadExtentPages(Fs, ExtentPageDescriptors, Root.ExtentCount, IndexPageEntryCount)
             Dim PhysicalRecords = ReadPhysicalRecordPages(Fs, PhysicalRecordPageDescriptors, Root.PhysicalRecordCount, IndexPageEntryCount)
             Dim HoleRecords = ReadHoleDirectoryPages(Fs, Root.HoleDirectoryPageDescriptors)
+
+            If PhysicalRecords.Count = 0 AndAlso
+               Extents.Count = 1 AndAlso
+               Extents(0).PhysicalRecordId <> SparsePhysicalRecordId Then
+
+                Dim RecordId = Extents(0).PhysicalRecordId
+                Dim Header(ChunkRecordHeaderSize - 1) As Byte
+
+                Fs.Position = DataStartOffset
+                ReadExactly(Fs, Header, 0, Header.Length)
+
+                Dim StoredRecordId = BitConverter.ToInt64(Header, 0)
+
+                If StoredRecordId <> RecordId Then
+                    Throw New InvalidDataException(
+                        $"Expected an elided physical record {RecordId} at the start of the data area, found {StoredRecordId}.")
+                End If
+
+                Dim PlainLength = BitConverter.ToInt32(Header, ChunkPlainLengthOffset)
+                Dim PayloadLength = BitConverter.ToInt32(Header, ChunkPayloadLengthOffset)
+
+                PhysicalRecords(RecordId) =
+                    New PhysicalRecordEntry With {
+                        .RecordId = RecordId,
+                        .PhysicalOffset = DataStartOffset,
+                        .PhysicalLength = ChunkRecordDataOffset + PayloadLength + MacSize,
+                        .PlainLength = PlainLength,
+                        .RefCount = 1
+                    }
+
+            End If
 
             Return New MetadataReadResult With {
                 .IndexPageEntryCount = Root.IndexPageEntryCount,
@@ -1266,6 +1326,10 @@ Namespace Streams
                 Next
 
             Next
+
+            If Result.Count <> ExtentCount Then
+                Throw New InvalidDataException("Loaded extent-record count does not match metadata root.")
+            End If
 
             Return Result
 
