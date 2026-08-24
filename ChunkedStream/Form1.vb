@@ -65,6 +65,18 @@ Public Class Form1
         'Debug.Assert(Md51 = Md52)
 
 
+        'Using ms As New MemoryStream()
+        '    Using cs = ChunkedStream.Open(ms)
+        '        Using efs = New EmbeddedFileSystem(cs)
+        '            Dim FileID = efs.CreateFile(efs.RootAnchorId, "Test.png")
+        '            Using fs = efs.OpenFile(FileID)
+        '                Using b As New Bitmap("C:\Users\Kris\Desktop\_\1-4000\1f4ab 2650.png")
+        '                    b.Save(fs, Imaging.ImageFormat.Png)
+        '                End Using
+        '            End Using
+        '        End Using
+        '    End Using
+        'End Using
 
         'Test("C:\Games\Vampire The Masquerade - Bloodlines.zip")
         'Test("C:\Windows\System32\mrt.exe")
