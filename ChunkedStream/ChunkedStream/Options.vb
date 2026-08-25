@@ -448,111 +448,119 @@ Namespace Streams
                                      Optional ProgressCallback As StreamProgressCallback = Nothing,
                                      Optional Durable As Boolean = True) As ApplyOptionsResult
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return ApplyOptionsCore(Types, ProgressCallback, Durable)
+            End Using
 
-                ThrowIfDisposed()
-                InvalidateChunkCache()
+        End Function
 
-                Dim Result As New ApplyOptionsResult With {
-                    .PhysicalLengthBefore = _Fs.Length,
-                    .PhysicalLengthAfter = _Fs.Length
-                }
+        Private Function ApplyOptionsCore(Optional Types As ApplyOptionTypes = ApplyOptionTypes.All,
+                                     Optional ProgressCallback As StreamProgressCallback = Nothing,
+                                     Optional Durable As Boolean = True) As ApplyOptionsResult
 
-                If Types = ApplyOptionTypes.None Then
-                    Return Result
-                End If
 
-                Dim CancellationToken As New CancellationToken()
+            ThrowIfDisposed()
+            InvalidateChunkCache()
 
-                If Types.HasFlag(ApplyOptionTypes.ChunkSize) AndAlso NeedsChunkSizeRewrite() Then
+            Dim Result As New ApplyOptionsResult With {
+                .PhysicalLengthBefore = _Fs.Length,
+                .PhysicalLengthAfter = _Fs.Length
+            }
 
-                    ApplyChunkSizeOptions(Result, ProgressCallback, CancellationToken)
+            If Types = ApplyOptionTypes.None Then
+                Return Result
+            End If
 
-                    If CancellationToken.Cancel Then
-                        Result.WasCancelled = True
-                        Result.PhysicalLengthAfter = _Fs.Length
-                        Return Result
-                    End If
+            Dim CancellationToken As New CancellationToken()
 
-                    Dim RemovedFileMasterKeyAfterChunkSizeRewrite = False
+            If Types.HasFlag(ApplyOptionTypes.ChunkSize) AndAlso NeedsChunkSizeRewrite() Then
 
-                    If Types.HasFlag(ApplyOptionTypes.Encryption) Then
-                        RemovedFileMasterKeyAfterChunkSizeRewrite = RemoveUnusedFileMasterKeyIfPossible()
-                    End If
+                ApplyChunkSizeOptions(Result, ProgressCallback, CancellationToken)
 
-                    If HasOpenCheckpoint = False Then
-                        PersistIndexAndHeader(_IndexOffset, Durable)
-                    End If
-
+                If CancellationToken.Cancel Then
+                    Result.WasCancelled = True
                     Result.PhysicalLengthAfter = _Fs.Length
                     Return Result
-
                 End If
 
-                If Types.HasFlag(ApplyOptionTypes.Sparseness) AndAlso Options.StoreSparseChunks Then
+                Dim RemovedFileMasterKeyAfterChunkSizeRewrite = False
 
-                    MaterialiseSparseExtents(Result, ProgressCallback, CancellationToken)
-
-                    If CancellationToken.Cancel Then
-                        Result.WasCancelled = True
-                        Result.PhysicalLengthAfter = _Fs.Length
-                        Return Result
-                    End If
-
+                If Types.HasFlag(ApplyOptionTypes.Encryption) Then
+                    RemovedFileMasterKeyAfterChunkSizeRewrite = RemoveUnusedFileMasterKeyIfPossible()
                 End If
 
-                Dim RecordIds = _PhysicalRecords.Values.
-                                 Where(Function(record) record.RefCount > 0).
-                                 OrderBy(Function(record) record.RecordId).
-                                 Select(Function(record) record.RecordId).
-                                 ToList()
-
-                Dim TotalRecords = Math.Max(1, RecordIds.Count)
-                Dim ProcessedRecords = 0
-
-                For Each RecordId In RecordIds
-
-                    If CancellationToken.Cancel Then
-                        Result.WasCancelled = True
-                        Exit For
-                    End If
-
-                    If _PhysicalRecords.ContainsKey(RecordId) = False Then
-                        ProcessedRecords += 1
-                        Continue For
-                    End If
-
-                    Result.ExaminedChunks += 1
-
-                    If ApplyRecordOptions(RecordId, Types, Result) Then
-                        Result.RewrittenChunks += 1
-                    End If
-
-                    ProcessedRecords += 1
-
-                    ReportProgress(ProgressCallback,
-                                   ProcessedRecords,
-                                   TotalRecords,
-                                   ProcessUnitTypes.Arbitrary,
-                                   CancellationToken)
-
-                Next
-
-                Dim RemovedFileMasterKey = False
-
-                If Result.WasCancelled = False AndAlso Types.HasFlag(ApplyOptionTypes.Encryption) Then
-                    RemovedFileMasterKey = RemoveUnusedFileMasterKeyIfPossible()
-                End If
-
-                If HasOpenCheckpoint = False AndAlso (Result.RewrittenChunks > 0 OrElse RemovedFileMasterKey) Then
+                If HasOpenCheckpoint = False Then
                     PersistIndexAndHeader(_IndexOffset, Durable)
                 End If
 
                 Result.PhysicalLengthAfter = _Fs.Length
-
                 Return Result
 
-            End SyncLock
+            End If
+
+            If Types.HasFlag(ApplyOptionTypes.Sparseness) AndAlso Options.StoreSparseChunks Then
+
+                MaterialiseSparseExtents(Result, ProgressCallback, CancellationToken)
+
+                If CancellationToken.Cancel Then
+                    Result.WasCancelled = True
+                    Result.PhysicalLengthAfter = _Fs.Length
+                    Return Result
+                End If
+
+            End If
+
+            Dim RecordIds = _PhysicalRecords.Values.
+                             Where(Function(record) record.RefCount > 0).
+                             OrderBy(Function(record) record.RecordId).
+                             Select(Function(record) record.RecordId).
+                             ToList()
+
+            Dim TotalRecords = Math.Max(1, RecordIds.Count)
+            Dim ProcessedRecords = 0
+
+            For Each RecordId In RecordIds
+
+                If CancellationToken.Cancel Then
+                    Result.WasCancelled = True
+                    Exit For
+                End If
+
+                If _PhysicalRecords.ContainsKey(RecordId) = False Then
+                    ProcessedRecords += 1
+                    Continue For
+                End If
+
+                Result.ExaminedChunks += 1
+
+                If ApplyRecordOptions(RecordId, Types, Result) Then
+                    Result.RewrittenChunks += 1
+                End If
+
+                ProcessedRecords += 1
+
+                ReportProgress(ProgressCallback,
+                               ProcessedRecords,
+                               TotalRecords,
+                               ProcessUnitTypes.Arbitrary,
+                               CancellationToken)
+
+            Next
+
+            Dim RemovedFileMasterKey = False
+
+            If Result.WasCancelled = False AndAlso Types.HasFlag(ApplyOptionTypes.Encryption) Then
+                RemovedFileMasterKey = RemoveUnusedFileMasterKeyIfPossible()
+            End If
+
+            If HasOpenCheckpoint = False AndAlso (Result.RewrittenChunks > 0 OrElse RemovedFileMasterKey) Then
+                PersistIndexAndHeader(_IndexOffset, Durable)
+            End If
+
+            Result.PhysicalLengthAfter = _Fs.Length
+
+            Return Result
+
 
         End Function
 
@@ -1107,8 +1115,7 @@ Namespace Streams
 
             Dim Header(ChunkRecordHeaderSize - 1) As Byte
 
-            _Fs.Position = Record.PhysicalOffset
-            ReadExactly(_Fs, Header, 0, Header.Length)
+            ReadAt(Record.PhysicalOffset, Header, 0, Header.Length)
 
             Dim StoredRecordId = BitConverter.ToInt64(Header, 0)
 

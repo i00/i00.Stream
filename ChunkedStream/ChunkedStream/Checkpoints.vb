@@ -34,24 +34,32 @@ Namespace Streams
         ''' </summary>
         Public ReadOnly Property HasActiveCheckpoint As Boolean
             Get
-                SyncLock _SyncRoot
-                    ThrowIfDisposed()
-                    Return HasOpenCheckpoint
-                End SyncLock
+                Using EnterStateLock()
+                    Return HasActiveCheckpointCore()
+                End Using
             End Get
         End Property
+
+        Private Function HasActiveCheckpointCore() As Boolean
+            ThrowIfDisposed()
+            Return HasOpenCheckpoint
+        End Function
 
         ''' <summary>
         ''' Number of currently active nested checkpoints.
         ''' </summary>
         Public ReadOnly Property CheckpointDepth As Integer
             Get
-                SyncLock _SyncRoot
-                    ThrowIfDisposed()
-                    Return _CheckpointStack.Count
-                End SyncLock
+                Using EnterStateLock()
+                    Return GetCheckpointDepthCore()
+                End Using
             End Get
         End Property
+
+        Private Function GetCheckpointDepthCore() As Integer
+            ThrowIfDisposed()
+            Return _CheckpointStack.Count
+        End Function
 
         Private ReadOnly Property HasOpenCheckpoint As Boolean
             Get
@@ -246,101 +254,126 @@ Namespace Streams
         ''' </remarks>
         Public Function CreateCheckpoint() As ChunkedStreamCheckpoint
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return CreateCheckpointCore()
+            End Using
 
-                ThrowIfDisposed()
+        End Function
 
-                Dim Checkpoint = New ChunkedStreamCheckpoint(Me, _CheckpointStack.Count + 1)
+        Private Function CreateCheckpointCore() As ChunkedStreamCheckpoint
 
-                _CheckpointStack.Add(Checkpoint)
 
-                ' Only the outermost checkpoint owns the recovery state.
-                If _CheckpointStack.Count = 1 Then
-                    WriteCheckpointRecoveryState()
-                End If
+            ThrowIfDisposed()
 
-                Return Checkpoint
+            Dim Checkpoint = New ChunkedStreamCheckpoint(Me, _CheckpointStack.Count + 1)
 
-            End SyncLock
+            _CheckpointStack.Add(Checkpoint)
+
+            ' Only the outermost checkpoint owns the recovery state.
+            If _CheckpointStack.Count = 1 Then
+                WriteCheckpointRecoveryState()
+            End If
+
+            Return Checkpoint
+
 
         End Function
 
         Private Sub CommitCheckpoint(Checkpoint As ChunkedStreamCheckpoint,
                                      Durable As Boolean)
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                CommitCheckpointCore(Checkpoint, Durable)
+            End Using
 
-                ThrowIfDisposed()
-                EnsureTopCheckpoint(Checkpoint)
+        End Sub
 
-                If _CheckpointStack.Count > 1 Then
-                    Checkpoint.State.Capture(Me)
-                    Checkpoint.MarkCommitted()
-                    Return
-                End If
+        Private Sub CommitCheckpointCore(Checkpoint As ChunkedStreamCheckpoint,
+                                     Durable As Boolean)
 
-                Dim CommitIndexOffset = Math.Max(_Fs.Length, GetDataEndFromIndex())
 
-                PersistIndexAndHeader(CommitIndexOffset, Durable)
+            ThrowIfDisposed()
+            EnsureTopCheckpoint(Checkpoint)
 
+            If _CheckpointStack.Count > 1 Then
                 Checkpoint.State.Capture(Me)
-
-                ReclaimPendingPhysicalRecords()
-                WriteCheckpointRecoveryState()
-
                 Checkpoint.MarkCommitted()
+                Return
+            End If
 
-            End SyncLock
+            Dim CommitIndexOffset = Math.Max(_Fs.Length, GetDataEndFromIndex())
+
+            PersistIndexAndHeader(CommitIndexOffset, Durable)
+
+            Checkpoint.State.Capture(Me)
+
+            ReclaimPendingPhysicalRecords()
+            WriteCheckpointRecoveryState()
+
+            Checkpoint.MarkCommitted()
+
 
         End Sub
 
         Private Sub RollbackCheckpoint(Checkpoint As ChunkedStreamCheckpoint)
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                RollbackCheckpointCore(Checkpoint)
+            End Using
 
-                ThrowIfDisposed()
-                EnsureTopCheckpoint(Checkpoint)
+        End Sub
 
-                RestoreCheckpointState(Checkpoint.State)
+        Private Sub RollbackCheckpointCore(Checkpoint As ChunkedStreamCheckpoint)
 
-                If _CheckpointStack.Count = 1 Then
-                    WriteCheckpointRecoveryState()
-                End If
 
-                Checkpoint.MarkRolledBack()
+            ThrowIfDisposed()
+            EnsureTopCheckpoint(Checkpoint)
 
-            End SyncLock
+            RestoreCheckpointState(Checkpoint.State)
+
+            If _CheckpointStack.Count = 1 Then
+                WriteCheckpointRecoveryState()
+            End If
+
+            Checkpoint.MarkRolledBack()
+
 
         End Sub
 
         Private Sub CloseCheckpoint(Checkpoint As ChunkedStreamCheckpoint)
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                CloseCheckpointCore(Checkpoint)
+            End Using
 
-                If _Disposed Then
-                    Return
+        End Sub
+
+        Private Sub CloseCheckpointCore(Checkpoint As ChunkedStreamCheckpoint)
+
+
+            If _Disposed Then
+                Return
+            End If
+
+            ThrowIfDisposed()
+            EnsureTopCheckpoint(Checkpoint)
+
+            RestoreCheckpointState(Checkpoint.State)
+
+            _CheckpointStack.RemoveAt(_CheckpointStack.Count - 1)
+            Checkpoint.MarkDisposed()
+
+            If _CheckpointStack.Count = 0 Then
+
+                ClearRecoveryState()
+                ReclaimPendingPhysicalRecords()
+
+                If RemoveUnusedFileMasterKeyIfPossible() Then
+                    PersistIndexAndHeader(_IndexOffset, True)
                 End If
 
-                ThrowIfDisposed()
-                EnsureTopCheckpoint(Checkpoint)
+            End If
 
-                RestoreCheckpointState(Checkpoint.State)
-
-                _CheckpointStack.RemoveAt(_CheckpointStack.Count - 1)
-                Checkpoint.MarkDisposed()
-
-                If _CheckpointStack.Count = 0 Then
-
-                    ClearRecoveryState()
-                    ReclaimPendingPhysicalRecords()
-
-                    If RemoveUnusedFileMasterKeyIfPossible() Then
-                        PersistIndexAndHeader(_IndexOffset, True)
-                    End If
-
-                End If
-
-            End SyncLock
 
         End Sub
 

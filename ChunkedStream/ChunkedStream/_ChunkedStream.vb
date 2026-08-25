@@ -7,6 +7,8 @@
 '   - Uses only APIs available in .NET Framework 4.8.
 '   - Inherits Stream and supports standard stream operations such as Read, Write,
 '     Seek, Position, Length, SetLength and Flush.
+'   - Public stateful operations acquire a SemaphoreSlim-based state lock.
+'   - Lock-free Core methods compose operations without reacquiring the lock.
 '   - The underlying stream remains owned by the caller.
 '     i.e. Disposing ChunkedStream does not dispose the underlying stream.
 '
@@ -269,33 +271,37 @@
 Imports System.IO
 Imports System.Security.Cryptography
 Imports System.Text
+Imports System.Threading
 
 Namespace Streams
 
-    Public NotInheritable Class ChunkedStream
+    Public Class ChunkedStream
         Inherits Stream
 
         Private _Position As Long
         Public Overrides Property Position As Long
             Get
-                SyncLock _SyncRoot
-                    ThrowIfDisposed()
-                    Return _Position
-                End SyncLock
+                Using EnterStateLock()
+                    Return GetPositionCore()
+                End Using
             End Get
             Set
-                SyncLock _SyncRoot
-                    ThrowIfDisposed()
-
-                    If Value < 0 Then
-                        Throw New ArgumentOutOfRangeException(NameOf(Value))
-                    End If
-
-                    _Position = Value
-
-                End SyncLock
+                Using EnterStateLock()
+                    SetPositionCore(Value)
+                End Using
             End Set
         End Property
+
+        Private Function GetPositionCore() As Long
+            ThrowIfDisposed()
+            Return _Position
+        End Function
+
+        Private Sub SetPositionCore(Value As Long)
+            ThrowIfDisposed()
+            If Value < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Value))
+            _Position = Value
+        End Sub
 
         Public Overrides ReadOnly Property CanRead As Boolean
             Get
@@ -318,33 +324,28 @@ Namespace Streams
         Public Overrides Function Seek(Offset As Long,
                                        Origin As SeekOrigin) As Long
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return SeekCore(Offset, Origin)
+            End Using
 
-                ThrowIfDisposed()
+        End Function
 
-                Select Case Origin
+        Private Function SeekCore(Offset As Long, Origin As SeekOrigin) As Long
 
-                    Case SeekOrigin.Begin
+            ThrowIfDisposed()
 
-                        Position = Offset
+            Select Case Origin
+                Case SeekOrigin.Begin
+                    SetPositionCore(Offset)
+                Case SeekOrigin.Current
+                    SetPositionCore(_Position + Offset)
+                Case SeekOrigin.End
+                    SetPositionCore(_Length + Offset)
+                Case Else
+                    Throw New ArgumentOutOfRangeException(NameOf(Origin))
+            End Select
 
-                    Case SeekOrigin.Current
-
-                        Position = _Position + Offset
-
-                    Case SeekOrigin.[End]
-
-                        Position = _Length + Offset
-
-                    Case Else
-
-                        Throw New ArgumentOutOfRangeException(NameOf(Origin))
-
-                End Select
-
-                Return _Position
-
-            End SyncLock
+            Return _Position
 
         End Function
 
@@ -582,7 +583,109 @@ Namespace Streams
         End Structure
 
         Private ReadOnly _Fs As Stream
-        Private ReadOnly _SyncRoot As New Object()
+
+        <Flags>
+        Protected Enum PhysicalIoLockStates
+            None = 0
+            WriteLock = 1 << 0
+            ReadLock = 1 << 1
+            FullLock = WriteLock Or ReadLock
+        End Enum
+
+        Private ReadOnly _PhysicalIoLock As New SemaphoreSlim(1, 1)
+
+        ''' <summary>
+        ''' Selects which physical I/O operations use the shared physical-I/O lock.
+        ''' </summary>
+        ''' <remarks>
+        ''' Removing a lock flag is valid only when the corresponding Core operation
+        ''' does not use or modify the backing stream Position and is safe for the
+        ''' resulting concurrent access pattern.
+        ''' Read and write operations that request locking share one physical-I/O
+        ''' lock so position-based reads and writes cannot interfere with each other.
+        ''' </remarks>
+        Protected Overridable ReadOnly Property RequiredPhysicalIoLocks As PhysicalIoLockStates
+            Get
+                Return PhysicalIoLockStates.FullLock
+            End Get
+        End Property
+
+        Private Sub ReadAt(PhysicalOffset As Long, Buffer As Byte(), BufferOffset As Integer, Count As Integer)
+            ValidatePhysicalIoArguments(PhysicalOffset, Buffer, BufferOffset, Count)
+            If Count = 0 Then Return
+            If RequiredPhysicalIoLocks.HasFlag(PhysicalIoLockStates.ReadLock) Then
+                _PhysicalIoLock.Wait()
+                Try
+                    ReadAtCore(PhysicalOffset, Buffer, BufferOffset, Count)
+                Finally
+                    _PhysicalIoLock.Release()
+                End Try
+            Else
+                ReadAtCore(PhysicalOffset, Buffer, BufferOffset, Count)
+            End If
+        End Sub
+
+        Private Sub WriteAt(PhysicalOffset As Long, Buffer As Byte(), BufferOffset As Integer, Count As Integer)
+            ValidatePhysicalIoArguments(PhysicalOffset, Buffer, BufferOffset, Count)
+            If Count = 0 Then Return
+            If RequiredPhysicalIoLocks.HasFlag(PhysicalIoLockStates.WriteLock) Then
+                _PhysicalIoLock.Wait()
+                Try
+                    WriteAtCore(PhysicalOffset, Buffer, BufferOffset, Count)
+                Finally
+                    _PhysicalIoLock.Release()
+                End Try
+            Else
+                WriteAtCore(PhysicalOffset, Buffer, BufferOffset, Count)
+            End If
+        End Sub
+
+        Protected Overridable Sub ReadAtCore(PhysicalOffset As Long, Buffer As Byte(), BufferOffset As Integer, Count As Integer)
+            If RequiredPhysicalIoLocks <> PhysicalIoLockStates.FullLock Then
+                Throw New InvalidOperationException($"The default {NameOf(ReadAtCore)} implementation requires {NameOf(PhysicalIoLockStates.FullLock)}. Override {NameOf(ReadAtCore)} before removing any physical I/O lock flag.")
+            End If
+            _Fs.Position = PhysicalOffset
+            ReadExactly(_Fs, Buffer, BufferOffset, Count)
+        End Sub
+
+        Protected Overridable Sub WriteAtCore(PhysicalOffset As Long, Buffer As Byte(), BufferOffset As Integer, Count As Integer)
+            If RequiredPhysicalIoLocks <> PhysicalIoLockStates.FullLock Then
+                Throw New InvalidOperationException($"The default {NameOf(WriteAtCore)} implementation requires {NameOf(PhysicalIoLockStates.FullLock)}. Override {NameOf(WriteAtCore)} before removing any physical I/O lock flag.")
+            End If
+            _Fs.Position = PhysicalOffset
+            _Fs.Write(Buffer, BufferOffset, Count)
+        End Sub
+
+        Private Shared Sub ValidatePhysicalIoArguments(PhysicalOffset As Long, Buffer As Byte(), BufferOffset As Integer, Count As Integer)
+            If PhysicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PhysicalOffset))
+            If Buffer Is Nothing Then Throw New ArgumentNullException(NameOf(Buffer))
+            If BufferOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(BufferOffset))
+            If Count < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Count))
+            If BufferOffset > Buffer.Length - Count Then Throw New ArgumentException("Buffer offset and count exceed the buffer length.")
+        End Sub
+        Private ReadOnly _StateLock As New SemaphoreSlim(1, 1)
+        Private ReadOnly _StateLockDepth As New ThreadLocal(Of Integer)(Function() 0)
+
+        Private Function EnterStateLock() As IDisposable
+            If _StateLockDepth.Value = 0 Then _StateLock.Wait()
+            _StateLockDepth.Value += 1
+            Return New StateLockScope(Me)
+        End Function
+
+        Private NotInheritable Class StateLockScope
+            Implements IDisposable
+            Private _Owner As ChunkedStream
+            Public Sub New(Owner As ChunkedStream)
+                _Owner = Owner
+            End Sub
+            Public Sub Dispose() Implements IDisposable.Dispose
+                Dim Owner = _Owner
+                If Owner Is Nothing Then Return
+                _Owner = Nothing
+                Owner._StateLockDepth.Value -= 1
+                If Owner._StateLockDepth.Value = 0 Then Owner._StateLock.Release()
+            End Sub
+        End Class
 
         Private _Options As ChunkedStreamOptions
         Public Property Options As ChunkedStreamOptions
@@ -685,12 +788,16 @@ Namespace Streams
         ''' </summary>
         Public Overrides ReadOnly Property Length As Long
             Get
-                SyncLock _SyncRoot
-                    ThrowIfDisposed()
-                    Return _Length
-                End SyncLock
+                Using EnterStateLock()
+                    Return GetLengthCore()
+                End Using
             End Get
         End Property
+
+        Private Function GetLengthCore() As Long
+            ThrowIfDisposed()
+            Return _Length
+        End Function
 
         ''' <summary>
         ''' Preferred logical segment size used when
@@ -701,12 +808,16 @@ Namespace Streams
         ''' </summary>
         Public ReadOnly Property ChunkSize As Integer
             Get
-                SyncLock _SyncRoot
-                    ThrowIfDisposed()
-                    Return _ChunkSize
-                End SyncLock
+                Using EnterStateLock()
+                    Return GetChunkSizeCore()
+                End Using
             End Get
         End Property
+
+        Private Function GetChunkSizeCore() As Integer
+            ThrowIfDisposed()
+            Return _ChunkSize
+        End Function
 
         Private Sub New(Fs As Stream,
                         Header As Byte(),
@@ -1121,26 +1232,32 @@ Namespace Streams
         ''' </returns>
         Public Function ToArray() As Byte()
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return ToArrayCore()
+            End Using
 
-                ThrowIfDisposed()
+        End Function
 
-                If _Length > Integer.MaxValue Then
-                    Throw New InvalidOperationException(
-                        $"The logical length exceeds the maximum supported by an {NameOf(Array)}.")
-                End If
+        Private Function ToArrayCore() As Byte()
 
-                If _Length = 0 Then
-                    Return New Byte() {}
-                End If
 
-                Dim Result(CInt(_Length) - 1) As Byte
+            ThrowIfDisposed()
 
-                Read(0, Result)
+            If _Length > Integer.MaxValue Then
+                Throw New InvalidOperationException(
+                    $"The logical length exceeds the maximum supported by an {NameOf(Array)}.")
+            End If
 
-                Return Result
+            If _Length = 0 Then
+                Return New Byte() {}
+            End If
 
-            End SyncLock
+            Dim Result(CInt(_Length) - 1) As Byte
+
+            ReadCore(0, Result)
+
+            Return Result
+
 
         End Function
 
@@ -1156,41 +1273,58 @@ Namespace Streams
         Public Function ToArray(Offset As Long,
                                 Length As Integer) As Byte()
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return ToArrayCore(Offset, Length)
+            End Using
 
-                ThrowIfDisposed()
+        End Function
 
-                If Offset < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(Offset))
-                End If
+        Private Function ToArrayCore(Offset As Long,
+                                Length As Integer) As Byte()
 
-                If Length < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(Length))
-                End If
 
-                If Length = 0 Then
-                    Return New Byte() {}
-                End If
+            ThrowIfDisposed()
 
-                Dim Result(Length - 1) As Byte
+            If Offset < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Offset))
+            End If
 
-                Dim BytesRead = Read(Offset, Result)
+            If Length < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Length))
+            End If
 
-                If BytesRead = Length Then
-                    Return Result
-                End If
+            If Length = 0 Then
+                Return New Byte() {}
+            End If
 
-                Array.Resize(Result, BytesRead)
+            Dim Result(Length - 1) As Byte
 
+            Dim BytesRead = ReadCore(Offset, Result)
+
+            If BytesRead = Length Then
                 Return Result
+            End If
 
-            End SyncLock
+            Array.Resize(Result, BytesRead)
+
+            Return Result
+
 
         End Function
 
         Public Overrides Function Read(Buffer As Byte(),
                                        Offset As Integer,
                                        Count As Integer) As Integer
+
+            Using EnterStateLock()
+                Return ReadCore(Buffer, Offset, Count)
+            End Using
+
+        End Function
+
+        Private Overloads Function ReadCore(Buffer As Byte(),
+                                            Offset As Integer,
+                                            Count As Integer) As Integer
 
             If Buffer Is Nothing Then
                 Throw New ArgumentNullException(NameOf(Buffer))
@@ -1208,21 +1342,19 @@ Namespace Streams
                 Throw New ArgumentException("Offset and count exceed the buffer length.")
             End If
 
-            SyncLock _SyncRoot
 
-                ThrowIfDisposed()
+            ThrowIfDisposed()
 
-                Dim BytesRead As Integer =
-                    Read(_Position,
-                         Buffer,
-                         Offset,
-                         Count)
+            Dim BytesRead As Integer =
+                ReadCore(_Position,
+                     Buffer,
+                     Offset,
+                     Count)
 
-                _Position += BytesRead
+            _Position += BytesRead
 
-                Return BytesRead
+            Return BytesRead
 
-            End SyncLock
 
         End Function
 
@@ -1249,65 +1381,84 @@ Namespace Streams
                                        Optional OutputOffset As Integer = 0,
                                        Optional Count As Integer? = Nothing) As Integer
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return ReadCore(LogicalOffset, Output, OutputOffset, Count)
+            End Using
 
-                ThrowIfDisposed()
+        End Function
 
-                If Output Is Nothing Then Throw New ArgumentNullException(NameOf(Output))
-                If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
-                If OutputOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(OutputOffset))
-                If OutputOffset > Output.Length Then Throw New ArgumentException("Output offset exceeds the output buffer length.", NameOf(OutputOffset))
+        Private Overloads Function ReadCore(LogicalOffset As Long,
+                                       Output As Byte(),
+                                       Optional OutputOffset As Integer = 0,
+                                       Optional Count As Integer? = Nothing) As Integer
 
-                Dim EffectiveCount =
-                    If(Count.HasValue,
-                       Count.Value,
-                       Output.Length - OutputOffset)
 
-                If EffectiveCount < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Count))
-                If EffectiveCount > Output.Length - OutputOffset Then Throw New ArgumentException("Invalid offset/count.")
+            ThrowIfDisposed()
 
-                If EffectiveCount = 0 OrElse LogicalOffset >= _Length Then
-                    Return 0
+            If Output Is Nothing Then Throw New ArgumentNullException(NameOf(Output))
+            If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+            If OutputOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(OutputOffset))
+            If OutputOffset > Output.Length Then Throw New ArgumentException("Output offset exceeds the output buffer length.", NameOf(OutputOffset))
+
+            Dim EffectiveCount =
+                If(Count.HasValue,
+                   Count.Value,
+                   Output.Length - OutputOffset)
+
+            If EffectiveCount < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Count))
+            If EffectiveCount > Output.Length - OutputOffset Then Throw New ArgumentException("Invalid offset/count.")
+
+            If EffectiveCount = 0 OrElse LogicalOffset >= _Length Then
+                Return 0
+            End If
+
+            Dim ToRead = CInt(Math.Min(CLng(EffectiveCount), _Length - LogicalOffset))
+            Dim Remaining = ToRead
+            Dim CurrentLogicalOffset = LogicalOffset
+            Dim CurrentOutputOffset = OutputOffset
+
+            While Remaining > 0
+
+                Dim ExtentIndex = FindExtentIndex(CurrentLogicalOffset)
+
+                If ExtentIndex < 0 Then
+                    Throw New InvalidDataException($"No extent found for logical offset {CurrentLogicalOffset}.")
                 End If
 
-                Dim ToRead = CInt(Math.Min(CLng(EffectiveCount), _Length - LogicalOffset))
-                Dim Remaining = ToRead
-                Dim CurrentLogicalOffset = LogicalOffset
-                Dim CurrentOutputOffset = OutputOffset
+                Dim Extent = _Extents(ExtentIndex)
+                Dim OffsetInsideExtent = CInt(CurrentLogicalOffset - Extent.LogicalOffset)
+                Dim CopyLength = Math.Min(Remaining, Extent.LogicalLength - OffsetInsideExtent)
 
-                While Remaining > 0
+                ReadExtentBytes(Extent,
+                                OffsetInsideExtent,
+                                Output,
+                                CurrentOutputOffset,
+                                CopyLength)
 
-                    Dim ExtentIndex = FindExtentIndex(CurrentLogicalOffset)
+                CurrentLogicalOffset += CopyLength
+                CurrentOutputOffset += CopyLength
+                Remaining -= CopyLength
 
-                    If ExtentIndex < 0 Then
-                        Throw New InvalidDataException($"No extent found for logical offset {CurrentLogicalOffset}.")
-                    End If
+            End While
 
-                    Dim Extent = _Extents(ExtentIndex)
-                    Dim OffsetInsideExtent = CInt(CurrentLogicalOffset - Extent.LogicalOffset)
-                    Dim CopyLength = Math.Min(Remaining, Extent.LogicalLength - OffsetInsideExtent)
+            Return ToRead
 
-                    ReadExtentBytes(Extent,
-                                    OffsetInsideExtent,
-                                    Output,
-                                    CurrentOutputOffset,
-                                    CopyLength)
-
-                    CurrentLogicalOffset += CopyLength
-                    CurrentOutputOffset += CopyLength
-                    Remaining -= CopyLength
-
-                End While
-
-                Return ToRead
-
-            End SyncLock
 
         End Function
 
         Public Overrides Sub Write(Buffer As Byte(),
                                    Offset As Integer,
                                    Count As Integer)
+
+            Using EnterStateLock()
+                WriteCore(Buffer, Offset, Count)
+            End Using
+
+        End Sub
+
+        Private Overloads Sub WriteCore(Buffer As Byte(),
+                                        Offset As Integer,
+                                        Count As Integer)
 
             If Buffer Is Nothing Then
                 Throw New ArgumentNullException(NameOf(Buffer))
@@ -1325,18 +1476,16 @@ Namespace Streams
                 Throw New ArgumentException("Offset and count exceed the buffer length.")
             End If
 
-            SyncLock _SyncRoot
 
-                ThrowIfDisposed()
+            ThrowIfDisposed()
 
-                Write(_Position,
-                      Buffer,
-                      Offset,
-                      Count)
+            WriteCore(_Position,
+                  Buffer,
+                  Offset,
+                  Count)
 
-                _Position += Count
+            _Position += Count
 
-            End SyncLock
 
         End Sub
 
@@ -1363,66 +1512,74 @@ Namespace Streams
                                         Optional DataOffset As Integer = 0,
                                         Optional Count As Integer? = Nothing) As Integer
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return WriteCore(LogicalOffset, Input, DataOffset, Count)
+            End Using
 
-                ThrowIfDisposed()
+        End Function
 
-                If Input Is Nothing Then Throw New ArgumentNullException(NameOf(Input))
-                If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
-                If DataOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(DataOffset))
-                If DataOffset > Input.Length Then Throw New ArgumentException("Data offset exceeds the input buffer length.", NameOf(DataOffset))
+        Private Overloads Function WriteCore(LogicalOffset As Long,
+                                             Input As Byte(),
+                                             Optional DataOffset As Integer = 0,
+                                             Optional Count As Integer? = Nothing) As Integer
 
-                Dim EffectiveCount =
-                    If(Count.HasValue,
-                       Count.Value,
-                       Input.Length - DataOffset)
+            ThrowIfDisposed()
 
-                If EffectiveCount < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Count))
-                If EffectiveCount > Input.Length - DataOffset Then Throw New ArgumentException("Invalid offset/count.")
-                If EffectiveCount = 0 Then Return 0
+            If Input Is Nothing Then Throw New ArgumentNullException(NameOf(Input))
+            If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+            If DataOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(DataOffset))
+            If DataOffset > Input.Length Then Throw New ArgumentException("Data offset exceeds the input buffer length.", NameOf(DataOffset))
 
-                If LogicalOffset > Long.MaxValue - CLng(EffectiveCount) Then
-                    Throw New ArgumentOutOfRangeException(NameOf(Count), "The write would exceed the maximum supported logical offset.")
-                End If
+            Dim EffectiveCount =
+                If(Count.HasValue,
+                   Count.Value,
+                   Input.Length - DataOffset)
 
-                InvalidateChunkCache()
+            If EffectiveCount < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Count))
+            If EffectiveCount > Input.Length - DataOffset Then Throw New ArgumentException("Invalid offset/count.")
+            If EffectiveCount = 0 Then Return 0
 
-                If LogicalOffset > _Length Then
-                    InsertSparseRange(_Length, LogicalOffset - _Length)
-                End If
+            If LogicalOffset > Long.MaxValue - CLng(EffectiveCount) Then
+                Throw New ArgumentOutOfRangeException(NameOf(Count), "The write would exceed the maximum supported logical offset.")
+            End If
 
-                Dim ExistingLength =
-                    If(LogicalOffset < _Length,
-                       Math.Min(CLng(EffectiveCount), _Length - LogicalOffset),
-                       0L)
+            InvalidateChunkCache()
 
-                If ExistingLength > 0 Then
+            If LogicalOffset > _Length Then
+                InsertSparseRange(_Length, LogicalOffset - _Length)
+            End If
 
-                    Dim ExistingCount = CInt(ExistingLength)
-                    Dim ReplacementExtents = BuildExtentsFromBuffer(Input, DataOffset, ExistingCount)
+            Dim ExistingLength =
+                If(LogicalOffset < _Length,
+                   Math.Min(CLng(EffectiveCount), _Length - LogicalOffset),
+                   0L)
 
-                    ReplaceRangeCore(LogicalOffset, ExistingLength, ReplacementExtents)
+            If ExistingLength > 0 Then
 
-                End If
+                Dim ExistingCount = CInt(ExistingLength)
+                Dim ReplacementExtents = BuildExtentsFromBuffer(Input, DataOffset, ExistingCount)
 
-                If ExistingLength < EffectiveCount Then
+                ReplaceRangeCore(LogicalOffset, ExistingLength, ReplacementExtents)
 
-                    Dim AppendOffset = LogicalOffset + ExistingLength
-                    Dim AppendDataOffset = DataOffset + CInt(ExistingLength)
-                    Dim AppendCount = EffectiveCount - CInt(ExistingLength)
-                    Dim AppendExtents = BuildExtentsFromBuffer(Input, AppendDataOffset, AppendCount)
+            End If
 
-                    InsertExtentsCore(AppendOffset, AppendExtents)
+            If ExistingLength < EffectiveCount Then
 
-                End If
+                Dim AppendOffset = LogicalOffset + ExistingLength
+                Dim AppendDataOffset = DataOffset + CInt(ExistingLength)
+                Dim AppendCount = EffectiveCount - CInt(ExistingLength)
+                Dim AppendExtents = BuildExtentsFromBuffer(Input, AppendDataOffset, AppendCount)
 
-                If HasOpenCheckpoint = False Then
-                    PersistIndexAndHeader(_IndexOffset)
-                End If
+                InsertExtentsCore(AppendOffset, AppendExtents)
 
-                Return EffectiveCount
+            End If
 
-            End SyncLock
+            If HasOpenCheckpoint = False Then
+                PersistIndexAndHeader(_IndexOffset)
+            End If
+
+            Return EffectiveCount
+
 
         End Function
 
@@ -1431,31 +1588,37 @@ Namespace Streams
         ''' </summary>
         Public Overrides Sub SetLength(Length As Long)
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                SetLengthCore(Length)
+            End Using
 
-                ThrowIfDisposed()
+        End Sub
 
-                If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
+        Private Sub SetLengthCore(Length As Long)
 
-                InvalidateChunkCache()
 
-                If Length = _Length Then Return
+            ThrowIfDisposed()
 
-                If Length < _Length Then
+            If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
 
-                    RemoveRangeCore(Length, _Length - Length, False)
+            InvalidateChunkCache()
 
-                Else
+            If Length = _Length Then Return
 
-                    InsertSparseRange(_Length, Length - _Length)
+            If Length < _Length Then
 
-                End If
+                RemoveRangeCore(Length, _Length - Length, False)
 
-                If HasOpenCheckpoint = False Then
-                    PersistIndexAndHeader(_IndexOffset)
-                End If
+            Else
 
-            End SyncLock
+                InsertSparseRange(_Length, Length - _Length)
+
+            End If
+
+            If HasOpenCheckpoint = False Then
+                PersistIndexAndHeader(_IndexOffset)
+            End If
+
 
         End Sub
 
@@ -1484,100 +1647,112 @@ Namespace Streams
                            Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset =
                                AnchorActionsAtLogicalOffset.Use)
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                ReplaceCore(LogicalOffset, Length, Data, DataOffset, Count, AnchorActionAtLogicalOffset)
+            End Using
 
-                ThrowIfDisposed()
+        End Sub
 
-                If LogicalOffset < 0 OrElse LogicalOffset > _Length Then
-                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+        Private Sub ReplaceCore(LogicalOffset As Long,
+                           Length As Long,
+                           Data As Byte(),
+                           DataOffset As Integer,
+                           Count As Integer,
+                           Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset =
+                               AnchorActionsAtLogicalOffset.Use)
+
+
+            ThrowIfDisposed()
+
+            If LogicalOffset < 0 OrElse LogicalOffset > _Length Then
+                Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+            End If
+
+            If Length < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Length))
+            End If
+
+            If Data Is Nothing Then
+                Throw New ArgumentNullException(NameOf(Data))
+            End If
+
+            If DataOffset < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(DataOffset))
+            End If
+
+            If Count < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Count))
+            End If
+
+            If DataOffset > Data.Length OrElse Count > Data.Length - DataOffset Then
+                Throw New ArgumentException("Invalid offset/count.")
+            End If
+
+            If LogicalOffset >= _Length AndAlso Length > 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+            End If
+
+            InvalidateChunkCache()
+
+            Dim ActualLength =
+                If(LogicalOffset < _Length,
+                   Math.Min(Length, _Length - LogicalOffset),
+                   0L)
+
+            '
+            ' Capture the anchor at the original replacement start before removing
+            ' the old range. Anchors strictly inside the removed range are destroyed
+            ' by RemoveRangeCore. An anchor at the removal end survives.
+            '
+            Dim StartAnchorId =
+                FindAnchorIdAtLogicalOffset(LogicalOffset)
+
+            If ActualLength > 0 Then
+                RemoveRangeCore(LogicalOffset,
+                                ActualLength,
+                                False)
+            End If
+
+            If Count > 0 Then
+
+                Dim NewExtents =
+                    BuildExtentsFromBuffer(Data,
+                                           DataOffset,
+                                           Count)
+
+                If StartAnchorId > 0 AndAlso
+                   AnchorActionAtLogicalOffset = AnchorActionsAtLogicalOffset.Use Then
+
+                    Dim FirstExtent = NewExtents(0)
+
+                    FirstExtent.AnchorId = StartAnchorId
+                    NewExtents(0) = FirstExtent
+
                 End If
-
-                If Length < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(Length))
-                End If
-
-                If Data Is Nothing Then
-                    Throw New ArgumentNullException(NameOf(Data))
-                End If
-
-                If DataOffset < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(DataOffset))
-                End If
-
-                If Count < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(Count))
-                End If
-
-                If DataOffset > Data.Length OrElse Count > Data.Length - DataOffset Then
-                    Throw New ArgumentException("Invalid offset/count.")
-                End If
-
-                If LogicalOffset >= _Length AndAlso Length > 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
-                End If
-
-                InvalidateChunkCache()
-
-                Dim ActualLength =
-                    If(LogicalOffset < _Length,
-                       Math.Min(Length, _Length - LogicalOffset),
-                       0L)
 
                 '
-                ' Capture the anchor at the original replacement start before removing
-                ' the old range. Anchors strictly inside the removed range are destroyed
-                ' by RemoveRangeCore. An anchor at the removal end survives.
+                ' Always use TransformAway for this insertion.
                 '
-                Dim StartAnchorId =
-                    FindAnchorIdAtLogicalOffset(LogicalOffset)
+                ' The original start anchor, when retained, has already been assigned
+                ' explicitly to the first replacement extent above.
+                '
+                ' An anchor at the original removal end temporarily occupies
+                ' LogicalOffset after removal. TransformAway keeps that anchor attached
+                ' to the surviving data and pushes it after the replacement data.
+                '
+                InsertExtentsCore(
+                    LogicalOffset,
+                    NewExtents,
+                    AnchorActionsAtLogicalOffset.TransformAway)
 
-                If ActualLength > 0 Then
-                    RemoveRangeCore(LogicalOffset,
-                                    ActualLength,
-                                    False)
-                End If
+            End If
 
-                If Count > 0 Then
+            RebuildAnchorIndex()
 
-                    Dim NewExtents =
-                        BuildExtentsFromBuffer(Data,
-                                               DataOffset,
-                                               Count)
+            If HasOpenCheckpoint = False Then
+                PersistIndexAndHeader(_IndexOffset)
+            End If
 
-                    If StartAnchorId > 0 AndAlso
-                       AnchorActionAtLogicalOffset = AnchorActionsAtLogicalOffset.Use Then
-
-                        Dim FirstExtent = NewExtents(0)
-
-                        FirstExtent.AnchorId = StartAnchorId
-                        NewExtents(0) = FirstExtent
-
-                    End If
-
-                    '
-                    ' Always use TransformAway for this insertion.
-                    '
-                    ' The original start anchor, when retained, has already been assigned
-                    ' explicitly to the first replacement extent above.
-                    '
-                    ' An anchor at the original removal end temporarily occupies
-                    ' LogicalOffset after removal. TransformAway keeps that anchor attached
-                    ' to the surviving data and pushes it after the replacement data.
-                    '
-                    InsertExtentsCore(
-                        LogicalOffset,
-                        NewExtents,
-                        AnchorActionsAtLogicalOffset.TransformAway)
-
-                End If
-
-                RebuildAnchorIndex()
-
-                If HasOpenCheckpoint = False Then
-                    PersistIndexAndHeader(_IndexOffset)
-                End If
-
-            End SyncLock
 
         End Sub
 
@@ -1587,80 +1762,97 @@ Namespace Streams
                                Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset =
                                    AnchorActionsAtLogicalOffset.TransformAway)
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                CloneInsertCore(SourceLogicalOffset, CloneLength, TargetLogicalOffset, AnchorActionAtLogicalOffset)
+            End Using
 
-                ThrowIfDisposed()
+        End Sub
 
-                If SourceLogicalOffset < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(SourceLogicalOffset))
-                End If
+        Private Sub CloneInsertCore(SourceLogicalOffset As Long,
+                               CloneLength As Long,
+                               TargetLogicalOffset As Long,
+                               Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset =
+                                   AnchorActionsAtLogicalOffset.TransformAway)
 
-                If CloneLength < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(CloneLength))
-                End If
 
-                If TargetLogicalOffset < 0 OrElse TargetLogicalOffset > _Length Then
-                    Throw New ArgumentOutOfRangeException(NameOf(TargetLogicalOffset))
-                End If
+            ThrowIfDisposed()
 
-                If CloneLength = 0 OrElse SourceLogicalOffset >= _Length Then Return
+            If SourceLogicalOffset < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(SourceLogicalOffset))
+            End If
 
-                InvalidateChunkCache()
+            If CloneLength < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(CloneLength))
+            End If
 
-                Dim ActualLength =
-                    Math.Min(CloneLength,
-                             _Length - SourceLogicalOffset)
+            If TargetLogicalOffset < 0 OrElse TargetLogicalOffset > _Length Then
+                Throw New ArgumentOutOfRangeException(NameOf(TargetLogicalOffset))
+            End If
 
-                Dim CloneExtents =
-                    BuildCloneExtents(SourceLogicalOffset,
-                                      ActualLength)
+            If CloneLength = 0 OrElse SourceLogicalOffset >= _Length Then Return
 
-                '
-                ' Source anchor identities are never cloned.
-                '
-                For Index = 0 To CloneExtents.Count - 1
+            InvalidateChunkCache()
 
-                    Dim Extent = CloneExtents(Index)
-                    Extent.AnchorId = 0
+            Dim ActualLength =
+                Math.Min(CloneLength,
+                         _Length - SourceLogicalOffset)
 
-                    CloneExtents(Index) = Extent
+            Dim CloneExtents =
+                BuildCloneExtents(SourceLogicalOffset,
+                                  ActualLength)
 
-                Next
+            '
+            ' Source anchor identities are never cloned.
+            '
+            For Index = 0 To CloneExtents.Count - 1
 
-                InsertExtentsCore(TargetLogicalOffset,
-                                  CloneExtents,
-                                  AnchorActionAtLogicalOffset)
+                Dim Extent = CloneExtents(Index)
+                Extent.AnchorId = 0
 
-                If HasOpenCheckpoint = False Then
-                    PersistIndexAndHeader(_IndexOffset)
-                End If
+                CloneExtents(Index) = Extent
 
-            End SyncLock
+            Next
+
+            InsertExtentsCore(TargetLogicalOffset,
+                              CloneExtents,
+                              AnchorActionAtLogicalOffset)
+
+            If HasOpenCheckpoint = False Then
+                PersistIndexAndHeader(_IndexOffset)
+            End If
+
 
         End Sub
 
         Public Overloads Sub Remove(LogicalOffset As Long,
                           Length As Long)
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                RemoveCore(LogicalOffset, Length)
+            End Using
 
-                ThrowIfDisposed()
+        End Sub
 
-                If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
-                If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
-                If Length = 0 OrElse LogicalOffset >= _Length Then Return
+        Private Overloads Sub RemoveCore(LogicalOffset As Long,
+                          Length As Long)
 
-                InvalidateChunkCache()
 
-                Dim ActualLength = Math.Min(Length, _Length - LogicalOffset)
+            ThrowIfDisposed()
 
-                RemoveRangeCore(LogicalOffset, ActualLength, True)
+            If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+            If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
+            If Length = 0 OrElse LogicalOffset >= _Length Then Return
 
-                If HasOpenCheckpoint = False Then
-                    PersistIndexAndHeader(_IndexOffset)
-                End If
+            InvalidateChunkCache()
 
-            End SyncLock
+            Dim ActualLength = Math.Min(Length, _Length - LogicalOffset)
+
+            RemoveRangeCore(LogicalOffset, ActualLength, True)
+
+            If HasOpenCheckpoint = False Then
+                PersistIndexAndHeader(_IndexOffset)
+            End If
+
 
         End Sub
 
@@ -1684,39 +1876,49 @@ Namespace Streams
                                     Count As Integer,
                                     Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway)
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                InsertCore(LogicalOffset, Data, DataOffset, Count, AnchorActionAtLogicalOffset)
+            End Using
 
-                ThrowIfDisposed()
+        End Sub
 
-                If LogicalOffset < 0 OrElse LogicalOffset > _Length Then
-                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
-                End If
+        Private Overloads Sub InsertCore(LogicalOffset As Long,
+                                    Data As Byte(),
+                                    DataOffset As Integer,
+                                    Count As Integer,
+                                    Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway)
 
-                If Data Is Nothing Then Throw New ArgumentNullException(NameOf(Data))
-                If DataOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(DataOffset))
-                If Count < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Count))
 
-                If Count > Data.Length - DataOffset Then
-                    Throw New ArgumentException("Invalid offset/count.")
-                End If
+            ThrowIfDisposed()
 
-                If Count = 0 Then Return
+            If LogicalOffset < 0 OrElse LogicalOffset > _Length Then
+                Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+            End If
 
-                InvalidateChunkCache()
+            If Data Is Nothing Then Throw New ArgumentNullException(NameOf(Data))
+            If DataOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(DataOffset))
+            If Count < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Count))
 
-                Dim NewExtents = BuildExtentsFromBuffer(Data,
-                                                        DataOffset,
-                                                        Count)
+            If Count > Data.Length - DataOffset Then
+                Throw New ArgumentException("Invalid offset/count.")
+            End If
 
-                InsertExtentsCore(LogicalOffset,
-                                  NewExtents,
-                                  AnchorActionAtLogicalOffset)
+            If Count = 0 Then Return
 
-                If HasOpenCheckpoint = False Then
-                    PersistIndexAndHeader(_IndexOffset)
-                End If
+            InvalidateChunkCache()
 
-            End SyncLock
+            Dim NewExtents = BuildExtentsFromBuffer(Data,
+                                                    DataOffset,
+                                                    Count)
+
+            InsertExtentsCore(LogicalOffset,
+                              NewExtents,
+                              AnchorActionAtLogicalOffset)
+
+            If HasOpenCheckpoint = False Then
+                PersistIndexAndHeader(_IndexOffset)
+            End If
+
 
         End Sub
 
@@ -1724,28 +1926,36 @@ Namespace Streams
                          CloneLength As Long,
                          TargetLogicalOffset As Long)
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                CloneCore(SourceLogicalOffset, CloneLength, TargetLogicalOffset)
+            End Using
 
-                ThrowIfDisposed()
+        End Sub
 
-                If SourceLogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(SourceLogicalOffset))
-                If CloneLength < 0 Then Throw New ArgumentOutOfRangeException(NameOf(CloneLength))
-                If TargetLogicalOffset < 0 OrElse TargetLogicalOffset > _Length Then Throw New ArgumentOutOfRangeException(NameOf(TargetLogicalOffset))
-                If CloneLength = 0 Then Return
-                If SourceLogicalOffset >= _Length Then Return
+        Private Sub CloneCore(SourceLogicalOffset As Long,
+                         CloneLength As Long,
+                         TargetLogicalOffset As Long)
 
-                InvalidateChunkCache()
 
-                Dim ActualLength = Math.Min(CloneLength, _Length - SourceLogicalOffset)
-                Dim CloneExtents = BuildCloneExtents(SourceLogicalOffset, ActualLength)
+            ThrowIfDisposed()
 
-                InsertExtentsCore(TargetLogicalOffset, CloneExtents)
+            If SourceLogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(SourceLogicalOffset))
+            If CloneLength < 0 Then Throw New ArgumentOutOfRangeException(NameOf(CloneLength))
+            If TargetLogicalOffset < 0 OrElse TargetLogicalOffset > _Length Then Throw New ArgumentOutOfRangeException(NameOf(TargetLogicalOffset))
+            If CloneLength = 0 Then Return
+            If SourceLogicalOffset >= _Length Then Return
 
-                If HasOpenCheckpoint = False Then
-                    PersistIndexAndHeader(_IndexOffset)
-                End If
+            InvalidateChunkCache()
 
-            End SyncLock
+            Dim ActualLength = Math.Min(CloneLength, _Length - SourceLogicalOffset)
+            Dim CloneExtents = BuildCloneExtents(SourceLogicalOffset, ActualLength)
+
+            InsertExtentsCore(TargetLogicalOffset, CloneExtents)
+
+            If HasOpenCheckpoint = False Then
+                PersistIndexAndHeader(_IndexOffset)
+            End If
+
 
         End Sub
 
@@ -1755,93 +1965,100 @@ Namespace Streams
         Public Overloads Sub Clear(LogicalOffset As Long,
                                    Count As Long)
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                ClearCore(LogicalOffset, Count)
+            End Using
 
-                ThrowIfDisposed()
+        End Sub
 
-                If LogicalOffset < 0 OrElse LogicalOffset > _Length Then
-                    Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
-                End If
+        Private Overloads Sub ClearCore(LogicalOffset As Long,
+                                   Count As Long)
 
-                If Count < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(Count))
-                End If
 
-                If Count = 0 Then Return
+            ThrowIfDisposed()
 
-                If LogicalOffset > Long.MaxValue - Count Then
-                    Throw New ArgumentOutOfRangeException(
-                        NameOf(Count),
-                        "The clear range would exceed the maximum supported logical offset.")
-                End If
+            If LogicalOffset < 0 OrElse LogicalOffset > _Length Then
+                Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+            End If
 
-                Dim ClearEndOffset = LogicalOffset + Count
+            If Count < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Count))
+            End If
 
-                If ClearEndOffset > _Length Then
-                    Throw New ArgumentOutOfRangeException(
-                        NameOf(Count),
-                        "The clear range extends beyond the logical stream length.")
-                End If
+            If Count = 0 Then Return
 
-                InvalidateChunkCache()
+            If LogicalOffset > Long.MaxValue - Count Then
+                Throw New ArgumentOutOfRangeException(
+                    NameOf(Count),
+                    "The clear range would exceed the maximum supported logical offset.")
+            End If
 
-                If Options.StoreSparseChunks = False Then
+            Dim ClearEndOffset = LogicalOffset + Count
 
-                    Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
+            If ClearEndOffset > _Length Then
+                Throw New ArgumentOutOfRangeException(
+                    NameOf(Count),
+                    "The clear range extends beyond the logical stream length.")
+            End If
 
-                    Dim Remaining = Count
-                    Dim CurrentOffset = LogicalOffset
+            InvalidateChunkCache()
 
-                    While Remaining > 0
+            If Options.StoreSparseChunks = False Then
 
-                        Dim ThisWrite =
-                            CInt(Math.Min(CLng(ZeroBuffer.Length),
-                                          Remaining))
+                Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
 
-                        Write(CurrentOffset,
-                              ZeroBuffer,
-                              0,
-                              ThisWrite)
+                Dim Remaining = Count
+                Dim CurrentOffset = LogicalOffset
 
-                        CurrentOffset += ThisWrite
-                        Remaining -= ThisWrite
+                While Remaining > 0
 
-                    End While
+                    Dim ThisWrite =
+                        CInt(Math.Min(CLng(ZeroBuffer.Length),
+                                      Remaining))
 
-                Else
+                    WriteCore(CurrentOffset,
+                          ZeroBuffer,
+                          0,
+                          ThisWrite)
 
-                    Dim ReplacementExtents As New List(Of ExtentIndexEntry)()
+                    CurrentOffset += ThisWrite
+                    Remaining -= ThisWrite
 
-                    Dim Remaining = Count
+                End While
 
-                    While Remaining > 0
+            Else
 
-                        Dim SegmentLength =
-                            CInt(Math.Min(CLng(Options.ChunkSize),
-                                          Remaining))
+                Dim ReplacementExtents As New List(Of ExtentIndexEntry)()
 
-                        ReplacementExtents.Add(
-                            New ExtentIndexEntry With {
-                                .LogicalLength = SegmentLength,
-                                .PhysicalRecordId = SparsePhysicalRecordId,
-                                .PhysicalRecordOffset = 0
-                            })
+                Dim Remaining = Count
 
-                        Remaining -= SegmentLength
+                While Remaining > 0
 
-                    End While
+                    Dim SegmentLength =
+                        CInt(Math.Min(CLng(Options.ChunkSize),
+                                      Remaining))
 
-                    ReplaceRangeCore(LogicalOffset,
-                                     Count,
-                                     ReplacementExtents)
+                    ReplacementExtents.Add(
+                        New ExtentIndexEntry With {
+                            .LogicalLength = SegmentLength,
+                            .PhysicalRecordId = SparsePhysicalRecordId,
+                            .PhysicalRecordOffset = 0
+                        })
 
-                End If
+                    Remaining -= SegmentLength
 
-                If HasOpenCheckpoint = False Then
-                    PersistIndexAndHeader(_IndexOffset)
-                End If
+                End While
 
-            End SyncLock
+                ReplaceRangeCore(LogicalOffset,
+                                 Count,
+                                 ReplacementExtents)
+
+            End If
+
+            If HasOpenCheckpoint = False Then
+                PersistIndexAndHeader(_IndexOffset)
+            End If
+
 
         End Sub
 
@@ -1852,72 +2069,80 @@ Namespace Streams
                                              Count As Long,
                                              Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway)
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                InsertNullBytesCore(LogicalOffset, Count, AnchorActionAtLogicalOffset)
+            End Using
 
-                ThrowIfDisposed()
+        End Sub
 
-                If LogicalOffset < 0 OrElse
-                   LogicalOffset > _Length Then
+        Private Overloads Sub InsertNullBytesCore(LogicalOffset As Long,
+                                             Count As Long,
+                                             Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway)
 
-                    Throw New ArgumentOutOfRangeException(
-                        NameOf(LogicalOffset))
 
+            ThrowIfDisposed()
+
+            If LogicalOffset < 0 OrElse
+               LogicalOffset > _Length Then
+
+                Throw New ArgumentOutOfRangeException(
+                    NameOf(LogicalOffset))
+
+            End If
+
+            If Count < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Count))
+            End If
+
+            If Count = 0 Then Return
+
+            If _Length > Long.MaxValue - Count Then
+                Throw New ArgumentOutOfRangeException(
+                    NameOf(Count),
+                    "The insert would exceed the maximum supported logical length.")
+            End If
+
+            InvalidateChunkCache()
+
+            If Options.StoreSparseChunks = False Then
+
+                Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
+                Dim Remaining = Count
+                Dim InsertOffset = LogicalOffset
+                Dim FirstInsert = True
+
+                While Remaining > 0
+
+                    Dim ThisInsert =
+                        CInt(Math.Min(CLng(ZeroBuffer.Length),
+                                      Remaining))
+
+                    InsertCore(InsertOffset,
+                           ZeroBuffer,
+                           0,
+                           ThisInsert,
+                           If(FirstInsert,
+                              AnchorActionAtLogicalOffset,
+                              AnchorActionsAtLogicalOffset.TransformAway))
+
+                    InsertOffset += ThisInsert
+                    Remaining -= ThisInsert
+                    FirstInsert = False
+
+                End While
+
+            Else
+
+                InsertSparseRange(LogicalOffset,
+                                  Count,
+                                  AnchorActionAtLogicalOffset)
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
                 End If
 
-                If Count < 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(Count))
-                End If
+            End If
 
-                If Count = 0 Then Return
-
-                If _Length > Long.MaxValue - Count Then
-                    Throw New ArgumentOutOfRangeException(
-                        NameOf(Count),
-                        "The insert would exceed the maximum supported logical length.")
-                End If
-
-                InvalidateChunkCache()
-
-                If Options.StoreSparseChunks = False Then
-
-                    Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
-                    Dim Remaining = Count
-                    Dim InsertOffset = LogicalOffset
-                    Dim FirstInsert = True
-
-                    While Remaining > 0
-
-                        Dim ThisInsert =
-                            CInt(Math.Min(CLng(ZeroBuffer.Length),
-                                          Remaining))
-
-                        Insert(InsertOffset,
-                               ZeroBuffer,
-                               0,
-                               ThisInsert,
-                               If(FirstInsert,
-                                  AnchorActionAtLogicalOffset,
-                                  AnchorActionsAtLogicalOffset.TransformAway))
-
-                        InsertOffset += ThisInsert
-                        Remaining -= ThisInsert
-                        FirstInsert = False
-
-                    End While
-
-                Else
-
-                    InsertSparseRange(LogicalOffset,
-                                      Count,
-                                      AnchorActionAtLogicalOffset)
-
-                    If HasOpenCheckpoint = False Then
-                        PersistIndexAndHeader(_IndexOffset)
-                    End If
-
-                End If
-
-            End SyncLock
 
         End Sub
 
@@ -1926,15 +2151,21 @@ Namespace Streams
         ''' </summary>
         Public Overrides Sub Flush()
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                FlushCore()
+            End Using
 
-                ThrowIfDisposed()
+        End Sub
 
-                If _Fs.CanWrite Then
-                    _Fs.Flush()
-                End If
+        Private Sub FlushCore()
 
-            End SyncLock
+
+            ThrowIfDisposed()
+
+            If _Fs.CanWrite Then
+                _Fs.Flush()
+            End If
+
 
         End Sub
 
@@ -1943,32 +2174,38 @@ Namespace Streams
         ''' </summary>
         Protected Overrides Sub Dispose(Disposing As Boolean)
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                DisposeCore(Disposing)
+            End Using
 
-                If _Disposed Then Return
+        End Sub
 
-                Try
-                    RemoveHandler Options.EncryptionInfoChanged, AddressOf Options_EncryptionInfoChanged
+        Private Sub DisposeCore(Disposing As Boolean)
 
-                    While _CheckpointStack.Count > 0
-                        CloseCheckpoint(_CheckpointStack(_CheckpointStack.Count - 1))
-                    End While
 
-                    If Disposing AndAlso _Fs IsNot Nothing AndAlso _Fs.CanWrite Then
-                        PersistIndexAndHeader(_IndexOffset, True)
-                        _Fs.Flush()
-                    End If
+            If _Disposed Then Return
 
-                Finally
+            Try
+                RemoveHandler Options.EncryptionInfoChanged, AddressOf Options_EncryptionInfoChanged
 
-                    _Disposed = True
+                While _CheckpointStack.Count > 0
+                    CloseCheckpointCore(_CheckpointStack(_CheckpointStack.Count - 1))
+                End While
 
-                    _AesProvider.Dispose()
-                    _Rng.Dispose()
+                If Disposing AndAlso _Fs IsNot Nothing AndAlso _Fs.CanWrite Then
+                    PersistIndexAndHeader(_IndexOffset, True)
+                    _Fs.Flush()
+                End If
 
-                End Try
+            Finally
 
-            End SyncLock
+                _Disposed = True
+
+                _AesProvider.Dispose()
+                _Rng.Dispose()
+
+            End Try
+
 
             MyBase.Dispose(Disposing)
 

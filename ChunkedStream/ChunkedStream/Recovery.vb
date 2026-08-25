@@ -471,12 +471,7 @@ Namespace Streams
 
                 Dim Record(RecordLength - 1) As Byte
 
-                _Fs.Position = Offset
-
-                ReadExactly(_Fs,
-                            Record,
-                            0,
-                            Record.Length)
+                ReadAt(Offset, Record, 0, Record.Length)
 
                 Dim HeaderRecordId =
                     BitConverter.ToInt64(Record, 0)

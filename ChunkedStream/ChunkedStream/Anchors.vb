@@ -185,61 +185,75 @@ Namespace Streams
 
         Public Function CreateAnchor(LogicalOffset As Long) As Anchor
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return CreateAnchorCore(LogicalOffset)
+            End Using
 
-                ThrowIfDisposed()
+        End Function
 
-                If LogicalOffset < 0 OrElse LogicalOffset >= _Length Then
-                    Throw New ArgumentOutOfRangeException(
-                        NameOf(LogicalOffset),
-                        "An anchor must identify the start of existing logical data.")
-                End If
+        Private Function CreateAnchorCore(LogicalOffset As Long) As Anchor
 
-                If FindAnchorIdAtLogicalOffset(LogicalOffset) > 0 Then
-                    Throw New InvalidOperationException(
-                        $"An anchor already exists at logical offset {LogicalOffset}.")
-                End If
 
-                SplitExtentAt(LogicalOffset)
+            ThrowIfDisposed()
 
-                Dim ExtentIndex = FindExtentInsertIndex(LogicalOffset)
+            If LogicalOffset < 0 OrElse LogicalOffset >= _Length Then
+                Throw New ArgumentOutOfRangeException(
+                    NameOf(LogicalOffset),
+                    "An anchor must identify the start of existing logical data.")
+            End If
 
-                If ExtentIndex < 0 OrElse ExtentIndex >= _Extents.Count Then
-                    Throw New InvalidDataException(
-                        $"No extent begins at logical offset {LogicalOffset}.")
-                End If
+            If FindAnchorIdAtLogicalOffset(LogicalOffset) > 0 Then
+                Throw New InvalidOperationException(
+                    $"An anchor already exists at logical offset {LogicalOffset}.")
+            End If
 
-                Dim Extent = _Extents(ExtentIndex)
+            SplitExtentAt(LogicalOffset)
 
-                If Extent.LogicalOffset <> LogicalOffset Then
-                    Throw New InvalidDataException(
-                        $"No extent begins at logical offset {LogicalOffset}.")
-                End If
+            Dim ExtentIndex = FindExtentInsertIndex(LogicalOffset)
 
-                If Extent.AnchorId > 0 Then
-                    Throw New InvalidOperationException(
-                        $"An anchor already exists at logical offset {LogicalOffset}.")
-                End If
+            If ExtentIndex < 0 OrElse ExtentIndex >= _Extents.Count Then
+                Throw New InvalidDataException(
+                    $"No extent begins at logical offset {LogicalOffset}.")
+            End If
 
-                Dim AnchorId = AllocateAnchorId()
+            Dim Extent = _Extents(ExtentIndex)
 
-                Extent.AnchorId = AnchorId
-                _Extents(ExtentIndex) = Extent
+            If Extent.LogicalOffset <> LogicalOffset Then
+                Throw New InvalidDataException(
+                    $"No extent begins at logical offset {LogicalOffset}.")
+            End If
 
-                RebuildAnchorIndex()
-                MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex)
+            If Extent.AnchorId > 0 Then
+                Throw New InvalidOperationException(
+                    $"An anchor already exists at logical offset {LogicalOffset}.")
+            End If
 
-                If HasOpenCheckpoint = False Then
-                    PersistIndexAndHeader(_IndexOffset)
-                End If
+            Dim AnchorId = AllocateAnchorId()
 
-                Return New Anchor(Me, AnchorId)
+            Extent.AnchorId = AnchorId
+            _Extents(ExtentIndex) = Extent
 
-            End SyncLock
+            RebuildAnchorIndex()
+            MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex)
+
+            If HasOpenCheckpoint = False Then
+                PersistIndexAndHeader(_IndexOffset)
+            End If
+
+            Return New Anchor(Me, AnchorId)
+
 
         End Function
 
         Public Function CreateAnchor(Data As Byte()) As Anchor
+
+            Using EnterStateLock()
+                Return CreateAnchorCore(Data)
+            End Using
+
+        End Function
+
+        Private Function CreateAnchorCore(Data As Byte()) As Anchor
 
             If Data Is Nothing Then Throw New ArgumentNullException(NameOf(Data))
 
@@ -249,185 +263,220 @@ Namespace Streams
                     NameOf(Data))
             End If
 
-            SyncLock _SyncRoot
 
-                ThrowIfDisposed()
+            ThrowIfDisposed()
 
-                Dim AnchorOffset = _Length
-                Dim AnchorId = AllocateAnchorId()
-                Dim NewExtents = BuildExtentsFromBuffer(Data, 0, Data.Length)
+            Dim AnchorOffset = _Length
+            Dim AnchorId = AllocateAnchorId()
+            Dim NewExtents = BuildExtentsFromBuffer(Data, 0, Data.Length)
 
-                If NewExtents.Count = 0 Then
-                    Throw New InvalidOperationException(
-                        "No extents were created for the anchored data.")
-                End If
+            If NewExtents.Count = 0 Then
+                Throw New InvalidOperationException(
+                    "No extents were created for the anchored data.")
+            End If
 
-                Dim FirstExtent = NewExtents(0)
-                FirstExtent.AnchorId = AnchorId
-                NewExtents(0) = FirstExtent
+            Dim FirstExtent = NewExtents(0)
+            FirstExtent.AnchorId = AnchorId
+            NewExtents(0) = FirstExtent
 
-                InvalidateChunkCache()
+            InvalidateChunkCache()
 
-                InsertExtentsCore(AnchorOffset,
-                                  NewExtents,
-                                  AnchorActionsAtLogicalOffset.Use)
+            InsertExtentsCore(AnchorOffset,
+                              NewExtents,
+                              AnchorActionsAtLogicalOffset.Use)
 
-                If HasOpenCheckpoint = False Then
-                    PersistIndexAndHeader(_IndexOffset)
-                End If
+            If HasOpenCheckpoint = False Then
+                PersistIndexAndHeader(_IndexOffset)
+            End If
 
-                Return New Anchor(Me, AnchorId)
+            Return New Anchor(Me, AnchorId)
 
-            End SyncLock
 
         End Function
 
         Public Function GetAnchor(AnchorId As Long) As Anchor
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return GetAnchorCore(AnchorId)
+            End Using
 
-                ThrowIfDisposed()
+        End Function
 
-                If AnchorId <= 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(AnchorId))
-                End If
+        Private Function GetAnchorCore(AnchorId As Long) As Anchor
 
-                If _ExtentIndexesByAnchorId.ContainsKey(AnchorId) = False Then
-                    Throw New KeyNotFoundException(
-                        $"Anchor {AnchorId} was not found.")
-                End If
 
-                Return New Anchor(Me, AnchorId)
+            ThrowIfDisposed()
 
-            End SyncLock
+            If AnchorId <= 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(AnchorId))
+            End If
+
+            If _ExtentIndexesByAnchorId.ContainsKey(AnchorId) = False Then
+                Throw New KeyNotFoundException(
+                    $"Anchor {AnchorId} was not found.")
+            End If
+
+            Return New Anchor(Me, AnchorId)
+
 
         End Function
 
         Public Function TryGetAnchor(AnchorId As Long,
                                      ByRef Anchor As Anchor) As Boolean
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return TryGetAnchorCore(AnchorId, Anchor)
+            End Using
 
-                ThrowIfDisposed()
+        End Function
 
-                If AnchorId <= 0 OrElse
-                   _ExtentIndexesByAnchorId.ContainsKey(AnchorId) = False Then
+        Private Function TryGetAnchorCore(AnchorId As Long,
+                                     ByRef Anchor As Anchor) As Boolean
 
-                    Anchor = Nothing
-                    Return False
 
-                End If
+            ThrowIfDisposed()
 
-                Anchor = New Anchor(Me, AnchorId)
-                Return True
+            If AnchorId <= 0 OrElse
+               _ExtentIndexesByAnchorId.ContainsKey(AnchorId) = False Then
 
-            End SyncLock
+                Anchor = Nothing
+                Return False
+
+            End If
+
+            Anchor = New Anchor(Me, AnchorId)
+            Return True
+
 
         End Function
 
         Public Function GetAnchors() As IReadOnlyList(Of Anchor)
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return GetAnchorsCore()
+            End Using
 
-                ThrowIfDisposed()
+        End Function
 
-                Dim Result =
-                    _ExtentIndexesByAnchorId.Keys.
-                    OrderBy(Function(anchorId) anchorId).
-                    Select(Function(anchorId) New Anchor(Me, anchorId)).
-                    ToList()
+        Private Function GetAnchorsCore() As IReadOnlyList(Of Anchor)
 
-                Return New ReadOnlyCollection(Of Anchor)(Result)
 
-            End SyncLock
+            ThrowIfDisposed()
+
+            Dim Result =
+                _ExtentIndexesByAnchorId.Keys.
+                OrderBy(Function(anchorId) anchorId).
+                Select(Function(anchorId) New Anchor(Me, anchorId)).
+                ToList()
+
+            Return New ReadOnlyCollection(Of Anchor)(Result)
+
 
         End Function
 
         Public Function ContainsAnchor(AnchorId As Long) As Boolean
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return ContainsAnchorCore(AnchorId)
+            End Using
 
-                If _Disposed Then Return False
-                If AnchorId <= 0 Then Return False
+        End Function
 
-                Return _ExtentIndexesByAnchorId.ContainsKey(AnchorId)
+        Private Function ContainsAnchorCore(AnchorId As Long) As Boolean
 
-            End SyncLock
+
+            If _Disposed Then Return False
+            If AnchorId <= 0 Then Return False
+
+            Return _ExtentIndexesByAnchorId.ContainsKey(AnchorId)
+
 
         End Function
 
         Public Function GetAnchorOffset(AnchorId As Long) As Long
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return GetAnchorOffsetCore(AnchorId)
+            End Using
 
-                ThrowIfDisposed()
+        End Function
 
-                Dim ExtentIndex As Integer
+        Private Function GetAnchorOffsetCore(AnchorId As Long) As Long
 
-                If _ExtentIndexesByAnchorId.TryGetValue(AnchorId,
-                                                        ExtentIndex) = False Then
 
-                    Throw New KeyNotFoundException(
-                        $"Anchor {AnchorId} was not found.")
+            ThrowIfDisposed()
 
-                End If
+            Dim ExtentIndex As Integer
 
-                If ExtentIndex < 0 OrElse ExtentIndex >= _Extents.Count Then
-                    Throw New InvalidDataException(
-                        $"Anchor {AnchorId} has an invalid extent index.")
-                End If
+            If _ExtentIndexesByAnchorId.TryGetValue(AnchorId,
+                                                    ExtentIndex) = False Then
 
-                Dim Extent = _Extents(ExtentIndex)
+                Throw New KeyNotFoundException(
+                    $"Anchor {AnchorId} was not found.")
 
-                If Extent.AnchorId <> AnchorId Then
-                    Throw New InvalidDataException(
-                        $"Anchor index mismatch for anchor {AnchorId}.")
-                End If
+            End If
 
-                Return Extent.LogicalOffset
+            If ExtentIndex < 0 OrElse ExtentIndex >= _Extents.Count Then
+                Throw New InvalidDataException(
+                    $"Anchor {AnchorId} has an invalid extent index.")
+            End If
 
-            End SyncLock
+            Dim Extent = _Extents(ExtentIndex)
+
+            If Extent.AnchorId <> AnchorId Then
+                Throw New InvalidDataException(
+                    $"Anchor index mismatch for anchor {AnchorId}.")
+            End If
+
+            Return Extent.LogicalOffset
+
 
         End Function
 
         Private Sub RemoveAnchor(Anchor As Anchor)
 
+            Using EnterStateLock()
+                RemoveAnchorCore(Anchor)
+            End Using
+
+        End Sub
+
+        Private Sub RemoveAnchorCore(Anchor As Anchor)
+
             If Anchor Is Nothing Then Throw New ArgumentNullException(NameOf(Anchor))
 
             EnsureAnchorOwner(Anchor)
 
-            SyncLock _SyncRoot
 
-                ThrowIfDisposed()
+            ThrowIfDisposed()
 
-                Dim ExtentIndex As Integer
+            Dim ExtentIndex As Integer
 
-                If _ExtentIndexesByAnchorId.TryGetValue(Anchor.AnchorId,
-                                                        ExtentIndex) = False Then
+            If _ExtentIndexesByAnchorId.TryGetValue(Anchor.AnchorId,
+                                                    ExtentIndex) = False Then
 
-                    Throw New KeyNotFoundException(
-                        $"Anchor {Anchor.AnchorId} was not found.")
+                Throw New KeyNotFoundException(
+                    $"Anchor {Anchor.AnchorId} was not found.")
 
-                End If
+            End If
 
-                Dim Extent = _Extents(ExtentIndex)
+            Dim Extent = _Extents(ExtentIndex)
 
-                If Extent.AnchorId <> Anchor.AnchorId Then
-                    Throw New InvalidDataException(
-                        $"Anchor index mismatch for anchor {Anchor.AnchorId}.")
-                End If
+            If Extent.AnchorId <> Anchor.AnchorId Then
+                Throw New InvalidDataException(
+                    $"Anchor index mismatch for anchor {Anchor.AnchorId}.")
+            End If
 
-                Extent.AnchorId = 0
-                _Extents(ExtentIndex) = Extent
+            Extent.AnchorId = 0
+            _Extents(ExtentIndex) = Extent
 
-                RebuildAnchorIndex()
-                MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex)
+            RebuildAnchorIndex()
+            MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex)
 
-                If HasOpenCheckpoint = False Then
-                    PersistIndexAndHeader(_IndexOffset)
-                End If
+            If HasOpenCheckpoint = False Then
+                PersistIndexAndHeader(_IndexOffset)
+            End If
 
-            End SyncLock
 
         End Sub
 

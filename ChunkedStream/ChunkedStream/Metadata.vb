@@ -1,5 +1,4 @@
 ﻿Imports System.IO
-Imports System.Linq
 Imports System.Security.Cryptography
 
 Namespace Streams
@@ -269,8 +268,7 @@ Namespace Streams
             Dim Page = BuildExtentPage(PageNumber)
             Dim Offset = GetNextIndexPageWriteOffset(Page.Length)
 
-            _Fs.Position = Offset
-            _Fs.Write(Page, 0, Page.Length)
+            WriteAt(Offset, Page, 0, Page.Length)
 
             Dim Descriptor = New MetadataPageDescriptor With {
                 .PageNumber = PageNumber,
@@ -391,8 +389,7 @@ Namespace Streams
             Dim Page = BuildPhysicalRecordPage(PageNumber)
             Dim Offset = GetNextIndexPageWriteOffset(Page.Length)
 
-            _Fs.Position = Offset
-            _Fs.Write(Page, 0, Page.Length)
+            WriteAt(Offset, Page, 0, Page.Length)
 
             Dim Descriptor =
                 New MetadataPageDescriptor With {
@@ -479,8 +476,7 @@ Namespace Streams
                 Dim OldDescriptor As MetadataPageDescriptor = Nothing
                 Dim HadOldDescriptor = ExistingDirectoryDescriptors.TryGetValue(PageNumber, OldDescriptor)
 
-                _Fs.Position = Offset
-                _Fs.Write(Page, 0, Page.Length)
+                WriteAt(Offset, Page, 0, Page.Length)
 
                 Dim NewDescriptor = New MetadataPageDescriptor With {
                     .PageNumber = PageNumber,
@@ -556,8 +552,7 @@ Namespace Streams
                 Dim OldDescriptor As MetadataPageDescriptor = Nothing
                 Dim HadOldDescriptor = _HoleDirectoryPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
 
-                _Fs.Position = Offset
-                _Fs.Write(Page, 0, Page.Length)
+                WriteAt(Offset, Page, 0, Page.Length)
 
                 Dim NewDescriptor = New MetadataPageDescriptor With {
                     .PageNumber = PageNumber,
@@ -946,8 +941,7 @@ Namespace Streams
 
             _MetadataRootLength = Root.Length
 
-            _Fs.Position = _MetadataRootOffset
-            _Fs.Write(Root, 0, Root.Length)
+            WriteAt(_MetadataRootOffset, Root, 0, Root.Length)
 
             If OldRootOffset > 0 AndAlso OldRootLength > 0 Then
                 AddFreeIndexDirectoryPageSpace(OldRootOffset,

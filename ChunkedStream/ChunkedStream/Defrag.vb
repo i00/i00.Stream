@@ -80,45 +80,52 @@ Namespace Streams
         Public Function Defragment(Optional Type As DefragTypes = DefragTypes.Move,
                                    Optional ProgressCallback As StreamProgressCallback = Nothing) As Long
 
-            SyncLock _SyncRoot
+            Using EnterStateLock()
+                Return DefragmentCore(Type, ProgressCallback)
+            End Using
 
-                ThrowIfDisposed()
+        End Function
 
-                If HasActiveCheckpoint Then
-                    Throw New InvalidOperationException("Defragmentation cannot be performed while a checkpoint is active.")
-                End If
+        Private Function DefragmentCore(Optional Type As DefragTypes = DefragTypes.Move,
+                                   Optional ProgressCallback As StreamProgressCallback = Nothing) As Long
 
-                InvalidateChunkCache()
-                ClearFreeSpaceMaps()
 
-                Dim OriginalLength = _Fs.Length
-                Dim CancellationToken As New CancellationToken()
+            ThrowIfDisposed()
 
-                Select Case Type
-                    Case DefragTypes.Move
-                        DefragmentMove(ProgressCallback, CancellationToken)
+            If HasActiveCheckpoint Then
+                Throw New InvalidOperationException("Defragmentation cannot be performed while a checkpoint is active.")
+            End If
 
-                    Case DefragTypes.Sequence
-                        DefragmentSequence(DefragmentSequenceProgressModes.Normal,
-                                           ProgressCallback,
-                                           CancellationToken)
+            InvalidateChunkCache()
+            ClearFreeSpaceMaps()
 
-                    Case DefragTypes.Rebuild
-                        DefragmentRebuild(ProgressCallback, CancellationToken)
+            Dim OriginalLength = _Fs.Length
+            Dim CancellationToken As New CancellationToken()
 
-                    Case Else
-                        Throw New ArgumentOutOfRangeException(NameOf(Type))
-                End Select
+            Select Case Type
+                Case DefragTypes.Move
+                    DefragmentMove(ProgressCallback, CancellationToken)
 
-                ClearFreeSpaceMaps()
+                Case DefragTypes.Sequence
+                    DefragmentSequence(DefragmentSequenceProgressModes.Normal,
+                                       ProgressCallback,
+                                       CancellationToken)
 
-                If CancellationToken.Cancel Then
-                    Return -1
-                End If
+                Case DefragTypes.Rebuild
+                    DefragmentRebuild(ProgressCallback, CancellationToken)
 
-                Return Math.Max(0L, OriginalLength - _Fs.Length)
+                Case Else
+                    Throw New ArgumentOutOfRangeException(NameOf(Type))
+            End Select
 
-            End SyncLock
+            ClearFreeSpaceMaps()
+
+            If CancellationToken.Cancel Then
+                Return -1
+            End If
+
+            Return Math.Max(0L, OriginalLength - _Fs.Length)
+
 
         End Function
 
@@ -151,11 +158,9 @@ Namespace Streams
                     SourceEnd -= BytesToCopy
                     DestinationEnd -= BytesToCopy
 
-                    _Fs.Position = SourceEnd
-                    ReadExactly(_Fs, Buffer, 0, BytesToCopy)
+                    ReadAt(SourceEnd, Buffer, 0, BytesToCopy)
 
-                    _Fs.Position = DestinationEnd
-                    _Fs.Write(Buffer, 0, BytesToCopy)
+                    WriteAt(DestinationEnd, Buffer, 0, BytesToCopy)
 
                     Remaining -= BytesToCopy
 
@@ -173,11 +178,9 @@ Namespace Streams
 
                 Dim BytesToCopy = Math.Min(ForwardRemaining, Buffer.Length)
 
-                _Fs.Position = ReadOffset
-                ReadExactly(_Fs, Buffer, 0, BytesToCopy)
+                ReadAt(ReadOffset, Buffer, 0, BytesToCopy)
 
-                _Fs.Position = WriteOffset
-                _Fs.Write(Buffer, 0, BytesToCopy)
+                WriteAt(WriteOffset, Buffer, 0, BytesToCopy)
 
                 ReadOffset += BytesToCopy
                 WriteOffset += BytesToCopy

@@ -486,8 +486,7 @@ Namespace Streams
             Dim NewRecordOffset =
                 GetNextPhysicalRecordWriteOffset(StoredRecord.Length)
 
-            _Fs.Position = NewRecordOffset
-            _Fs.Write(StoredRecord, 0, StoredRecord.Length)
+            WriteAt(NewRecordOffset, StoredRecord, 0, StoredRecord.Length)
 
             Dim Result =
                 New PhysicalRecordEntry With {
@@ -564,8 +563,7 @@ Namespace Streams
 
             Dim StoredRecord(Record.PhysicalLength - 1) As Byte
 
-            _Fs.Position = Record.PhysicalOffset
-            ReadExactly(_Fs, StoredRecord, 0, StoredRecord.Length)
+            ReadAt(Record.PhysicalOffset, StoredRecord, 0, StoredRecord.Length)
 
             Dim Plain(Record.PlainLength - 1) As Byte
 

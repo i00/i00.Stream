@@ -217,29 +217,35 @@ Namespace Streams
 
         Private Sub Options_EncryptionInfoChanged(OldValue As EncryptionInfo, NewValue As EncryptionInfo)
 
-            SyncLock _SyncRoot
-                ThrowIfDisposed()
+            Using EnterStateLock()
+                Options_EncryptionInfoChangedCore(OldValue, NewValue)
+            End Using
 
-                If NewValue Is Nothing Then
-                    If _FileMasterKey IsNot Nothing Then
-                        WrapFileMasterKey(MasterKeyWrapModes.PublicWrap, Nothing)
-                    End If
+        End Sub
 
-                    _CurrentWriteEncryptionEnabled = False
-                    UpdateHeader(True)
-                    Return
+        Private Sub Options_EncryptionInfoChangedCore(OldValue As EncryptionInfo, NewValue As EncryptionInfo)
+
+            ThrowIfDisposed()
+
+            If NewValue Is Nothing Then
+                If _FileMasterKey IsNot Nothing Then
+                    WrapFileMasterKey(MasterKeyWrapModes.PublicWrap, Nothing)
                 End If
 
-                If _FileMasterKey Is Nothing Then
-                    _FileMasterKey = New Byte(WrappedFileMasterKeySize - 1) {}
-                    _Rng.GetBytes(_FileMasterKey)
-                    DeriveFileMasterKeys()
-                End If
-
-                WrapFileMasterKey(MasterKeyWrapModes.UserWrap, NewValue)
-                _CurrentWriteEncryptionEnabled = True
+                _CurrentWriteEncryptionEnabled = False
                 UpdateHeader(True)
-            End SyncLock
+                Return
+            End If
+
+            If _FileMasterKey Is Nothing Then
+                _FileMasterKey = New Byte(WrappedFileMasterKeySize - 1) {}
+                _Rng.GetBytes(_FileMasterKey)
+                DeriveFileMasterKeys()
+            End If
+
+            WrapFileMasterKey(MasterKeyWrapModes.UserWrap, NewValue)
+            _CurrentWriteEncryptionEnabled = True
+            UpdateHeader(True)
 
         End Sub
 
@@ -429,8 +435,7 @@ Namespace Streams
 
                 Dim Header(ChunkRecordHeaderSize - 1) As Byte
 
-                _Fs.Position = Record.PhysicalOffset
-                ReadExactly(_Fs, Header, 0, Header.Length)
+                ReadAt(Record.PhysicalOffset, Header, 0, Header.Length)
 
                 Dim StoredRecordId = BitConverter.ToInt64(Header, 0)
 

@@ -4,99 +4,198 @@ Imports System.Security.Cryptography
 Namespace Streams
     Partial Class ChunkedStream
 
+        Private NotInheritable Class DiagnosticsSnapshot
+            Public LogicalLength As Long
+            Public DataEnd As Long
+            Public AnchorIndexCount As Integer
+            Public Extents As List(Of ExtentIndexEntry)
+            Public PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry)
+            Public StoredRecords As Dictionary(Of Long, Byte())
+            Public ChunkMacKey As Byte()
+        End Class
+
         Public Function GetFragmentation() As Double
 
-            SyncLock _SyncRoot
+            Dim Snapshot As DiagnosticsSnapshot
 
-                ThrowIfDisposed()
+            Using EnterStateLock()
+                Snapshot = CaptureDiagnosticsSnapshotCore(False)
+            End Using
 
-                Dim UsedBytes As Long = 0
+            Return GetFragmentationCore(Snapshot)
 
-                For Each record In _PhysicalRecords.Values
-                    If record.RefCount > 0 Then
-                        UsedBytes += record.PhysicalLength
-                    End If
-                Next
+        End Function
 
-                Dim DataEnd = GetDataEndFromIndex()
-                Dim TotalStoredBytes = Math.Max(0L, DataEnd - DataStartOffset)
-                Dim WastedBytes = Math.Max(0L, TotalStoredBytes - UsedBytes)
+        Private Function GetFragmentationCore(Snapshot As DiagnosticsSnapshot) As Double
 
-                If TotalStoredBytes = 0 Then Return 0
+            If Snapshot Is Nothing Then Throw New ArgumentNullException(NameOf(Snapshot))
 
-                Return WastedBytes / CDbl(TotalStoredBytes)
+            Dim UsedBytes As Long = 0
 
-            End SyncLock
+            For Each Record In Snapshot.PhysicalRecords.Values
+                If Record.RefCount > 0 Then UsedBytes += Record.PhysicalLength
+            Next
+
+            Dim TotalStoredBytes = Math.Max(0L, Snapshot.DataEnd - DataStartOffset)
+            Dim WastedBytes = Math.Max(0L, TotalStoredBytes - UsedBytes)
+
+            If TotalStoredBytes = 0 Then Return 0
+            Return WastedBytes / CDbl(TotalStoredBytes)
 
         End Function
 
         Public Sub Validate(Optional ProgressCallback As StreamProgressCallback = Nothing)
 
-            SyncLock _SyncRoot
+            Dim Snapshot As DiagnosticsSnapshot
 
-                ThrowIfDisposed()
+            Using EnterStateLock()
+                Snapshot = CaptureDiagnosticsSnapshotCore(True)
+            End Using
 
-                ValidateExtentsAreSortedAndNonOverlapping()
-                ValidatePhysicalRecordRefCounts()
-                ValidateAnchors()
-
-                Dim CancellationToken As New CancellationToken()
-
-                ValidateAllLivePhysicalRecords(
-                    ProgressCallback,
-                    CancellationToken)
-
-            End SyncLock
+            ValidateCore(Snapshot, ProgressCallback)
 
         End Sub
 
-        Private Sub ValidateAllLivePhysicalRecords(ProgressCallback As StreamProgressCallback,
-                                                   CancellationToken As CancellationToken)
+        Private Function CaptureDiagnosticsSnapshotCore(IncludeStoredRecords As Boolean) As DiagnosticsSnapshot
 
-            Dim TotalRecords = Math.Max(1, _PhysicalRecords.Count)
-            Dim ProcessedRecords As Long = 0
+            ThrowIfDisposed()
 
-            For Each pair In _PhysicalRecords.OrderBy(Function(x) x.Key)
+            Dim Snapshot = New DiagnosticsSnapshot With {
+                .LogicalLength = _Length,
+                .DataEnd = GetDataEndFromIndex(),
+                .AnchorIndexCount = _ExtentIndexesByAnchorId.Count,
+                .Extents = New List(Of ExtentIndexEntry)(_Extents),
+                .PhysicalRecords = New Dictionary(Of Long, PhysicalRecordEntry)(_PhysicalRecords),
+                .StoredRecords = New Dictionary(Of Long, Byte())(),
+                .ChunkMacKey = If(_ChunkMacKey Is Nothing, Nothing, DirectCast(_ChunkMacKey.Clone(), Byte()))
+            }
 
-                If CancellationToken.Cancel Then Return
+            If IncludeStoredRecords Then
+                For Each Pair In Snapshot.PhysicalRecords
+                    Dim Record = Pair.Value
+                    If Record.RefCount <= 0 Then Continue For
+                    If Record.PhysicalOffset < DataStartOffset Then Continue For
+                    If Record.PhysicalLength < MinChunkRecordSize Then Continue For
+                    If Record.PhysicalOffset > _Fs.Length - Record.PhysicalLength Then Continue For
+                    Dim Buffer(Record.PhysicalLength - 1) As Byte
+                    ReadAt(Record.PhysicalOffset, Buffer, 0, Buffer.Length)
+                    Snapshot.StoredRecords.Add(Record.RecordId, Buffer)
+                Next
+            End If
 
-                Dim Record = pair.Value
+            Return Snapshot
 
-                If Record.RefCount > 0 Then
-                    ValidatePhysicalRecord(Record)
+        End Function
+
+        Private Sub ValidateCore(Snapshot As DiagnosticsSnapshot,
+                                 Optional ProgressCallback As StreamProgressCallback = Nothing)
+
+            If Snapshot Is Nothing Then Throw New ArgumentNullException(NameOf(Snapshot))
+
+            ValidateExtentSnapshot(Snapshot)
+            ValidatePhysicalRecordRefCountSnapshot(Snapshot)
+            ValidateAnchorSnapshot(Snapshot)
+
+            Dim CancellationToken As New CancellationToken()
+            ValidateAllLivePhysicalRecordsSnapshot(Snapshot, ProgressCallback, CancellationToken)
+
+        End Sub
+
+        Private Shared Sub ValidateExtentSnapshot(Snapshot As DiagnosticsSnapshot)
+
+            Dim ExpectedOffset As Long = 0
+            Dim AnchorIds As New HashSet(Of Long)()
+            Dim AnchorOffsets As New HashSet(Of Long)()
+
+            For Each Extent In Snapshot.Extents
+                If Extent.LogicalOffset < 0 Then Throw New InvalidDataException("Extent has a negative logical offset.")
+                If Extent.LogicalOffset <> ExpectedOffset Then Throw New InvalidDataException($"Extent layout contains a gap or overlap at logical offset {ExpectedOffset}.")
+                If Extent.LogicalLength <= 0 Then Throw New InvalidDataException("Extent has an invalid logical length.")
+                If Extent.PhysicalRecordOffset < 0 Then Throw New InvalidDataException("Extent has a negative physical record offset.")
+                If Extent.AnchorId < 0 Then Throw New InvalidDataException("Extent has a negative anchor id.")
+
+                If Extent.AnchorId > 0 Then
+                    If AnchorIds.Add(Extent.AnchorId) = False Then Throw New InvalidDataException($"Duplicate anchor id {Extent.AnchorId}.")
+                    If AnchorOffsets.Add(Extent.LogicalOffset) = False Then Throw New InvalidDataException($"Multiple anchors identify logical offset {Extent.LogicalOffset}.")
                 End If
 
-                ProcessedRecords += 1
+                If Extent.PhysicalRecordId = SparsePhysicalRecordId Then
+                    If Extent.PhysicalRecordOffset <> 0 Then Throw New InvalidDataException("Sparse extent has a non-zero physical record offset.")
+                Else
+                    Dim Record As PhysicalRecordEntry
+                    If Snapshot.PhysicalRecords.TryGetValue(Extent.PhysicalRecordId, Record) = False Then Throw New InvalidDataException($"Missing physical record {Extent.PhysicalRecordId}.")
+                    If Extent.PhysicalRecordOffset > Record.PlainLength - Extent.LogicalLength Then Throw New InvalidDataException($"Extent references beyond physical record {Extent.PhysicalRecordId}.")
+                End If
 
-                ReportProgress(ProgressCallback,
-                               ProcessedRecords,
-                               TotalRecords,
-                               ProcessUnitTypes.Arbitrary,
-                               CancellationToken)
+                If Extent.LogicalOffset > Long.MaxValue - CLng(Extent.LogicalLength) Then Throw New InvalidDataException("Extent logical end offset overflowed.")
+                ExpectedOffset = Extent.LogicalOffset + CLng(Extent.LogicalLength)
+            Next
 
+            If ExpectedOffset <> Snapshot.LogicalLength Then Throw New InvalidDataException($"Extent logical length mismatch. Expected {Snapshot.LogicalLength}, found {ExpectedOffset}.")
+
+        End Sub
+
+        Private Shared Sub ValidatePhysicalRecordRefCountSnapshot(Snapshot As DiagnosticsSnapshot)
+
+            Dim ActualCounts As New Dictionary(Of Long, Integer)()
+
+            For Each Extent In Snapshot.Extents
+                If Extent.PhysicalRecordId = SparsePhysicalRecordId Then Continue For
+                Dim Count As Integer = 0
+                ActualCounts.TryGetValue(Extent.PhysicalRecordId, Count)
+                ActualCounts(Extent.PhysicalRecordId) = Count + 1
+            Next
+
+            For Each Pair In Snapshot.PhysicalRecords
+                Dim ActualCount As Integer = 0
+                ActualCounts.TryGetValue(Pair.Key, ActualCount)
+                If Pair.Value.RefCount <> ActualCount Then Throw New InvalidDataException($"Refcount mismatch for physical record {Pair.Key}. Expected {ActualCount}, found {Pair.Value.RefCount}.")
             Next
 
         End Sub
 
-        Private Sub ValidatePhysicalRecord(Record As PhysicalRecordEntry)
+        Private Shared Sub ValidateAnchorSnapshot(Snapshot As DiagnosticsSnapshot)
+
+            Dim SeenAnchorIds As New HashSet(Of Long)()
+            Dim SeenOffsets As New HashSet(Of Long)()
+
+            For Each Extent In Snapshot.Extents
+                If Extent.AnchorId < 0 Then Throw New InvalidDataException("Extent has a negative anchor id.")
+                If Extent.AnchorId = 0 Then Continue For
+                If SeenAnchorIds.Add(Extent.AnchorId) = False Then Throw New InvalidDataException($"Duplicate anchor id {Extent.AnchorId}.")
+                If SeenOffsets.Add(Extent.LogicalOffset) = False Then Throw New InvalidDataException($"Multiple anchors identify logical offset {Extent.LogicalOffset}.")
+            Next
+
+            If SeenAnchorIds.Count <> Snapshot.AnchorIndexCount Then Throw New InvalidDataException("Anchor index count does not match the anchored extent count.")
+
+        End Sub
+
+        Private Sub ValidateAllLivePhysicalRecordsSnapshot(Snapshot As DiagnosticsSnapshot,
+                                                           ProgressCallback As StreamProgressCallback,
+                                                           CancellationToken As CancellationToken)
+
+            Dim TotalRecords = Math.Max(1, Snapshot.PhysicalRecords.Count)
+            Dim ProcessedRecords As Long = 0
+
+            For Each Pair In Snapshot.PhysicalRecords.OrderBy(Function(Item) Item.Key)
+                If CancellationToken.Cancel Then Return
+                If Pair.Value.RefCount > 0 Then ValidatePhysicalRecordSnapshot(Snapshot, Pair.Value)
+                ProcessedRecords += 1
+                ProgressCallback?.Invoke(ProcessedRecords, TotalRecords, ProcessUnitTypes.Chunks, CancellationToken)
+            Next
+
+        End Sub
+
+        Private Sub ValidatePhysicalRecordSnapshot(Snapshot As DiagnosticsSnapshot,
+                                                   Record As PhysicalRecordEntry)
 
             If Record.RecordId <= SparsePhysicalRecordId Then Throw New InvalidDataException("Invalid physical record id.")
-            If Record.PhysicalOffset < DataStartOffset Then Throw New InvalidDataException($"Invalid physical offset for record {Record.RecordId}.")
-            If Record.PhysicalLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid physical length for record {Record.RecordId}.")
-            If Record.PhysicalOffset + Record.PhysicalLength > _IndexOffset Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond data area.")
-            If Record.PlainLength < 0 Then Throw New InvalidDataException($"Invalid plain length for record {Record.RecordId}.")
-            If Record.RefCount < 0 Then Throw New InvalidDataException($"Invalid refcount for record {Record.RecordId}.")
+            If Record.PhysicalOffset < DataStartOffset Then Throw New InvalidDataException("Invalid physical record offset.")
+            If Record.PhysicalLength < MinChunkRecordSize Then Throw New InvalidDataException("Invalid physical record length.")
 
-            Dim Buffer(Record.PhysicalLength - 1) As Byte
-
-            _Fs.Position = Record.PhysicalOffset
-            ReadExactly(_Fs, Buffer, 0, Buffer.Length)
-
-            Dim StoredRecordId = BitConverter.ToInt64(Buffer, 0)
-
-            If StoredRecordId <> Record.RecordId Then
-                Throw New InvalidDataException($"Physical record id mismatch. Expected {Record.RecordId}, found {StoredRecordId}.")
-            End If
+            Dim Buffer As Byte() = Nothing
+            If Snapshot.StoredRecords.TryGetValue(Record.RecordId, Buffer) = False Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the captured backing stream.")
+            If BitConverter.ToInt64(Buffer, 0) <> Record.RecordId Then Throw New InvalidDataException("Physical record id mismatch.")
 
             Dim EncryptionMethod = CType(BitConverter.ToInt32(Buffer, ChunkEncryptionMethodOffset), ChunkEncryptionMethods)
             Dim PayloadLength = BitConverter.ToInt32(Buffer, ChunkPayloadLengthOffset)
@@ -105,35 +204,15 @@ Namespace Streams
 
             If PayloadLength < 0 Then Throw New InvalidDataException("Invalid physical record payload length.")
             If ChunkRecordDataOffset + PayloadLength + MacSize <> Buffer.Length Then Throw New InvalidDataException("Invalid physical record length.")
+            If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then Throw New InvalidDataException($"Unsupported chunk flags for physical record {Record.RecordId}: {CInt(Flags)}.")
+            If CompressionEvaluatedPercent < MinimumCompressionEvaluatedPercent OrElse CompressionEvaluatedPercent > MaximumCompressionEvaluatedPercent Then Throw New InvalidDataException($"Invalid compression evaluated percent for physical record {Record.RecordId}: {CompressionEvaluatedPercent}.")
 
-            If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then
-                Throw New InvalidDataException($"Unsupported chunk flags for physical record {Record.RecordId}: {CInt(Flags)}.")
-            End If
-
-            If CompressionEvaluatedPercent < MinimumCompressionEvaluatedPercent OrElse
-               CompressionEvaluatedPercent > MaximumCompressionEvaluatedPercent Then
-
-                Throw New InvalidDataException($"Invalid compression evaluated percent for physical record {Record.RecordId}: {CompressionEvaluatedPercent}.")
-
-            End If
-
-            Dim RecordMacKey =
-                If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey,
-                   _ChunkMacKey,
-                   PublicIntegrityKey)
-
-            If RecordMacKey Is Nothing Then
-                Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
-            End If
+            Dim RecordMacKey = If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey, Snapshot.ChunkMacKey, PublicIntegrityKey)
+            If RecordMacKey Is Nothing Then Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
 
             Using Hmac As New HMACSHA256(RecordMacKey)
-
                 Dim ExpectedMac = Hmac.ComputeHash(Buffer, 0, ChunkRecordDataOffset + PayloadLength)
-
-                If FixedTimeEquals(ExpectedMac, 0, Buffer, ChunkRecordDataOffset + PayloadLength, MacSize) = False Then
-                    Throw New CryptographicException($"Physical record MAC invalid for record {Record.RecordId}.")
-                End If
-
+                If FixedTimeEquals(ExpectedMac, 0, Buffer, ChunkRecordDataOffset + PayloadLength, MacSize) = False Then Throw New CryptographicException($"Physical record MAC invalid for record {Record.RecordId}.")
             End Using
 
         End Sub
