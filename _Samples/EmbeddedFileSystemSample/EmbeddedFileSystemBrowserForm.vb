@@ -2,7 +2,7 @@ Imports i00.Streams
 Imports System.ComponentModel
 Imports System.IO
 
-Public NotInheritable Class EmbeddedFileSystemBrowserForm
+Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Inherits Form
 
     Private NotInheritable Class DirectoryNodeInfo
@@ -37,12 +37,6 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
     Private ReadOnly _FileSystem As EmbeddedFileSystem
     Private ReadOnly _OwnsFileSystem As Boolean
-    Private ReadOnly _SplitContainer As New SplitContainer()
-    Private ReadOnly _StatusStrip As New StatusStrip()
-    Private ReadOnly _StatusLabel As New ToolStripStatusLabel()
-    Private ReadOnly _FolderContextMenu As New ContextMenuStrip()
-    Private ReadOnly _FileContextMenu As New ContextMenuStrip()
-    Private ReadOnly _EmptyFileContextMenu As New ContextMenuStrip()
     Private _CurrentDirectoryAnchorId As Long
     Private _ListDragStart As Point
     Private _TreeDragStart As Point
@@ -50,8 +44,6 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private _TreeDragArmed As Boolean
     Private _Disposed As Boolean
 
-    Private ReadOnly tvFolders As New TreeView()
-    Private ReadOnly lvFiles As New ListView()
 
     Public Sub New(FileSystem As EmbeddedFileSystem, Optional OwnsFileSystem As Boolean = False)
         If FileSystem Is Nothing Then Throw New ArgumentNullException(NameOf(FileSystem))
@@ -60,9 +52,7 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
         _OwnsFileSystem = OwnsFileSystem
         _CurrentDirectoryAnchorId = _FileSystem.RootAnchorId
 
-        InitialiseForm()
-        InitialiseControls()
-        InitialiseEvents()
+        InitializeComponent()
         RefreshFileSystemView()
     End Sub
 
@@ -71,79 +61,6 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Return _FileSystem
         End Get
     End Property
-
-    Private Sub InitialiseForm()
-        Text = "Embedded File System"
-        StartPosition = FormStartPosition.CenterParent
-        MinimumSize = New Size(760, 480)
-        Size = New Size(1100, 700)
-        KeyPreview = True
-
-        _SplitContainer.Dock = DockStyle.Fill
-        _SplitContainer.Orientation = Orientation.Vertical
-        _SplitContainer.SplitterDistance = 320
-        _SplitContainer.Panel1MinSize = 180
-        '_SplitContainer.Panel2MinSize = 320
-
-        _StatusStrip.Items.Add(_StatusLabel)
-        _StatusStrip.Dock = DockStyle.Bottom
-
-        Controls.Add(_SplitContainer)
-        Controls.Add(_StatusStrip)
-    End Sub
-
-    Private Sub InitialiseControls()
-        tvFolders.Name = NameOf(tvFolders)
-        tvFolders.Dock = DockStyle.Fill
-        tvFolders.HideSelection = False
-        tvFolders.AllowDrop = True
-        tvFolders.LabelEdit = False
-        tvFolders.ShowNodeToolTips = True
-
-        lvFiles.Name = NameOf(lvFiles)
-        lvFiles.Dock = DockStyle.Fill
-        lvFiles.View = View.Details
-        lvFiles.FullRowSelect = True
-        lvFiles.HideSelection = False
-        lvFiles.MultiSelect = True
-        lvFiles.AllowDrop = True
-        lvFiles.GridLines = False
-        lvFiles.Columns.Add("Name", 420)
-        lvFiles.Columns.Add("Size", 120, HorizontalAlignment.Right)
-        lvFiles.Columns.Add("State", 120)
-
-        _SplitContainer.Panel1.Controls.Add(tvFolders)
-        _SplitContainer.Panel2.Controls.Add(lvFiles)
-
-        tvFolders.ContextMenuStrip = _FolderContextMenu
-        lvFiles.ContextMenuStrip = _EmptyFileContextMenu
-    End Sub
-
-    Private Sub InitialiseEvents()
-        AddHandler tvFolders.AfterSelect, AddressOf tvFolders_AfterSelect
-        AddHandler tvFolders.NodeMouseClick, AddressOf tvFolders_NodeMouseClick
-        AddHandler tvFolders.DragEnter, AddressOf FileSystemControl_DragEnter
-        AddHandler tvFolders.DragOver, AddressOf tvFolders_DragOver
-        AddHandler tvFolders.DragDrop, AddressOf tvFolders_DragDrop
-        AddHandler tvFolders.MouseDown, AddressOf tvFolders_MouseDown
-        AddHandler tvFolders.MouseMove, AddressOf tvFolders_MouseMove
-        AddHandler tvFolders.MouseUp, AddressOf tvFolders_MouseUp
-
-        AddHandler lvFiles.SelectedIndexChanged, AddressOf lvFiles_SelectedIndexChanged
-        AddHandler lvFiles.MouseDoubleClick, AddressOf lvFiles_MouseDoubleClick
-        AddHandler lvFiles.DragEnter, AddressOf FileSystemControl_DragEnter
-        AddHandler lvFiles.DragOver, AddressOf lvFiles_DragOver
-        AddHandler lvFiles.DragDrop, AddressOf lvFiles_DragDrop
-        AddHandler lvFiles.MouseDown, AddressOf lvFiles_MouseDown
-        AddHandler lvFiles.MouseMove, AddressOf lvFiles_MouseMove
-        AddHandler lvFiles.MouseUp, AddressOf lvFiles_MouseUp
-
-        AddHandler _FolderContextMenu.Opening, AddressOf FolderContextMenu_Opening
-        AddHandler _FileContextMenu.Opening, AddressOf FileContextMenu_Opening
-        AddHandler _EmptyFileContextMenu.Opening, AddressOf EmptyFileContextMenu_Opening
-
-        AddHandler KeyDown, AddressOf BrowserForm_KeyDown
-    End Sub
 
     Public Sub RefreshFileSystemView()
         Dim SelectedAnchorId = GetSelectedDirectoryAnchorId()
@@ -273,28 +190,28 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
                        ToList()
     End Function
 
-    Private Sub tvFolders_AfterSelect(Sender As Object, EventArgs As TreeViewEventArgs)
+    Private Sub tvFolders_AfterSelect(Sender As Object, EventArgs As TreeViewEventArgs) Handles tvFolders.AfterSelect
         Dim Info = TryCast(EventArgs.Node.Tag, DirectoryNodeInfo)
         If Info Is Nothing Then Return
         _CurrentDirectoryAnchorId = Info.AnchorId
         RefreshCurrentDirectory()
     End Sub
 
-    Private Sub tvFolders_NodeMouseClick(Sender As Object, EventArgs As TreeNodeMouseClickEventArgs)
+    Private Sub tvFolders_NodeMouseClick(Sender As Object, EventArgs As TreeNodeMouseClickEventArgs) Handles tvFolders.NodeMouseClick
         If EventArgs.Button = MouseButtons.Right Then tvFolders.SelectedNode = EventArgs.Node
     End Sub
 
-    Private Sub lvFiles_SelectedIndexChanged(Sender As Object, EventArgs As EventArgs)
+    Private Sub lvFiles_SelectedIndexChanged(Sender As Object, EventArgs As EventArgs) Handles lvFiles.SelectedIndexChanged
         lvFiles.ContextMenuStrip = If(lvFiles.SelectedItems.Count > 0, _FileContextMenu, _EmptyFileContextMenu)
         UpdateStatus()
     End Sub
 
-    Private Sub lvFiles_MouseDoubleClick(Sender As Object, EventArgs As MouseEventArgs)
+    Private Sub lvFiles_MouseDoubleClick(Sender As Object, EventArgs As MouseEventArgs) Handles lvFiles.MouseDoubleClick
         If EventArgs.Button <> MouseButtons.Left OrElse lvFiles.SelectedItems.Count <> 1 Then Return
         SaveSelectedFiles(Me, EventArgs)
     End Sub
 
-    Private Sub FolderContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs)
+    Private Sub FolderContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs) Handles _FolderContextMenu.Opening
         _FolderContextMenu.Items.Clear()
         If tvFolders.SelectedNode Is Nothing Then
             EventArgs.Cancel = True
@@ -319,7 +236,7 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
         AddMenuItem(_FolderContextMenu, "Refresh", AddressOf RefreshMenuItem_Click)
     End Sub
 
-    Private Sub FileContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs)
+    Private Sub FileContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs) Handles _FileContextMenu.Opening
         _FileContextMenu.Items.Clear()
         Dim Entries = GetSelectedFileEntries()
         If Entries.Count = 0 Then
@@ -337,7 +254,7 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
         AddMenuItem(_FileContextMenu, "Refresh", AddressOf RefreshMenuItem_Click)
     End Sub
 
-    Private Sub EmptyFileContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs)
+    Private Sub EmptyFileContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs) Handles _EmptyFileContextMenu.Opening
         _EmptyFileContextMenu.Items.Clear()
         AddMenuItem(_EmptyFileContextMenu, "Upload File(s)...", AddressOf UploadFilesFromDialog)
         AddMenuItem(_EmptyFileContextMenu, "Upload Folder...", AddressOf UploadFolderFromDialog)
@@ -589,15 +506,15 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
         ExecuteUiOperation(AddressOf RefreshFileSystemView, "The file-system view could not be refreshed.")
     End Sub
 
-    Private Sub FileSystemControl_DragEnter(Sender As Object, EventArgs As DragEventArgs)
+    Private Sub FileSystemControl_DragEnter(Sender As Object, EventArgs As DragEventArgs) Handles tvFolders.DragEnter, lvFiles.DragEnter
         EventArgs.Effect = GetExternalDropEffect(EventArgs.Data, EventArgs.AllowedEffect)
     End Sub
 
-    Private Sub lvFiles_DragOver(Sender As Object, EventArgs As DragEventArgs)
+    Private Sub lvFiles_DragOver(Sender As Object, EventArgs As DragEventArgs) Handles lvFiles.DragOver
         EventArgs.Effect = GetExternalDropEffect(EventArgs.Data, EventArgs.AllowedEffect)
     End Sub
 
-    Private Sub tvFolders_DragOver(Sender As Object, EventArgs As DragEventArgs)
+    Private Sub tvFolders_DragOver(Sender As Object, EventArgs As DragEventArgs) Handles tvFolders.DragOver
         EventArgs.Effect = GetExternalDropEffect(EventArgs.Data, EventArgs.AllowedEffect)
         If EventArgs.Effect = DragDropEffects.None Then Return
 
@@ -612,11 +529,11 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Return DragDropEffects.None
     End Function
 
-    Private Sub lvFiles_DragDrop(Sender As Object, EventArgs As DragEventArgs)
+    Private Sub lvFiles_DragDrop(Sender As Object, EventArgs As DragEventArgs) Handles lvFiles.DragDrop
         UploadDroppedPaths(EventArgs.Data, _CurrentDirectoryAnchorId)
     End Sub
 
-    Private Sub tvFolders_DragDrop(Sender As Object, EventArgs As DragEventArgs)
+    Private Sub tvFolders_DragDrop(Sender As Object, EventArgs As DragEventArgs) Handles tvFolders.DragDrop
         Dim ClientPoint = tvFolders.PointToClient(New Point(EventArgs.X, EventArgs.Y))
         Dim TargetNode = tvFolders.GetNodeAt(ClientPoint)
         If TargetNode Is Nothing Then Return
@@ -632,12 +549,12 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
         UploadPaths(Paths, TargetDirectoryAnchorId)
     End Sub
 
-    Private Sub lvFiles_MouseDown(Sender As Object, EventArgs As MouseEventArgs)
+    Private Sub lvFiles_MouseDown(Sender As Object, EventArgs As MouseEventArgs) Handles lvFiles.MouseDown
         _ListDragStart = EventArgs.Location
         _ListDragArmed = EventArgs.Button = MouseButtons.Left AndAlso lvFiles.SelectedItems.Count > 0
     End Sub
 
-    Private Sub lvFiles_MouseMove(Sender As Object, EventArgs As MouseEventArgs)
+    Private Sub lvFiles_MouseMove(Sender As Object, EventArgs As MouseEventArgs) Handles lvFiles.MouseMove
         If _ListDragArmed = False OrElse EventArgs.Button <> MouseButtons.Left Then Return
         If IsDragThresholdExceeded(_ListDragStart, EventArgs.Location) = False Then Return
         _ListDragArmed = False
@@ -647,16 +564,16 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
         BeginExternalFileDrag(Entries)
     End Sub
 
-    Private Sub lvFiles_MouseUp(Sender As Object, EventArgs As MouseEventArgs)
+    Private Sub lvFiles_MouseUp(Sender As Object, EventArgs As MouseEventArgs) Handles lvFiles.MouseUp
         _ListDragArmed = False
     End Sub
 
-    Private Sub tvFolders_MouseDown(Sender As Object, EventArgs As MouseEventArgs)
+    Private Sub tvFolders_MouseDown(Sender As Object, EventArgs As MouseEventArgs) Handles tvFolders.MouseDown
         _TreeDragStart = EventArgs.Location
         _TreeDragArmed = EventArgs.Button = MouseButtons.Left AndAlso tvFolders.GetNodeAt(EventArgs.Location) IsNot Nothing
     End Sub
 
-    Private Sub tvFolders_MouseMove(Sender As Object, EventArgs As MouseEventArgs)
+    Private Sub tvFolders_MouseMove(Sender As Object, EventArgs As MouseEventArgs) Handles tvFolders.MouseMove
         If _TreeDragArmed = False OrElse EventArgs.Button <> MouseButtons.Left Then Return
         If IsDragThresholdExceeded(_TreeDragStart, EventArgs.Location) = False Then Return
         _TreeDragArmed = False
@@ -669,7 +586,7 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
         BeginExternalDirectoryDrag(Info)
     End Sub
 
-    Private Sub tvFolders_MouseUp(Sender As Object, EventArgs As MouseEventArgs)
+    Private Sub tvFolders_MouseUp(Sender As Object, EventArgs As MouseEventArgs) Handles tvFolders.MouseUp
         _TreeDragArmed = False
     End Sub
 
@@ -764,7 +681,7 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Return Candidate
     End Function
 
-    Private Sub BrowserForm_KeyDown(Sender As Object, EventArgs As KeyEventArgs)
+    Private Sub BrowserForm_KeyDown(Sender As Object, EventArgs As KeyEventArgs) Handles Me.KeyDown
         If EventArgs.KeyCode = Keys.F5 Then
             RefreshMenuItem_Click(Me, EventArgs)
             EventArgs.Handled = True
@@ -846,11 +763,7 @@ Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If _Disposed Then Return
 
         If Disposing Then
-            _FolderContextMenu.Dispose()
-            _FileContextMenu.Dispose()
-            _EmptyFileContextMenu.Dispose()
-            _StatusStrip.Dispose()
-            _SplitContainer.Dispose()
+            If Components IsNot Nothing Then Components.Dispose()
             If _OwnsFileSystem Then _FileSystem.Dispose()
         End If
 

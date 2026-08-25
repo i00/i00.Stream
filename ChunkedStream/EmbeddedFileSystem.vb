@@ -72,7 +72,7 @@ Namespace Streams
         Private Const NameByteCapacity As Integer = 512
         Private Const EntrySize As Integer = 536
 
-        Private ReadOnly _ChunkedStream As ChunkedStream
+        Public ReadOnly ChunkedStream As ChunkedStream
         Private ReadOnly _SyncRoot As New Object()
         Private ReadOnly _OpenFileIds As New HashSet(Of Long)()
         Private ReadOnly _LeaveOpen As Boolean
@@ -87,9 +87,9 @@ Namespace Streams
             If ChunkedStream.CanRead = False OrElse ChunkedStream.CanWrite = False OrElse ChunkedStream.CanSeek = False Then
                 Throw New ArgumentException("The ChunkedStream must be readable, writable, and seekable.", NameOf(ChunkedStream))
             End If
-            _ChunkedStream = ChunkedStream
+            Me.ChunkedStream = ChunkedStream
             _LeaveOpen = LeaveOpen
-            If _ChunkedStream.Length = 0 Then CreateRoot() Else OpenRoot()
+            If Me.ChunkedStream.Length = 0 Then CreateRoot() Else OpenRoot()
         End Sub
 
         ''' <summary>Gets the non-removable root directory anchor ID.</summary>
@@ -132,9 +132,9 @@ Namespace Streams
                 ValidateName(Name)
                 Dim Parent = GetDirectory(ParentDirectoryAnchorId)
                 EnsureNameAvailable(Parent, Name)
-                Using Checkpoint = _ChunkedStream.CreateCheckpoint()
+                Using Checkpoint = ChunkedStream.CreateCheckpoint()
                     Dim Data = BuildDirectory(Parent.AnchorId)
-                    Dim Child = _ChunkedStream.CreateAnchor(Data)
+                    Dim Child = ChunkedStream.CreateAnchor(Data)
                     AppendEntry(Parent, New ContentListEntry(EntryTypes.Directory, Child.AnchorId, Data.LongLength, Name))
                     Checkpoint.Commit()
                     Return Child.AnchorId
@@ -149,8 +149,8 @@ Namespace Streams
                 ValidateName(Name)
                 Dim Parent = GetDirectory(ParentDirectoryAnchorId)
                 EnsureNameAvailable(Parent, Name)
-                Using Checkpoint = _ChunkedStream.CreateCheckpoint()
-                    Dim Child = _ChunkedStream.CreateAnchor(BuildFile(Parent.AnchorId))
+                Using Checkpoint = ChunkedStream.CreateCheckpoint()
+                    Dim Child = ChunkedStream.CreateAnchor(BuildFile(Parent.AnchorId))
                     AppendEntry(Parent, New ContentListEntry(EntryTypes.File, Child.AnchorId, 0, Name))
                     Checkpoint.Commit()
                     Return Child.AnchorId
@@ -208,12 +208,12 @@ Namespace Streams
         End Function
 
         Private Sub CreateRoot()
-            _Root = _ChunkedStream.CreateAnchor(BuildDirectory(0))
+            _Root = ChunkedStream.CreateAnchor(BuildDirectory(0))
             If _Root.AnchorId <= 0 OrElse _Root.Offset <> 0 Then Throw New InvalidDataException("Invalid root anchor.")
         End Sub
 
         Private Sub OpenRoot()
-            Dim Candidate = _ChunkedStream.GetAnchors().Where(Function(anchor) anchor.IsValid AndAlso anchor.Offset = 0).SingleOrDefault()
+            Dim Candidate = ChunkedStream.GetAnchors().Where(Function(anchor) anchor.IsValid AndAlso anchor.Offset = 0).SingleOrDefault()
             If Candidate Is Nothing Then Throw New InvalidDataException("No root anchor exists at logical offset zero.")
             EnsureType(Candidate, DataType.Directory)
             If ReadInt64(Candidate.Offset + ParentOffset) <> 0 Then Throw New InvalidDataException("The root parent anchor ID must be zero.")
@@ -269,19 +269,19 @@ Namespace Streams
             If Length < DirectoryHeaderSize OrElse (Length - DirectoryHeaderSize) Mod EntrySize <> 0 Then
                 Throw New InvalidDataException("Invalid directory length.")
             End If
-            If Anchor.Offset + Length > _ChunkedStream.Length Then Throw New InvalidDataException("Directory extends beyond the stream.")
+            If Anchor.Offset + Length > ChunkedStream.Length Then Throw New InvalidDataException("Directory extends beyond the stream.")
         End Sub
 
         Private Sub AppendEntry(Parent As ChunkedStream.Anchor, Entry As ContentListEntry)
             Dim OldLength = ReadInt64(Parent.Offset + DirectoryLengthOffset)
             Dim Data = EncodeEntry(Entry)
-            _ChunkedStream.Insert(Parent.Offset + OldLength, Data)
+            ChunkedStream.Insert(Parent.Offset + OldLength, Data)
             SetDirectoryLength(Parent, OldLength + EntrySize)
         End Sub
 
         Private Sub RemoveEntry(Location As EntryLocation)
             Dim OldLength = ReadInt64(Location.Parent.Offset + DirectoryLengthOffset)
-            _ChunkedStream.Remove(Location.Parent.Offset + DirectoryHeaderSize + (CLng(Location.Index) * EntrySize), EntrySize)
+            ChunkedStream.Remove(Location.Parent.Offset + DirectoryHeaderSize + (CLng(Location.Index) * EntrySize), EntrySize)
             SetDirectoryLength(Location.Parent, OldLength - EntrySize)
         End Sub
 
@@ -293,7 +293,7 @@ Namespace Streams
         Private Sub DeleteCore(Location As EntryLocation)
             If Location.Entry.ChildAnchorId = _Root.AnchorId Then Throw New InvalidOperationException("The root cannot be removed.")
             If _OpenFileIds.Contains(Location.Entry.ChildAnchorId) Then Throw New IOException("The file is open.")
-            Using Checkpoint = _ChunkedStream.CreateCheckpoint()
+            Using Checkpoint = ChunkedStream.CreateCheckpoint()
                 Dim Child = GetAnchor(Location.Entry.ChildAnchorId)
                 Dim ChildType = ReadType(Child)
                 If ChildType = DataType.Directory Then
@@ -308,7 +308,7 @@ Namespace Streams
                                       ReadInt64(Child.Offset + DirectoryLengthOffset),
                                       FileHeaderSize + Location.Entry.LengthOfDataAtEntry)
                 RemoveEntry(Location)
-                _ChunkedStream.Remove(Child.Offset, StoredLength)
+                ChunkedStream.Remove(Child.Offset, StoredLength)
                 Checkpoint.Commit()
             End Using
         End Sub
@@ -372,7 +372,7 @@ Namespace Streams
 
         Private Function GetAnchor(AnchorId As Long) As ChunkedStream.Anchor
             If AnchorId <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(AnchorId))
-            Return _ChunkedStream.GetAnchor(AnchorId)
+            Return ChunkedStream.GetAnchor(AnchorId)
         End Function
 
         Private Function GetDirectory(AnchorId As Long) As ChunkedStream.Anchor
@@ -452,7 +452,7 @@ Namespace Streams
                 Dim Length = GetFileLength(FileAnchor)
                 If Position >= Length OrElse Count = 0 Then Return 0
                 Dim Required = CInt(Math.Min(CLng(Count), Length - Position))
-                Dim Result = _ChunkedStream.Read(FileAnchor.Offset + FileHeaderSize + Position, Data, Offset, Required)
+                Dim Result = ChunkedStream.Read(FileAnchor.Offset + FileHeaderSize + Position, Data, Offset, Required)
                 If Result <> Required Then Throw New EndOfStreamException()
                 Return Result
             End SyncLock
@@ -466,18 +466,18 @@ Namespace Streams
                 Dim OldLength = Location.Entry.LengthOfDataAtEntry
                 Dim NewEnd = Position + Count
                 If NewEnd <= OldLength Then
-                    _ChunkedStream.Write(FileAnchor.Offset + FileHeaderSize + Position, Data, Offset, Count)
+                    ChunkedStream.Write(FileAnchor.Offset + FileHeaderSize + Position, Data, Offset, Count)
                     Return
                 End If
-                Using Checkpoint = _ChunkedStream.CreateCheckpoint()
-                    If Position > OldLength Then _ChunkedStream.InsertNullBytes(FileAnchor.Offset + FileHeaderSize + OldLength, Position - OldLength)
+                Using Checkpoint = ChunkedStream.CreateCheckpoint()
+                    If Position > OldLength Then ChunkedStream.InsertNullBytes(FileAnchor.Offset + FileHeaderSize + OldLength, Position - OldLength)
                     Dim Existing = CInt(Math.Min(CLng(Count), Math.Max(0L, OldLength - Position)))
-                    If Existing > 0 Then _ChunkedStream.Write(FileAnchor.Offset + FileHeaderSize + Position, Data, Offset, Existing)
+                    If Existing > 0 Then ChunkedStream.Write(FileAnchor.Offset + FileHeaderSize + Position, Data, Offset, Existing)
                     Dim Appended = Count - Existing
                     If Appended > 0 Then
                         Dim Tail(Appended - 1) As Byte
                         System.Buffer.BlockCopy(Data, Offset + Existing, Tail, 0, Appended)
-                        _ChunkedStream.Insert(FileAnchor.Offset + FileHeaderSize + Math.Max(OldLength, Position), Tail)
+                        ChunkedStream.Insert(FileAnchor.Offset + FileHeaderSize + Math.Max(OldLength, Position), Tail)
                     End If
                     SetEntryLength(Location, NewEnd)
                     Checkpoint.Commit()
@@ -490,11 +490,11 @@ Namespace Streams
                 Dim Location = GetFileLocation(FileAnchor)
                 Dim OldLength = Location.Entry.LengthOfDataAtEntry
                 If Length = OldLength Then Return
-                Using Checkpoint = _ChunkedStream.CreateCheckpoint()
+                Using Checkpoint = ChunkedStream.CreateCheckpoint()
                     If Length > OldLength Then
-                        _ChunkedStream.InsertNullBytes(FileAnchor.Offset + FileHeaderSize + OldLength, Length - OldLength)
+                        ChunkedStream.InsertNullBytes(FileAnchor.Offset + FileHeaderSize + OldLength, Length - OldLength)
                     Else
-                        _ChunkedStream.Remove(FileAnchor.Offset + FileHeaderSize + Length, OldLength - Length)
+                        ChunkedStream.Remove(FileAnchor.Offset + FileHeaderSize + Length, OldLength - Length)
                     End If
                     SetEntryLength(Location, Length)
                     Checkpoint.Commit()
@@ -512,7 +512,7 @@ Namespace Streams
         Private Sub ReadExactly(LogicalOffset As Long, Data As Byte(), Offset As Integer, Count As Integer)
             Dim Total = 0
             While Total < Count
-                Dim Current = _ChunkedStream.Read(LogicalOffset + Total, Data, Offset + Total, Count - Total)
+                Dim Current = ChunkedStream.Read(LogicalOffset + Total, Data, Offset + Total, Count - Total)
                 If Current = 0 Then Throw New EndOfStreamException()
                 Total += Current
             End While
@@ -525,7 +525,7 @@ Namespace Streams
         End Function
 
         Private Sub WriteInt64(LogicalOffset As Long, Value As Long)
-            _ChunkedStream.Write(LogicalOffset, BitConverter.GetBytes(Value))
+            ChunkedStream.Write(LogicalOffset, BitConverter.GetBytes(Value))
         End Sub
 
         Private Shared Sub PutInt64(Data As Byte(), Offset As Integer, Value As Long)
@@ -547,7 +547,7 @@ Namespace Streams
                 If _Disposed Then Return
                 If _OpenFileIds.Count > 0 Then Throw New InvalidOperationException("All file streams must be disposed first.")
                 _Disposed = True
-                If _LeaveOpen = False Then _ChunkedStream.Dispose()
+                If _LeaveOpen = False Then ChunkedStream.Dispose()
             End SyncLock
         End Sub
 
@@ -599,7 +599,7 @@ Namespace Streams
 
             Public Overrides Sub Flush()
                 CheckDisposed()
-                _Owner._ChunkedStream.Flush()
+                _Owner.ChunkedStream.Flush()
             End Sub
 
             Public Overrides Function Read(Data As Byte(), Offset As Integer, Count As Integer) As Integer

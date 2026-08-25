@@ -745,9 +745,6 @@ Namespace Streams
         ''' <summary>
         ''' Builds a physical-region description of all persisted metadata structures.
         ''' </summary>
-        ''' <summary>
-        ''' Builds descriptions of every active persisted metadata structure.
-        ''' </summary>
         Private Function GetMetadataRegionBuildInfos() As List(Of MetadataRegionBuildInfo)
 
             Dim Result As New List(Of MetadataRegionBuildInfo)()
