@@ -132,10 +132,9 @@ Namespace Streams
 
         Public Async Function GetStructureAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of ChunkedStreamStructure)
             Return Await Task.Run(
-                    Function()
-                        CancellationToken.ThrowIfCancellationRequested()
-                        Return GetStructure()
-                    End Function, CancellationToken).ConfigureAwait(False)
+                Function()
+                    Return GetStructure(CancellationToken)
+                End Function, CancellationToken).ConfigureAwait(False)
         End Function
 
         Private Function CaptureStructureSnapshotCore() As StructureSnapshot

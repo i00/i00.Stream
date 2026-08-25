@@ -738,7 +738,12 @@ Namespace Streams
             If BufferOffset > Buffer.Length - Count Then Throw New ArgumentException("Buffer offset and count exceed the buffer length.")
         End Sub
         Private ReadOnly _StateLock As New SemaphoreSlim(1, 1)
-        Private ReadOnly _StateLockDepth As New ThreadLocal(Of Integer)(Function() 0)
+
+        ' WARNING: AsyncLocal flows forward into asynchronous forks (e.g., Task.Run, Task.WhenAll) as a shallow copy.
+        ' If concurrent tasks are spawned while this lock is held, both branches will independently inherit the same
+        ' depth counter, risking concurrent execution without proper re-acquisition.
+        ' DO NOT introduce concurrent fan-out (like Task.WhenAll) under this lock.
+        Private ReadOnly _StateLockDepth As New AsyncLocal(Of Integer)
 
         Private Function EnterStateLock() As IDisposable
             If _StateLockDepth.Value = 0 Then _StateLock.Wait()

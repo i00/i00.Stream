@@ -30,10 +30,9 @@ Namespace Streams
 
         Public Async Function GetFragmentationAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Double)
             Return Await Task.Run(
-                   Function()
-                       CancellationToken.ThrowIfCancellationRequested()
-                       Return GetFragmentation(CancellationToken)
-                   End Function, CancellationToken).ConfigureAwait(False)
+                Function()
+                    Return GetFragmentation(CancellationToken)
+                End Function, CancellationToken).ConfigureAwait(False)
         End Function
 
         Private Function GetFragmentationCore(Snapshot As DiagnosticsSnapshot) As Double
@@ -62,16 +61,16 @@ Namespace Streams
                 Snapshot = CaptureDiagnosticsSnapshotCore(True)
             End Using
 
+            CancellationToken.ThrowIfCancellationRequested()
+
             ValidateCore(Snapshot, ProgressCallback, CancellationToken)
 
         End Sub
 
-
         Public Async Function ValidateAsync(Optional ProgressCallback As StreamProgressCallback = Nothing, Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
             Await Task.Run(
                 Sub()
-                    CancellationToken.ThrowIfCancellationRequested()
-                    GetStructure(CancellationToken)
+                    Validate(ProgressCallback, CancellationToken)
                 End Sub, CancellationToken).ConfigureAwait(False)
         End Function
 
