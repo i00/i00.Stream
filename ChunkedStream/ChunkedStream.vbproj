@@ -83,12 +83,13 @@
     <Compile Include="ChunkedStream\Diagnostics.vb" />
     <Compile Include="ChunkedStream\Extents.vb" />
     <Compile Include="ChunkedStream\Options.vb" />
+    <Compile Include="ChunkedStream\Positioned Storage Interface.vb" />
     <Compile Include="ChunkedStream\Recovery.vb" />
     <Compile Include="ChunkedStream\Defrag.vb" />
     <Compile Include="ChunkedStream\Crypto.vb" />
     <Compile Include="ChunkedStream\Storage.vb" />
     <Compile Include="ChunkedStream\Structure.vb" />
-    <Compile Include="ChunkedStream\UnitTestHelpers.vb" />
+    <Compile Include="ChunkedStream\Unit Test Helpers.vb" />
     <Compile Include="Compression\Snappy.vb" />
     <Compile Include="EmbeddedFileSystem.vb" />
     <Compile Include="Extensions.vb" />

@@ -606,7 +606,24 @@ Namespace Streams
         ''' </remarks>
         Protected Overridable ReadOnly Property RequiredPhysicalIoLocks As PhysicalIoLockStates
             Get
-                Return PhysicalIoLockStates.FullLock
+                Dim PositionedStream = TryCast(_Fs, IPositionedStream)
+
+                If PositionedStream Is Nothing Then
+                    Return PhysicalIoLockStates.FullLock
+                End If
+
+                Dim Result = PhysicalIoLockStates.None
+                Dim Capabilities = PositionedStream.PositionedIoCapabilities
+
+                If Capabilities.HasFlag(PositionedIoCapabilities.LockFreeReads) = False Then
+                    Result = Result Or PhysicalIoLockStates.ReadLock
+                End If
+
+                If Capabilities.HasFlag(PositionedIoCapabilities.LockFreeWrites) = False Then
+                    Result = Result Or PhysicalIoLockStates.WriteLock
+                End If
+
+                Return Result
             End Get
         End Property
 
@@ -640,20 +657,77 @@ Namespace Streams
             End If
         End Sub
 
-        Protected Overridable Sub ReadAtCore(PhysicalOffset As Long, Buffer As Byte(), BufferOffset As Integer, Count As Integer)
-            If RequiredPhysicalIoLocks <> PhysicalIoLockStates.FullLock Then
-                Throw New InvalidOperationException($"The default {NameOf(ReadAtCore)} implementation requires {NameOf(PhysicalIoLockStates.FullLock)}. Override {NameOf(ReadAtCore)} before removing any physical I/O lock flag.")
+        Protected Overridable Sub ReadAtCore(PhysicalOffset As Long,
+                                             Buffer As Byte(),
+                                             BufferOffset As Integer,
+                                             Count As Integer)
+
+            Dim PositionedStream = TryCast(_Fs, IPositionedStream)
+
+            If PositionedStream IsNot Nothing Then
+                Dim TotalRead = 0
+
+                While TotalRead < Count
+                    Dim BytesRead =
+                        PositionedStream.ReadAt(
+                            PhysicalOffset + TotalRead,
+                            Buffer,
+                            BufferOffset + TotalRead,
+                            Count - TotalRead)
+
+                    If BytesRead <= 0 Then
+                        Throw New EndOfStreamException("Unexpected end of positioned stream.")
+                    End If
+
+                    If BytesRead > Count - TotalRead Then
+                        Throw New InvalidDataException("The positioned stream returned more bytes than requested.")
+                    End If
+
+                    TotalRead += BytesRead
+                End While
+
+                Return
             End If
+
+            If RequiredPhysicalIoLocks <> PhysicalIoLockStates.FullLock Then
+                Throw New InvalidOperationException(
+                    $"The default position-based {NameOf(ReadAtCore)} implementation requires " &
+                    $"{NameOf(PhysicalIoLockStates.FullLock)}. Override {NameOf(ReadAtCore)} " &
+                    $"or provide a backing stream that implements {NameOf(IPositionedStream)}.")
+            End If
+
             _Fs.Position = PhysicalOffset
             ReadExactly(_Fs, Buffer, BufferOffset, Count)
+
         End Sub
 
-        Protected Overridable Sub WriteAtCore(PhysicalOffset As Long, Buffer As Byte(), BufferOffset As Integer, Count As Integer)
-            If RequiredPhysicalIoLocks <> PhysicalIoLockStates.FullLock Then
-                Throw New InvalidOperationException($"The default {NameOf(WriteAtCore)} implementation requires {NameOf(PhysicalIoLockStates.FullLock)}. Override {NameOf(WriteAtCore)} before removing any physical I/O lock flag.")
+        Protected Overridable Sub WriteAtCore(PhysicalOffset As Long,
+                                              Buffer As Byte(),
+                                              BufferOffset As Integer,
+                                              Count As Integer)
+
+            Dim PositionedStream = TryCast(_Fs, IPositionedStream)
+
+            If PositionedStream IsNot Nothing Then
+                PositionedStream.WriteAt(
+                    PhysicalOffset,
+                    Buffer,
+                    BufferOffset,
+                    Count)
+
+                Return
             End If
+
+            If RequiredPhysicalIoLocks <> PhysicalIoLockStates.FullLock Then
+                Throw New InvalidOperationException(
+                    $"The default position-based {NameOf(WriteAtCore)} implementation requires " &
+                    $"{NameOf(PhysicalIoLockStates.FullLock)}. Override {NameOf(WriteAtCore)} " &
+                    $"or provide a backing stream that implements {NameOf(IPositionedStream)}.")
+            End If
+
             _Fs.Position = PhysicalOffset
             _Fs.Write(Buffer, BufferOffset, Count)
+
         End Sub
 
         Private Shared Sub ValidatePhysicalIoArguments(PhysicalOffset As Long, Buffer As Byte(), BufferOffset As Integer, Count As Integer)
