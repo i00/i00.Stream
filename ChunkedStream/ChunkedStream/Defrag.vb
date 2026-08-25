@@ -416,19 +416,47 @@ Namespace Streams
 
         Private Function GetDeadHoles(LiveRecords As List(Of DefragLiveRecord)) As List(Of DefragHole)
 
+            If LiveRecords Is Nothing Then
+                Throw New ArgumentNullException(NameOf(LiveRecords))
+            End If
+
+            Dim ReservedRanges As New List(Of Tuple(Of Long, Long))()
+
+            For Each Record In LiveRecords
+
+                If Record.RecordLength <= 0 Then Continue For
+
+                ReservedRanges.Add(
+                        Tuple.Create(
+                            Record.Offset,
+                            Record.Offset + CLng(Record.RecordLength)))
+
+            Next
+
+            ReservedRanges.AddRange(GetActiveMetadataRanges())
+
+            ReservedRanges = ReservedRanges.Where(Function(Range) Range.Item2 > DataStartOffset AndAlso Range.Item2 > Range.Item1).
+                                            Select(Function(Range) Tuple.Create(Math.Max(CLng(DataStartOffset), Range.Item1), Range.Item2)).
+                                            OrderBy(Function(Range) Range.Item1).
+                                            ThenBy(Function(Range) Range.Item2).
+                                            ToList()
+
             Dim Holes As New List(Of DefragHole)()
             Dim Cursor = CLng(DataStartOffset)
 
-            For Each record In LiveRecords
+            For Each Range In ReservedRanges
 
-                If record.Offset > Cursor Then
+                Dim RangeStart = Range.Item1
+                Dim RangeEnd = Range.Item2
+
+                If RangeStart > Cursor Then
                     Holes.Add(New DefragHole With {
-                        .Offset = Cursor,
-                        .Length = record.Offset - Cursor
-                    })
+                                  .Offset = Cursor,
+                                  .Length = RangeStart - Cursor
+                              })
                 End If
 
-                Cursor = Math.Max(Cursor, record.Offset + CLng(record.RecordLength))
+                Cursor = Math.Max(Cursor, RangeEnd)
 
             Next
 

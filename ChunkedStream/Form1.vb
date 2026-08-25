@@ -520,7 +520,7 @@ Public Class Form1
 
                     Dim DefraggedFragmentation = Enc.GetFragmentation
 
-
+                    Dim Matched = OriginalMD5 = DecryptedMD5 AndAlso DecryptedMD5 = DefragMD5
                     Dim Dictionary As New Dictionary(Of String, String) From {
                           {"Mode", If(RandomWrite,
                                       "Random Fragmented Write",
@@ -528,7 +528,7 @@ Public Class Form1
                           {"Original MD5", OriginalMD5},
                           {"Decrypted MD5", DecryptedMD5},
                           {"Defragged MD5", DefragMD5},
-                          {"Match", If(OriginalMD5 = DecryptedMD5 AndAlso DecryptedMD5 = DefragMD5,
+                          {"Match", If(Matched,
                                        "Yes",
                                        "NO")},
                           {"File Size", FileIO.FileSystem.GetFileInfo(FileName).Length.FormatFileSizeFromBytes},
@@ -546,7 +546,8 @@ Public Class Form1
                                 Join(Dictionary.
                                      Select(Function(x) $"{x.Key}: {x.Value}").
                                      ToArray(),
-                                     vbCrLf))
+                                     vbCrLf),
+                                If(Matched, MsgBoxStyle.Information, MsgBoxStyle.Critical))
 
                 End Using
 

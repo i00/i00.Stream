@@ -117,16 +117,25 @@ Namespace Streams
         ''' A snapshot containing logical chunks, the ordered physical-region walk,
         ''' metadata-page utilisation and aggregate storage statistics.
         ''' </returns>
-        Public Function GetStructure() As ChunkedStreamStructure
+        Public Function GetStructure(Optional CancellationToken As Threading.CancellationToken = Nothing) As ChunkedStreamStructure
 
             Dim Snapshot As StructureSnapshot
-
             Using EnterStateLock()
                 Snapshot = CaptureStructureSnapshotCore()
             End Using
 
+            CancellationToken.ThrowIfCancellationRequested()
+
             Return GetStructureCore(Snapshot)
 
+        End Function
+
+        Public Async Function GetStructureAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of ChunkedStreamStructure)
+            Return Await Task.Run(
+                    Function()
+                        CancellationToken.ThrowIfCancellationRequested()
+                        Return GetStructure()
+                    End Function, CancellationToken).ConfigureAwait(False)
         End Function
 
         Private Function CaptureStructureSnapshotCore() As StructureSnapshot

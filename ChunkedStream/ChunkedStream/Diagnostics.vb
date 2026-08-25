@@ -14,7 +14,7 @@ Namespace Streams
             Public ChunkMacKey As Byte()
         End Class
 
-        Public Function GetFragmentation() As Double
+        Public Function GetFragmentation(Optional CancellationToken As Threading.CancellationToken = Nothing) As Double
 
             Dim Snapshot As DiagnosticsSnapshot
 
@@ -22,8 +22,18 @@ Namespace Streams
                 Snapshot = CaptureDiagnosticsSnapshotCore(False)
             End Using
 
+            CancellationToken.ThrowIfCancellationRequested()
+
             Return GetFragmentationCore(Snapshot)
 
+        End Function
+
+        Public Async Function GetFragmentationAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Double)
+            Return Await Task.Run(
+                   Function()
+                       CancellationToken.ThrowIfCancellationRequested()
+                       Return GetFragmentation(CancellationToken)
+                   End Function, CancellationToken).ConfigureAwait(False)
         End Function
 
         Private Function GetFragmentationCore(Snapshot As DiagnosticsSnapshot) As Double
@@ -44,7 +54,7 @@ Namespace Streams
 
         End Function
 
-        Public Sub Validate(Optional ProgressCallback As StreamProgressCallback = Nothing)
+        Public Sub Validate(Optional ProgressCallback As StreamProgressCallback = Nothing, Optional CancellationToken As Threading.CancellationToken = Nothing)
 
             Dim Snapshot As DiagnosticsSnapshot
 
@@ -52,9 +62,18 @@ Namespace Streams
                 Snapshot = CaptureDiagnosticsSnapshotCore(True)
             End Using
 
-            ValidateCore(Snapshot, ProgressCallback)
+            ValidateCore(Snapshot, ProgressCallback, CancellationToken)
 
         End Sub
+
+
+        Public Async Function ValidateAsync(Optional ProgressCallback As StreamProgressCallback = Nothing, Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+            Await Task.Run(
+                Sub()
+                    CancellationToken.ThrowIfCancellationRequested()
+                    GetStructure(CancellationToken)
+                End Sub, CancellationToken).ConfigureAwait(False)
+        End Function
 
         Private Function CaptureDiagnosticsSnapshotCore(IncludeStoredRecords As Boolean) As DiagnosticsSnapshot
 
@@ -88,7 +107,8 @@ Namespace Streams
         End Function
 
         Private Sub ValidateCore(Snapshot As DiagnosticsSnapshot,
-                                 Optional ProgressCallback As StreamProgressCallback = Nothing)
+                                 Optional ProgressCallback As StreamProgressCallback = Nothing,
+                                 Optional CancellationToken As Threading.CancellationToken = Nothing)
 
             If Snapshot Is Nothing Then Throw New ArgumentNullException(NameOf(Snapshot))
 
@@ -96,7 +116,6 @@ Namespace Streams
             ValidatePhysicalRecordRefCountSnapshot(Snapshot)
             ValidateAnchorSnapshot(Snapshot)
 
-            Dim CancellationToken As New CancellationToken()
             ValidateAllLivePhysicalRecordsSnapshot(Snapshot, ProgressCallback, CancellationToken)
 
         End Sub
@@ -172,13 +191,14 @@ Namespace Streams
 
         Private Sub ValidateAllLivePhysicalRecordsSnapshot(Snapshot As DiagnosticsSnapshot,
                                                            ProgressCallback As StreamProgressCallback,
-                                                           CancellationToken As CancellationToken)
-
+                                                           ThreadingCancellationToken As Threading.CancellationToken)
             Dim TotalRecords = Math.Max(1, Snapshot.PhysicalRecords.Count)
             Dim ProcessedRecords As Long = 0
 
+            Dim CancellationToken = If(ProgressCallback Is Nothing, Nothing, New CancellationToken)
             For Each Pair In Snapshot.PhysicalRecords.OrderBy(Function(Item) Item.Key)
-                If CancellationToken.Cancel Then Return
+                If CancellationToken?.Cancel Then Return
+                ThreadingCancellationToken.ThrowIfCancellationRequested()
                 If Pair.Value.RefCount > 0 Then ValidatePhysicalRecordSnapshot(Snapshot, Pair.Value)
                 ProcessedRecords += 1
                 ProgressCallback?.Invoke(ProcessedRecords, TotalRecords, ProcessUnitTypes.Chunks, CancellationToken)
