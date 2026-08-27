@@ -259,9 +259,9 @@ Namespace Streams
             RemoveLivePhysicalRecordOffset(Record)
 
             '
-            ' Hold the freed span until the next durable publish. Reusing it before the
-            ' superseding generation is durable would let a crash fall back to a header
-            ' that still references this record's storage. See _DeferredFreeSpaces.
+            ' Hold the freed span until the header slot that referenced this record has
+            ' been rotated out, so a crash cannot fall back to a header whose storage we
+            ' have already overwritten. See _DeferredFreeRanges.
             '
             DeferFreeSpace(Record.PhysicalOffset,
                               Record.PhysicalLength)

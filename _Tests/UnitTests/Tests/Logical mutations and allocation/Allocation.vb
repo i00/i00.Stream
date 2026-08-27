@@ -159,16 +159,24 @@ Namespace Tests
                                 Case ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFitScan,
                                      ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan
 
-                                    Cs.Write(Cs.Length, GeneratePatternData(Cs.Options.ChunkSize \ 2, 1234))
-
+                                    ' The first write (rebuilding the map by scanning) fills the big
+                                    ' initial hole, below the first live chunk.
                                     Dim PlaceBefore = Struct.Chunks.First.PhysicalOffset.Value
+
+                                    AssertTrue(NewChunks.Single.PhysicalOffset.Value < PlaceBefore, $"{NameOf(Policy)} policy should be < {PlaceBefore}")
+
+                                    ' A second write must still reuse freed space rather than append
+                                    ' past the end. Which freed hole it picks (the rest of the initial
+                                    ' hole, or the record hole from this session's own Remove once it
+                                    ' leaves the crash-recovery window) is up to the fit policy.
+                                    Cs.Write(Cs.Length, GeneratePatternData(Cs.Options.ChunkSize \ 2, 1234))
 
                                     Dim After2 = Cs.GetStructure()
                                     NewChunks = After2.Chunks.Where(Function(x) After.Chunks.All(Function(y) x.PhysicalOffset.Value <> y.PhysicalOffset.Value)).
                                                               ToArray()
                                     AssertEqual(1, NewChunks.Count, "The number of newly created chunks was not correct")
 
-                                    AssertTrue(NewChunks.Single.PhysicalOffset.Value < PlaceBefore, $"{NameOf(Policy)} policy should be < {PlaceBefore}")
+                                    AssertTrue(NewChunks.Single.PhysicalOffset.Value < OldEnd, $"{NameOf(Policy)} policy should be < {OldEnd}")
 
                                 Case Else
                                     Throw New NotSupportedException($"No test found for {Policy}")
@@ -260,6 +268,64 @@ Namespace Tests
                     End Using
 
                 Next
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that a long run of shuffled random-offset writes with no durable
+            ''' publish (no checkpoint, no flush, no dispose) still packs tightly under
+            ''' BestFit. Freed spans are only withheld from reuse for HeaderCopyCount
+            ''' publishes, so churn inside one uncommitted write stays compact rather than
+            ''' degrading to append-only.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub RandomWriteChurnStaysCompactWithoutADurablePublish()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 4096,
+                        .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit,
+                        .NewIndexPageWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit,
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(9911))
+                    }
+
+                    Const TotalBytes As Integer = 6 * 1024 * 1024
+
+                    Dim Expected = GenerateRandomData(TotalBytes, 9910)
+
+                    Dim Randomizer As New Random(12345)
+                    Dim Segments As New List(Of Tuple(Of Long, Integer))()
+                    Dim Cursor = 0
+
+                    While Cursor < TotalBytes
+                        Dim BlockSize = Math.Min(Randomizer.Next(1024, 256 * 1024), TotalBytes - Cursor)
+                        Segments.Add(Tuple.Create(CLng(Cursor), BlockSize))
+                        Cursor += BlockSize
+                    End While
+
+                    Segments = Segments.OrderBy(Function(x) Randomizer.Next()).ToList()
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        For Each Segment In Segments
+                            Dim Buffer(Segment.Item2 - 1) As Byte
+                            System.Buffer.BlockCopy(Expected, CInt(Segment.Item1), Buffer, 0, Segment.Item2)
+                            Cs.Write(Segment.Item1, Buffer)
+                        Next
+
+                        Dim Fragmentation = Cs.GetFragmentation()
+
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Random-write churn corrupted logical data.")
+                        Cs.Validate()
+
+                        AssertTrue(
+                            Fragmentation < 0.1R,
+                            $"Uncommitted random-write churn should stay compact under BestFit, but fragmentation was {Fragmentation:P1}.")
+
+                    End Using
+
+                End Using
 
             End Sub
 

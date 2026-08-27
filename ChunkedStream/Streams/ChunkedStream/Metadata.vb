@@ -877,13 +877,6 @@ Namespace Streams
 
             If Durable Then FlushDurable()
 
-            '
-            ' The new header is now durable. Every generation the deferred free space
-            ' belonged to is superseded and can no longer be selected by Open, so the
-            ' space is finally safe to reallocate.
-            '
-            If Durable Then PromoteDeferredFreeSpaces()
-
         End Sub
 
         Private Shared Function ReadMetadataRootDescriptor(Buffer As Byte(), Offset As Integer) As MetadataPageDescriptor

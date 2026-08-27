@@ -2730,6 +2730,13 @@ Namespace Streams
             BaseStream.Position = HeaderOffset
             BaseStream.Write(_Header, 0, _Header.Length)
 
+            '
+            ' This rotation has overwritten one header slot. Any deferred span whose
+            ' freeing sequence is now HeaderCopyCount publishes old therefore had its
+            ' referencing slot overwritten and is safe to reallocate.
+            '
+            ReleaseDeferredFreeSpace()
+
             If Durable Then FlushDurable()
 
         End Sub

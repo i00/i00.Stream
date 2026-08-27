@@ -123,24 +123,30 @@ Namespace Streams
 
         Private ReadOnly _FreeSpaces As New FreeSpaceAllocator()
 
+        Friend Structure DeferredFreeRange
+            Public Offset As Long
+            Public Length As Long
+            Public FreedAtHeaderSequence As Long
+        End Structure
+
         '
-        ' Space freed by superseding a previously persisted metadata page, metadata root
-        ' or chunk record is held here instead of being made immediately allocatable.
+        ' Storage freed by superseding a metadata page, metadata root or chunk record is
+        ' parked here instead of being made immediately allocatable.
         '
-        ' The alternating-header crash-recovery model relies on the most recently
-        ' persisted generation remaining byte-for-byte intact until a newer generation
-        ' has been durably published. Making just-freed space reusable straight away
-        ' breaks that guarantee: a non-durable publish (or the window inside a durable
-        ' one) could place a new record or page on top of storage the on-disk header
-        ' still references, so a crash before the new header is durable would leave an
-        ' unopenable stream.
+        ' Crash recovery selects the newest valid header copy, and Open falls back to an
+        ' older copy when the newest generation's metadata cannot be loaded. So the
+        ' generations described by the header copies currently on disk - up to
+        ' HeaderCopyCount of them - must all stay byte-for-byte intact. A generation's
+        ' header slot is not overwritten until HeaderCopyCount further publishes have
+        ' happened, so a freed span is only safe to reuse once the header sequence has
+        ' advanced by at least HeaderCopyCount since it was freed. ReleaseDeferredFreeSpace,
+        ' called after every header rotation, moves the now-safe spans into _FreeSpaces.
         '
-        ' Deferred space is promoted into _FreeSpaces only by PromoteDeferredFreeSpaces,
-        ' which runs after a durable PersistIndexAndHeader has flushed the new header.
-        ' At that point every generation the deferred space belonged to is obsolete and
-        ' the space is genuinely safe to reuse.
+        ' Space written and freed within the same rolling window is still reused promptly
+        ' (after HeaderCopyCount publishes), which keeps churn inside a long uncommitted
+        ' write compact.
         '
-        Private ReadOnly _DeferredFreeSpaces As New FreeSpaceAllocator()
+        Private ReadOnly _DeferredFreeRanges As New List(Of DeferredFreeRange)()
 
         Private Shared Function StorageRangesOverlap(Offset1 As Long,
                                                      Length1 As Long,
@@ -310,7 +316,7 @@ Namespace Streams
 
         Private Sub ClearFreeSpaceMap()
             _FreeSpaces.Clear()
-            _DeferredFreeSpaces.Clear()
+            _DeferredFreeRanges.Clear()
         End Sub
 
         Private Sub AddFreeSpace(Offset As Long, Length As Long)
@@ -320,39 +326,67 @@ Namespace Streams
         End Sub
 
         '
-        ' Records space that has just been superseded but must not be reallocated until
-        ' the next durable metadata publish. Reusing it before then would let a crash
-        ' fall back to a header whose storage we have already overwritten. See
-        ' _DeferredFreeSpaces.
+        ' Frees space that has just been superseded. It is parked in _DeferredFreeRanges,
+        ' tagged with the current header sequence, and only becomes allocatable once
+        ' ReleaseDeferredFreeSpace sees the sequence advance by HeaderCopyCount - by then
+        ' the header slot that referenced it has been overwritten. See _DeferredFreeRanges.
         '
         Private Sub DeferFreeSpace(Offset As Long, Length As Long)
             If Offset < DataStartOffset Then Return
             If Length <= 0 Then Return
-            _DeferredFreeSpaces.Add(Offset, Length)
+            _DeferredFreeRanges.Add(New DeferredFreeRange With {
+                .Offset = Offset,
+                .Length = Length,
+                .FreedAtHeaderSequence = _HeaderSequence
+            })
         End Sub
 
         '
-        ' Moves all deferred free space into the allocatable free-space map. Called only
-        ' after a durable PersistIndexAndHeader, once the superseded generations can no
-        ' longer be selected by Open.
+        ' Moves every deferred span whose freeing header sequence is now at least
+        ' HeaderCopyCount publishes old into the allocatable free-space map. Called after
+        ' each header rotation (WriteHeaderCopies), once the sequence has already been
+        ' incremented for that rotation.
         '
-        Private Sub PromoteDeferredFreeSpaces()
-            For Each DeferredRange In _DeferredFreeSpaces.Snapshot()
-                AddFreeSpace(DeferredRange.Offset, DeferredRange.Length)
+        Private Sub ReleaseDeferredFreeSpace()
+
+            If _DeferredFreeRanges.Count = 0 Then Return
+
+            Dim Kept As New List(Of DeferredFreeRange)(_DeferredFreeRanges.Count)
+
+            For Each DeferredRange In _DeferredFreeRanges
+                If _HeaderSequence - DeferredRange.FreedAtHeaderSequence >= HeaderCopyCount Then
+                    AddFreeSpace(DeferredRange.Offset, DeferredRange.Length)
+                Else
+                    Kept.Add(DeferredRange)
+                End If
             Next
-            _DeferredFreeSpaces.Clear()
+
+            _DeferredFreeRanges.Clear()
+            _DeferredFreeRanges.AddRange(Kept)
+
         End Sub
 
         Private Function GetKnownHoleRecords() As List(Of HoleDirectoryRecord)
             '
-            ' The persisted hole directory is only ever written as part of a durable
-            ' publish, which promotes deferred space immediately afterwards. Advertising
-            ' the deferred space here too keeps hole reuse working across a reopen
-            ' without waiting for a second durable publish; every range is safe once the
-            ' publish in progress becomes the newest durable generation.
+            ' Advertise the spans already in _FreeSpaces plus the ones the header rotation
+            ' about to follow this call will release. That rotation makes those spans
+            ' genuinely free before the header pointing at this directory becomes the
+            ' newest generation, so the next Open can safely treat them as reusable.
+            ' Spans still inside the crash-recovery window are withheld; a later scan or
+            ' defragment recovers them.
             '
             Dim Records = _FreeSpaces.Snapshot()
-            Records.AddRange(_DeferredFreeSpaces.Snapshot())
+
+            For Each DeferredRange In _DeferredFreeRanges
+                If (_HeaderSequence + 1) - DeferredRange.FreedAtHeaderSequence >= HeaderCopyCount Then
+                    Records.Add(New HoleDirectoryRecord With {
+                        .SpaceType = HoleSpaceTypes.FreeSpace,
+                        .Offset = DeferredRange.Offset,
+                        .Length = DeferredRange.Length
+                    })
+                End If
+            Next
+
             Return Records
         End Function
 
@@ -495,12 +529,13 @@ Namespace Streams
             ReservedRanges.AddRange(GetActiveMetadataRanges())
 
             '
-            ' Deferred free space is not yet safe to reallocate, so treat it as reserved
-            ' while rebuilding the map. It is folded back in by PromoteDeferredFreeSpaces
-            ' after the next durable publish. ClearFreeSpaceMap discards the deferred list
-            ' outright for the authoritative rebuilds performed by defragmentation.
+            ' Deferred spans are still inside the crash-recovery window, so treat them as
+            ' reserved while rebuilding the map. They are folded back in by
+            ' ReleaseDeferredFreeSpace as the header sequence advances. ClearFreeSpaceMap
+            ' discards the deferred list outright for the authoritative rebuilds performed
+            ' by defragmentation.
             '
-            For Each DeferredRange In _DeferredFreeSpaces.Snapshot()
+            For Each DeferredRange In _DeferredFreeRanges
                 ReservedRanges.Add(Tuple.Create(DeferredRange.Offset, DeferredRange.Offset + DeferredRange.Length))
             Next
 
