@@ -131,12 +131,23 @@ Namespace Streams
 
                 ''' <summary>
                 ''' Reuses known free spaces and, when no suitable known space exists,
-                ''' may rebuild the free-space map by scanning the active stream layout
-                ''' from the start.
+                ''' may rebuild the free-space map by scanning the active stream layout.
                 ''' This can reclaim holes that were not already known, but may add
                 ''' extra write-time overhead when the scan is required.
                 ''' </summary>
-                FirstFitScan = 2
+                BestFitScan = 2
+
+                ''' <summary>
+                ''' Works like BestFit, but always uses the first free space that is large
+                ''' enough (the one with the lowest offset) rather than the smallest fitting one.
+                ''' </summary>
+                FirstFit = 3
+
+                ''' <summary>
+                ''' Works like BestFitScan, but always uses the first free space that is large
+                ''' enough (the one with the lowest offset) rather than the smallest fitting one.
+                ''' </summary>
+                FirstFitScan = 4
             End Enum
 
             ''' <summary>

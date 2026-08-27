@@ -535,7 +535,7 @@ Namespace Tests
                         .ChunkSize = 1024,
                         .IndexPageEntryCount = 8,
                         .IndexDirectoryEntryCount = 8,
-                        .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan
+                        .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFitScan
                     }
 
                     Dim Model As New List(Of Byte)()

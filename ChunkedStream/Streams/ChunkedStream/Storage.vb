@@ -339,13 +339,19 @@ Namespace Streams
             Select Case Policy
 
                 Case ChunkedStreamOptions.NewWriteLocationPolicies.BestFit,
+                     ChunkedStreamOptions.NewWriteLocationPolicies.BestFitScan,
+                     ChunkedStreamOptions.NewWriteLocationPolicies.FirstFit,
                      ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan
 
-                    If TryAllocateSafeSpace(Length, IsMetadata, False, Offset) Then
+                    Dim FromStart = Policy = ChunkedStreamOptions.NewWriteLocationPolicies.FirstFit OrElse
+                                    Policy = ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan
+
+                    If TryAllocateSafeSpace(Length, IsMetadata, FromStart, Offset) Then
                         Return Offset
                     End If
 
-                    If Policy = ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan Then
+                    If Policy = ChunkedStreamOptions.NewWriteLocationPolicies.BestFitScan OrElse
+                       Policy = ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan Then
                         BuildFreeSpaceMapCore()
                         If TryAllocateSafeSpace(Length, IsMetadata, True, Offset) Then
                             Return Offset
@@ -389,21 +395,23 @@ Namespace Streams
         ''' hole that currently exists in the data area.
         ''' </summary>
         ''' <remarks>
-        ''' The free-space map is the index that the <c>BestFit</c> and <c>FirstFitScan</c>
-        ''' write-location policies consult when choosing where to place a new physical
-        ''' record or metadata page. Any span between the data-start offset and the furthest
-        ''' of the backing-stream length, the index offset and the live data end that is not
-        ''' covered by a live physical record or an active metadata page is treated as free.
+        ''' The free-space map is the index that the <c>BestFit</c>, <c>BestFitScan</c>,
+        ''' <c>FirstFit</c> and <c>FirstFitScan</c> write-location policies consult when
+        ''' choosing where to place a new physical record or metadata page. Any span between
+        ''' the data-start offset and the furthest of the backing-stream length, the index
+        ''' offset and the live data end that is not covered by a live physical record or an
+        ''' active metadata page is treated as free.
         '''
         ''' Calling this is normally unnecessary. The map is maintained incrementally as
         ''' records are written and freed, is loaded from the persisted hole directory when
         ''' the stream is opened, is rebuilt automatically after <see cref="Defragment"/> and
         ''' after a cancelled or failed <see cref="ApplyOptions"/> chunk-size rewrite, and is
-        ''' rebuilt on demand by <c>FirstFitScan</c> when a write cannot be satisfied from
-        ''' the holes already known. It is worth calling explicitly when using <c>BestFit</c>
-        ''' (which never rebuilds the map on its own) and you want hole reuse to pick up
-        ''' holes that have appeared since the map was last built - for example after a batch
-        ''' of edits - without closing and reopening the stream.
+        ''' rebuilt on demand by <c>BestFitScan</c> and <c>FirstFitScan</c> when a write
+        ''' cannot be satisfied from the holes already known. It is worth calling explicitly
+        ''' when using <c>BestFit</c> or <c>FirstFit</c> (which never rebuild the map on their
+        ''' own) and you want hole reuse to pick up holes that have appeared since the map was
+        ''' last built - for example after a batch of edits - without closing and reopening
+        ''' the stream.
         '''
         ''' This only refreshes an in-memory index: it does not move data, change logical
         ''' content or write anything. The refreshed map reaches the persisted hole

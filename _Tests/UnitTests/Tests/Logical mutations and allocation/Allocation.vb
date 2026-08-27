@@ -94,7 +94,8 @@ Namespace Tests
 
                         Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                             .NewChunkWriteLocationPolicy = Policy,
-                            .HoleDirectoryMode = If(Policy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan,
+                            .HoleDirectoryMode = If(Policy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFitScan OrElse
+                                                    Policy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan,
                                                     ChunkedStream.ChunkedStreamOptions.HoleDirectoryModes.Never,
                                                     ChunkedStream.ChunkedStreamOptions.HoleDirectoryModes.Always)
                         }
@@ -150,11 +151,13 @@ Namespace Tests
 
                                     AssertTrue(NewChunks.Single.PhysicalOffset.Value >= OldEnd, $"{NameOf(Policy)} policy should be >= {OldEnd}")
 
-                                Case ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit
+                                Case ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit,
+                                     ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FirstFit
 
                                     AssertTrue(NewChunks.Single.PhysicalOffset.Value < OldEnd, $"{NameOf(Policy)} policy should be < {OldEnd}")
 
-                                Case ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan
+                                Case ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFitScan,
+                                     ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan
 
                                     Cs.Write(Cs.Length, GeneratePatternData(Cs.Options.ChunkSize \ 2, 1234))
 
