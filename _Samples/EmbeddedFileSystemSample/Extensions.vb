@@ -16,8 +16,20 @@
     End Function
 
     <System.Runtime.CompilerServices.Extension>
-    Friend Function FormatFileSizeFromBytes(size As Integer) As String
-        Return FormatFileSizeFromBytes(CLng(size))
+    Public Function InvokeIfRequired(Of T)(Control As Control, Action As Func(Of T)) As T
+        If Control.InvokeRequired Then
+            Return DirectCast(Control.Invoke(Action), T)
+        Else
+            Return Action.Invoke()
+        End If
     End Function
 
+    <System.Runtime.CompilerServices.Extension>
+    Public Sub InvokeIfRequired(Control As Control, Action As Action)
+        If Control.InvokeRequired Then
+            Control.Invoke(Action)
+        Else
+            Action.Invoke()
+        End If
+    End Sub
 End Module

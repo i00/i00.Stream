@@ -32,7 +32,7 @@ Namespace Tests
                         Dim NextColorValue = 0
 
                         Dim Options As New FragmentationDrawOptions With {
-                            .MaxBlockCount = HorizontalBlockCount,
+                            .MaxXBlockCount = HorizontalBlockCount,
                             .PixelPadding = 0,
                             .BorderColor = Color.Transparent
                         }

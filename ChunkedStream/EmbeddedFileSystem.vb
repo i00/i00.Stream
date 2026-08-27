@@ -75,20 +75,17 @@ Namespace Streams
         Public ReadOnly ChunkedStream As ChunkedStream
         Private ReadOnly _SyncRoot As New Object()
         Private ReadOnly _OpenFileIds As New HashSet(Of Long)()
-        Private ReadOnly _LeaveOpen As Boolean
         Private _Root As ChunkedStream.Anchor
         Private _Disposed As Boolean
 
         ''' <summary>Opens or creates an embedded file system.</summary>
         ''' <param name="ChunkedStream">The readable, writable, seekable backing ChunkedStream.</param>
-        ''' <param name="LeaveOpen">True to leave the backing ChunkedStream open on disposal.</param>
-        Public Sub New(ChunkedStream As ChunkedStream, Optional LeaveOpen As Boolean = True)
+        Public Sub New(ChunkedStream As ChunkedStream)
             If ChunkedStream Is Nothing Then Throw New ArgumentNullException(NameOf(ChunkedStream))
             If ChunkedStream.CanRead = False OrElse ChunkedStream.CanWrite = False OrElse ChunkedStream.CanSeek = False Then
                 Throw New ArgumentException("The ChunkedStream must be readable, writable, and seekable.", NameOf(ChunkedStream))
             End If
             Me.ChunkedStream = ChunkedStream
-            _LeaveOpen = LeaveOpen
             If Me.ChunkedStream.Length = 0 Then CreateRoot() Else OpenRoot()
         End Sub
 
@@ -143,7 +140,7 @@ Namespace Streams
         End Function
 
         ''' <summary>Creates an empty child file and returns its anchor ID.</summary>
-        Public Function CreateFile(ParentDirectoryAnchorId As Long, Name As String) As Long
+        Public Function CreateFile(ParentDirectoryAnchorId As Long, Name As String, Optional CreateAsPending As Boolean = True) As Long
             SyncLock _SyncRoot
                 ThrowIfDisposed()
                 ValidateName(Name)
@@ -151,7 +148,7 @@ Namespace Streams
                 EnsureNameAvailable(Parent, Name)
                 Using Checkpoint = ChunkedStream.CreateCheckpoint()
                     Dim Child = ChunkedStream.CreateAnchor(BuildFile(Parent.AnchorId))
-                    AppendEntry(Parent, New ContentListEntry(EntryTypes.File, Child.AnchorId, 0, Name))
+                    AppendEntry(Parent, New ContentListEntry(If(CreateAsPending, EntryTypes.PendingFile, EntryTypes.File), Child.AnchorId, 0, Name))
                     Checkpoint.Commit()
                     Return Child.AnchorId
                 End Using
@@ -547,7 +544,6 @@ Namespace Streams
                 If _Disposed Then Return
                 If _OpenFileIds.Count > 0 Then Throw New InvalidOperationException("All file streams must be disposed first.")
                 _Disposed = True
-                If _LeaveOpen = False Then ChunkedStream.Dispose()
             End SyncLock
         End Sub
 

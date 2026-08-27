@@ -50,7 +50,7 @@
   <ItemGroup>
     <Reference Include="i00CodeLib, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
       <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\..\..\..\GEKCo\_Distros\GEKCoAgedCare\bin\Debug\i00CodeLib.dll</HintPath>
+      <HintPath>..\..\..\GEKCo\i00CodeLib\bin\Debug\i00CodeLib.dll</HintPath>
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Data" />
@@ -85,6 +85,7 @@
       <DependentUpon>EmbeddedFileSystemBrowserForm.vb</DependentUpon>
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Extensions.vb" />
     <Compile Include="My Project\AssemblyInfo.vb" />
     <Compile Include="My Project\Application.Designer.vb">
       <AutoGen>True</AutoGen>
