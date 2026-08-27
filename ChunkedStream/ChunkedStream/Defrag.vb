@@ -99,7 +99,7 @@ Namespace Streams
             InvalidateChunkCache()
             ClearFreeSpaceMap()
 
-            Dim OriginalLength = _Fs.Length
+            Dim OriginalLength = BaseStream.Length
             Dim CancellationToken As New CancellationToken()
 
             Select Case Type
@@ -124,14 +124,14 @@ Namespace Streams
                 Return -1
             End If
 
-            Return Math.Max(0L, OriginalLength - _Fs.Length)
+            Return Math.Max(0L, OriginalLength - BaseStream.Length)
 
 
         End Function
 
         Private Function GetDefragStagingOffset() As Long
 
-            Return Math.Max(_Fs.Length, GetDataEndFromIndex())
+            Return Math.Max(BaseStream.Length, GetDataEndFromIndex())
 
         End Function
 
@@ -245,7 +245,7 @@ Namespace Streams
                              NewOffset,
                              OldLength)
 
-            FlushDurable(_Fs)
+            FlushDurable(BaseStream)
 
             If IsValidPhysicalRecordAt(Record.RecordId,
                                        NewOffset,
@@ -307,7 +307,7 @@ Namespace Streams
 
         Private Sub PersistDefragMoveMetadata()
 
-            Dim MetadataOffset = Math.Max(_Fs.Length, GetDataEndFromIndex())
+            Dim MetadataOffset = Math.Max(BaseStream.Length, GetDataEndFromIndex())
             Dim OriginalHoleDirectoryMode = Options.HoleDirectoryMode
 
             _CompactMetadataWriteOffset = MetadataOffset
@@ -570,7 +570,7 @@ Namespace Streams
                 Throw New InvalidDataException("Invalid defrag data end.")
             End If
 
-            If DataEnd > _Fs.Length Then
+            If DataEnd > BaseStream.Length Then
                 Throw New InvalidDataException("Defrag data end is beyond the backing stream length.")
             End If
 
@@ -615,8 +615,8 @@ Namespace Streams
                    _MetadataRootOffset + CLng(_MetadataRootLength),
                    Math.Max(CLng(DataStartOffset), GetDataEndFromIndex()))
 
-            If NewEndOffset < _Fs.Length Then
-                _Fs.SetLength(NewEndOffset)
+            If NewEndOffset < BaseStream.Length Then
+                BaseStream.SetLength(NewEndOffset)
             End If
 
         End Sub
@@ -660,7 +660,7 @@ Namespace Streams
             End If
 
             If Result = Long.MaxValue Then
-                Return _Fs.Length
+                Return BaseStream.Length
             End If
 
             Return Result
@@ -856,8 +856,8 @@ Namespace Streams
 
             MarkAllMetadataPagesDirty()
 
-            If _Fs.Length > OriginalPhysicalLength Then
-                _Fs.SetLength(OriginalPhysicalLength)
+            If BaseStream.Length > OriginalPhysicalLength Then
+                BaseStream.SetLength(OriginalPhysicalLength)
             End If
 
         End Sub
@@ -880,7 +880,7 @@ Namespace Streams
                     "Index directory entry count must be greater than zero.")
             End If
 
-            Dim OriginalPhysicalLength = _Fs.Length
+            Dim OriginalPhysicalLength = BaseStream.Length
             Dim OriginalIndexOffset = _IndexOffset
             Dim OriginalHeaderFlags = _HeaderFlags
             Dim OriginalNextPhysicalRecordId = _NextPhysicalRecordId

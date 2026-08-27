@@ -112,12 +112,12 @@ Namespace Streams
                 Throw New InvalidDataException("Invalid chunk-size rebuild recovery length.")
             End If
 
-            If OriginalPhysicalLength > _Fs.Length Then
+            If OriginalPhysicalLength > BaseStream.Length Then
                 Throw New InvalidDataException("Chunk-size rebuild recovery length is beyond end of stream.")
             End If
 
-            If _Fs.Length > OriginalPhysicalLength Then
-                _Fs.SetLength(OriginalPhysicalLength)
+            If BaseStream.Length > OriginalPhysicalLength Then
+                BaseStream.SetLength(OriginalPhysicalLength)
             End If
 
             ClearRecoveryState()
@@ -151,7 +151,7 @@ Namespace Streams
                 Throw New InvalidDataException("Invalid checkpoint recovery physical length.")
             End If
 
-            If PhysicalLength > _Fs.Length Then
+            If PhysicalLength > BaseStream.Length Then
                 Throw New InvalidDataException("Checkpoint recovery physical length is beyond end of stream.")
             End If
 
@@ -170,8 +170,8 @@ Namespace Streams
             _Length = LogicalLength
             _IndexOffset = IndexOffset
 
-            If _Fs.Length > PhysicalLength Then
-                _Fs.SetLength(PhysicalLength)
+            If BaseStream.Length > PhysicalLength Then
+                BaseStream.SetLength(PhysicalLength)
             End If
 
             ClearRecoveryState()
@@ -330,7 +330,7 @@ Namespace Streams
                 4)
 
             System.Buffer.BlockCopy(
-                BitConverter.GetBytes(_Fs.Length),
+                BitConverter.GetBytes(BaseStream.Length),
                 0,
                 _Header,
                 RecoveryCheckpointPhysicalLengthOffset,
@@ -465,7 +465,7 @@ Namespace Streams
 
             If RecordLength < MinChunkRecordSize Then Return False
 
-            If Offset + RecordLength > _Fs.Length Then Return False
+            If Offset + RecordLength > BaseStream.Length Then Return False
 
             Try
 

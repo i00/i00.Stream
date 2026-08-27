@@ -1,9 +1,5 @@
-﻿Public NotInheritable Class Autoexec
-
-    Public Shared Sub Main()
-        Application.EnableVisualStyles()
-        Application.SetCompatibleTextRenderingDefault(False)
-
+﻿Public Class Form1
+    Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         Using fs = New IO.FileStream("Test.efs", IO.FileMode.OpenOrCreate)
             Dim Options = New i00.Streams.ChunkedStream.ChunkedStreamOptions() With {
                 .CompressionMethod = i00.Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4
@@ -15,12 +11,11 @@
                 '                  'Debug.Print($"{ProcessedUnits / TotalUnits:P0}")
                 '              End Sub)
                 Using efs = New i00.Streams.EmbeddedFileSystem(cs)
-                    Using frmEfs = New EmbeddedFileSystemBrowserForm(efs)
-                        frmEfs.ShowDialog()
+                    Using frmEfs = New EmbeddedFileSystemBrowserForm(efs, False)
+                        frmEfs.ShowDialog(Me)
                     End Using
                 End Using
             End Using
         End Using
     End Sub
-
 End Class

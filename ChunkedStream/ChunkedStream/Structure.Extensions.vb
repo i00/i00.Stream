@@ -1,7 +1,7 @@
 ﻿Imports System.Runtime.CompilerServices
 
 Namespace Streams
-    Partial Module Extensions
+    Public Module Extensions
 
         Public Class FragmentationDrawOptions
 
@@ -100,8 +100,14 @@ Namespace Streams
             ''' 10 horizontal blocks, each approximately 40px wide.
             ''' If MaxBlockCount = 8000 for the same bitmap, 400 horizontal blocks are used.
             ''' </remarks>
-            Public Property MaxBlockCount As Integer?
+            Public Property MaxXBlockCount As Integer?
 
+            ''' <summary>
+            ''' Maximum number of vertical blocks used when rendering.
+            ''' If Nothing, less than or equal to zero, or greater than the target height,
+            ''' the target height is used.
+            ''' </summary>
+            Public Property MaxYBlockCount As Integer?
             ''' <summary>
             ''' Controls which stream length is used when mapping physical offsets to blocks.
             ''' </summary>
@@ -171,23 +177,23 @@ Namespace Streams
 
         <Extension>
         Public Sub DrawFragmentation(ChunkedStreamStructure As Streams.ChunkedStreamStructure,
-                                     Surface As Graphics,
+                                     Graphics As Graphics,
                                      Rect As Rectangle,
                                      Optional Options As FragmentationDrawOptions = Nothing)
 
             If ChunkedStreamStructure Is Nothing Then Throw New ArgumentNullException(NameOf(ChunkedStreamStructure))
-            If Surface Is Nothing Then Throw New ArgumentNullException(NameOf(Surface))
+            If Graphics Is Nothing Then Throw New ArgumentNullException(NameOf(Graphics))
             If Rect.Width <= 0 OrElse Rect.Height <= 0 Then Return
 
             If Options Is Nothing Then
                 Options = New FragmentationDrawOptions()
             End If
 
-            DrawFragmentationBlocks(ChunkedStreamStructure, Surface, Rect, Options)
+            DrawFragmentationBlocks(ChunkedStreamStructure, Graphics, Rect, Options)
 
             If Options.BorderColor.A > 0 Then
                 Using BorderPen As New Pen(Options.BorderColor)
-                    Surface.DrawRectangle(BorderPen, Rect.Left, Rect.Top, Rect.Width - 1, Rect.Height - 1)
+                    Graphics.DrawRectangle(BorderPen, Rect.Left, Rect.Top, Rect.Width - 1, Rect.Height - 1)
                 End Using
             End If
 
@@ -242,7 +248,13 @@ Namespace Streams
             End Using
 
             Dim HorizontalBlockCount = GetHorizontalBlockCount(Rect.Width, Options)
-            Dim RenderBlocks = BuildRenderBlocks(ChunkedStreamStructure, HorizontalBlockCount, Rect.Height, Options)
+            Dim VerticalBlockCount = GetVerticalBlockCount(Rect.Height, Options)
+
+            Dim RenderBlocks =
+                BuildRenderBlocks(ChunkedStreamStructure,
+                                  HorizontalBlockCount,
+                                  VerticalBlockCount,
+                                  Options)
 
             ''TODO: maybe have some callback in here in here so the user has some way for the user to do something like this to make fragmentation odvious?? ... maybe something called EvalBlocks?
             'Dim Frag = ChunkedStreamStructure.FragmentationRatio
@@ -262,7 +274,7 @@ Namespace Streams
 
             For Each Block In RenderBlocks
 
-                Dim Bounds = GetBlockBounds(Rect, HorizontalBlockCount, Block.BlockIndex)
+                Dim Bounds = GetBlockBounds(Rect, HorizontalBlockCount, VerticalBlockCount, Block.BlockIndex)
 
                 If Bounds.Width <= 0 OrElse Bounds.Height <= 0 Then Continue For
 
@@ -318,16 +330,16 @@ Namespace Streams
 
         Private Function BuildRenderBlocks(ChunkedStreamStructure As Streams.ChunkedStreamStructure,
                                            HorizontalBlockCount As Integer,
-                                           Height As Integer,
+                                           VerticalBlockCount As Integer,
                                            Options As FragmentationDrawOptions) As List(Of RenderBlock)
 
             If HorizontalBlockCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(HorizontalBlockCount))
-            If Height <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Height))
+            If VerticalBlockCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(VerticalBlockCount))
 
             Dim RenderSegments = BuildRenderSegments(ChunkedStreamStructure, Options)
             Dim RenderBlocks As New List(Of RenderBlock)
 
-            Dim TotalBlocks = CLng(HorizontalBlockCount) * CLng(Height)
+            Dim TotalBlocks = CLng(HorizontalBlockCount) * CLng(VerticalBlockCount)
             Dim TotalBytes = GetRenderLength(ChunkedStreamStructure, Options)
 
             If TotalBlocks <= 0 Then Return RenderBlocks
@@ -448,9 +460,8 @@ Namespace Streams
 
             If Width <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Width))
 
-            If Options.MaxBlockCount.HasValue Then
-
-                Dim RequestedBlockCount = Options.MaxBlockCount.Value
+            If Options.MaxXBlockCount.HasValue Then
+                Dim RequestedBlockCount = Options.MaxXBlockCount.Value
 
                 If RequestedBlockCount > 0 AndAlso RequestedBlockCount <= Width Then
                     Return RequestedBlockCount
@@ -462,22 +473,52 @@ Namespace Streams
 
         End Function
 
+        Private Function GetVerticalBlockCount(Height As Integer,
+                                               Options As FragmentationDrawOptions) As Integer
+
+            If Height <= 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Height))
+            End If
+
+            If Options.MaxYBlockCount.HasValue Then
+
+                Dim RequestedBlockCount = Options.MaxYBlockCount.Value
+
+                If RequestedBlockCount > 0 AndAlso RequestedBlockCount <= Height Then
+
+                    Return RequestedBlockCount
+
+                End If
+
+            End If
+
+            Return Height
+
+        End Function
+
         Private Function GetBlockBounds(BaseRect As Rectangle,
                                         HorizontalBlockCount As Integer,
+                                        VerticalBlockCount As Integer,
                                         BlockIndex As Long) As Rectangle
 
             If HorizontalBlockCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(HorizontalBlockCount))
+            If VerticalBlockCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(VerticalBlockCount))
             If BlockIndex < 0 Then Throw New ArgumentOutOfRangeException(NameOf(BlockIndex))
 
             Dim Row = CInt(BlockIndex \ HorizontalBlockCount)
             Dim Column = CInt(BlockIndex Mod HorizontalBlockCount)
 
-            If Row >= BaseRect.Height Then
+            If Row >= VerticalBlockCount Then
                 Return Rectangle.Empty
             End If
 
-            Dim Left = BaseRect.Left + CInt(Math.Floor((Column / CDbl(HorizontalBlockCount)) * BaseRect.Width))
-            Dim Right = BaseRect.Left + CInt(Math.Floor(((Column + 1) / CDbl(HorizontalBlockCount)) * BaseRect.Width))
+            Dim Left =
+                BaseRect.Left +
+                CInt(Math.Floor((Column / CDbl(HorizontalBlockCount)) * BaseRect.Width))
+
+            Dim Right =
+                BaseRect.Left +
+                CInt(Math.Floor(((Column + 1) / CDbl(HorizontalBlockCount)) * BaseRect.Width))
 
             If Right <= Left Then
                 Right = Left + 1
@@ -487,10 +528,27 @@ Namespace Streams
                 Right = BaseRect.Right
             End If
 
-            Return New Rectangle(Left,
-                                 BaseRect.Top + Row,
-                                 Math.Max(0, Right - Left),
-                                 1)
+            Dim Top =
+                BaseRect.Top +
+                CInt(Math.Floor((Row / CDbl(VerticalBlockCount)) * BaseRect.Height))
+
+            Dim Bottom =
+                BaseRect.Top +
+                CInt(Math.Floor(((Row + 1) / CDbl(VerticalBlockCount)) * BaseRect.Height))
+
+            If Bottom <= Top Then
+                Bottom = Top + 1
+            End If
+
+            If Bottom > BaseRect.Bottom Then
+                Bottom = BaseRect.Bottom
+            End If
+
+            Return New Rectangle(
+                Left,
+                Top,
+                Math.Max(0, Right - Left),
+                Math.Max(0, Bottom - Top))
 
         End Function
 

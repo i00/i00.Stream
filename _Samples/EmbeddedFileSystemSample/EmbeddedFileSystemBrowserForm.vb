@@ -1,9 +1,14 @@
 Imports i00.Streams
 Imports System.ComponentModel
 Imports System.IO
+Imports i00CodeLib
+Imports System.Runtime.InteropServices
 
 Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
-    Inherits Form
+
+    <DllImport("uxtheme.dll", CharSet:=CharSet.Unicode)>
+    Private Shared Function SetWindowTheme(hWnd As IntPtr, pszSubAppName As String, pszSubIdList As String) As Integer
+    End Function
 
     Private NotInheritable Class DirectoryNodeInfo
         Public Sub New(AnchorId As Long, Name As String)
@@ -36,7 +41,6 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Class
 
     Private ReadOnly _FileSystem As EmbeddedFileSystem
-    Private ReadOnly _OwnsFileSystem As Boolean
     Private _CurrentDirectoryAnchorId As Long
     Private _ListDragStart As Point
     Private _TreeDragStart As Point
@@ -45,15 +49,23 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private _Disposed As Boolean
 
 
-    Public Sub New(FileSystem As EmbeddedFileSystem, Optional OwnsFileSystem As Boolean = False)
+    Public Sub New(FileSystem As EmbeddedFileSystem)
         If FileSystem Is Nothing Then Throw New ArgumentNullException(NameOf(FileSystem))
 
         _FileSystem = FileSystem
-        _OwnsFileSystem = OwnsFileSystem
         _CurrentDirectoryAnchorId = _FileSystem.RootAnchorId
 
         InitializeComponent()
+
+        Try
+            SetWindowTheme(tvFolders.Handle, "Explorer", Nothing)
+            SetWindowTheme(lvFiles.Handle, "Explorer", Nothing)
+        Catch ex As Exception
+
+        End Try
+
         RefreshFileSystemView()
+
     End Sub
 
     Public ReadOnly Property FileSystem As EmbeddedFileSystem
@@ -63,6 +75,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Property
 
     Public Sub RefreshFileSystemView()
+
         Dim SelectedAnchorId = GetSelectedDirectoryAnchorId()
         If SelectedAnchorId <= 0 Then SelectedAnchorId = _CurrentDirectoryAnchorId
         If SelectedAnchorId <= 0 Then SelectedAnchorId = _FileSystem.RootAnchorId
@@ -88,13 +101,42 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Try
 
         RefreshCurrentDirectory()
+
+
+        Dim Fragmentation = _FileSystem.ChunkedStream.GetFragmentation
+
+        If Fragmentation >= 0.1 Then
+            tsiCompression.Visible = True
+            tsiCompressionBar.Visible = False
+            tsiFragmentation.Visible = True
+
+            tsiCompression.Text = $"Fragmentation: {Fragmentation:P0}"
+
+        ElseIf _FileSystem.GetDirectoryEntries(_FileSystem.RootAnchorId).Any() = False Then
+            tsiCompression.Visible = True
+            tsiCompressionBar.Visible = False
+            tsiFragmentation.Visible = False
+
+            tsiCompression.Text = "No Data"
+        Else
+            tsiCompression.Visible = True
+            tsiCompressionBar.Visible = True
+            tsiFragmentation.Visible = False
+
+            Dim Ratio = _FileSystem.ChunkedStream.Length / _FileSystem.ChunkedStream.BaseStream.Length
+
+            Dim CompressionPercent = Ratio * 100
+            tsiCompression.Text = $"Relative size: {Ratio:P0}"
+            tsiCompressionBar.MaxValue = Math.Max(CompressionPercent, 100)
+            tsiCompressionBar.Value = CompressionPercent
+        End If
     End Sub
 
     Private Sub PopulateDirectoryNodes(ParentNode As TreeNode,
                                        DirectoryAnchorId As Long,
                                        VisitedDirectories As HashSet(Of Long))
         If VisitedDirectories.Add(DirectoryAnchorId) = False Then
-            ParentNode.Nodes.Add(New TreeNode("[Directory cycle]") With {.ForeColor = Color.Red})
+            ParentNode.Nodes.Add(New TreeNode("[Directory cycle]") With {.ForeColor = i00CodeLib.Drawing.BlendColor(tvFolders.ForeColor, Color.Red)})
             Return
         End If
 
@@ -131,7 +173,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 Dim Item = New ListViewItem(entry.Name) With {.Tag = entry}
                 Item.SubItems.Add(FormatByteLength(entry.LengthOfDataAtEntry))
                 Item.SubItems.Add(GetEntryStateText(entry.EntryType))
-                If entry.EntryType = EmbeddedFileSystem.EntryTypes.PendingFile Then Item.ForeColor = Color.DarkOrange
+                If entry.EntryType = EmbeddedFileSystem.EntryTypes.PendingFile Then Item.ForeColor = i00CodeLib.Drawing.BlendColor(lvFiles.ForeColor, Color.Red)
                 lvFiles.Items.Add(Item)
             Next
         Finally
@@ -145,7 +187,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim DirectoryName = If(tvFolders.SelectedNode Is Nothing, "Root", tvFolders.SelectedNode.Text)
         Dim SelectedCount = lvFiles.SelectedItems.Count
         Dim SelectionText = If(SelectedCount = 0, String.Empty, $", {SelectedCount:N0} selected")
-        _StatusLabel.Text = $"{DirectoryName}: {lvFiles.Items.Count:N0} files{SelectionText}"
+        StatusLabel.Text = $"{DirectoryName}: {lvFiles.Items.Count:N0} files{SelectionText}"
     End Sub
 
     Private Shared Function GetEntryStateText(EntryType As EmbeddedFileSystem.EntryTypes) As String
@@ -173,6 +215,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim Info = TryCast(tvFolders.SelectedNode.Tag, DirectoryNodeInfo)
         If Info Is Nothing Then Return 0
         Return Info.AnchorId
+        'Return Me.InvokeIfRequired(
+        '    Function()
+        '    End Function)
     End Function
 
     Private Function FindDirectoryNode(AnchorId As Long) As TreeNode
@@ -280,12 +325,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim FolderName = PromptForText("New Folder", "Folder name:")
         If FolderName Is Nothing Then Return
 
-        ExecuteUiOperation(
-            Sub()
-                _FileSystem.CreateDirectory(_CurrentDirectoryAnchorId, FolderName)
-                RefreshFileSystemView()
-            End Sub,
-            "The folder could not be created.")
+        _FileSystem.CreateDirectory(_CurrentDirectoryAnchorId, FolderName)
+
+        RefreshFileSystemView()
     End Sub
 
     Private Sub UploadFilesFromDialog(Sender As Object, EventArgs As EventArgs)
@@ -311,9 +353,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim PathList = Paths.Where(Function(x) String.IsNullOrWhiteSpace(x) = False).ToList()
         If PathList.Count = 0 Then Return
 
-        ExecuteUiOperation(
+        ExecuteLongBlockingActionOnThread(
             Sub()
-                UseWaitCursor = True
                 For Each sourcePath In PathList
                     If File.Exists(sourcePath) Then
                         UploadFile(sourcePath, TargetDirectoryAnchorId)
@@ -321,20 +362,22 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                         UploadDirectory(sourcePath, TargetDirectoryAnchorId)
                     End If
                 Next
-                RefreshFileSystemView()
             End Sub,
             "One or more items could not be uploaded.")
+
+        RefreshFileSystemView()
     End Sub
 
     Private Sub UploadFile(SourceFilePath As String, ParentDirectoryAnchorId As Long)
         Dim FileName = Path.GetFileName(SourceFilePath)
         EnsureDestinationNameDoesNotExist(ParentDirectoryAnchorId, FileName)
-        Dim FileAnchorId = _FileSystem.CreateFile(ParentDirectoryAnchorId, FileName)
 
+        Dim FileAnchorId = _FileSystem.CreateFile(ParentDirectoryAnchorId, FileName)
         Try
             Using SourceStream = New FileStream(SourceFilePath, FileMode.Open, FileAccess.Read, FileShare.Read)
                 Using DestinationStream = _FileSystem.OpenFile(FileAnchorId)
                     SourceStream.CopyTo(DestinationStream, 1024 * 1024)
+                    'TODO: Why does a crash here corrupt the file!?
                     DestinationStream.Flush()
                 End Using
             End Using
@@ -394,9 +437,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         Using Dialog As New FolderBrowserDialog With {.Description = "Select a destination for the selected files"}
             If Dialog.ShowDialog(Me) <> DialogResult.OK Then Return
-            ExecuteUiOperation(
+            ExecuteLongBlockingActionOnThread(
                 Sub()
-                    UseWaitCursor = True
                     For Each entry In Entries
                         ExportFile(entry, Path.Combine(Dialog.SelectedPath, MakeSafeFileName(entry.Name)))
                     Next
@@ -414,9 +456,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Using Dialog As New FolderBrowserDialog With {.Description = "Select the destination folder"}
             If Dialog.ShowDialog(Me) <> DialogResult.OK Then Return
             Dim OutputPath = Path.Combine(Dialog.SelectedPath, MakeSafeFileName(Info.Name))
-            ExecuteUiOperation(
+            ExecuteLongBlockingActionOnThread(
                 Sub()
-                    UseWaitCursor = True
                     ExportDirectory(Info.AnchorId, OutputPath)
                 End Sub,
                 "The folder could not be saved.")
@@ -467,16 +508,17 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim Prompt = If(Entries.Count = 1,
                         $"Delete '{Entries(0).Name}'?",
                         $"Delete the {Entries.Count:N0} selected files?")
-        If MessageBox.Show(Me, Prompt, "Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) <> DialogResult.Yes Then Return
+        If i00CodeLib.MsgBox(Me, Prompt, MsgBoxStyle.YesNo Or MsgBoxStyle.Exclamation) <> MsgBoxResult.Yes Then Return
 
-        ExecuteUiOperation(
+        ExecuteLongBlockingActionOnThread(
             Sub()
                 For Each entry In Entries
                     _FileSystem.DeleteEntry(_CurrentDirectoryAnchorId, entry.Name)
                 Next
-                RefreshFileSystemView()
             End Sub,
             "One or more files could not be deleted.")
+
+        RefreshFileSystemView()
     End Sub
 
     Private Sub DeleteSelectedFolder(Sender As Object, EventArgs As EventArgs)
@@ -487,23 +529,23 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim ParentInfo = TryCast(SelectedNode.Parent.Tag, DirectoryNodeInfo)
         If Info Is Nothing OrElse ParentInfo Is Nothing Then Return
 
-        If MessageBox.Show(Me,
-                           $"Delete '{Info.Name}' and all of its contents?",
-                           "Delete Folder",
-                           MessageBoxButtons.YesNo,
-                           MessageBoxIcon.Warning) <> DialogResult.Yes Then Return
+        If MsgBox(Me,
+                  $"Delete '{Info.Name}' and all of its contents?",
+                  MsgBoxStyle.YesNo Or MsgBoxStyle.Exclamation
+                  ) <> MsgBoxResult.Yes Then Return
 
-        ExecuteUiOperation(
+        ExecuteLongBlockingActionOnThread(
             Sub()
                 _FileSystem.DeleteEntry(ParentInfo.AnchorId, Info.Name)
                 _CurrentDirectoryAnchorId = ParentInfo.AnchorId
-                RefreshFileSystemView()
             End Sub,
             "The folder could not be deleted.")
+
+        RefreshFileSystemView()
     End Sub
 
     Private Sub RefreshMenuItem_Click(Sender As Object, EventArgs As EventArgs)
-        ExecuteUiOperation(AddressOf RefreshFileSystemView, "The file-system view could not be refreshed.")
+        RefreshFileSystemView()
     End Sub
 
     Private Sub FileSystemControl_DragEnter(Sender As Object, EventArgs As DragEventArgs) Handles tvFolders.DragEnter, lvFiles.DragEnter
@@ -600,11 +642,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Function
 
     Private Sub BeginExternalFileDrag(Entries As IList(Of EmbeddedFileSystem.ContentListEntry))
-        ExecuteUiOperation(
+        ExecuteLongBlockingActionOnThread(
             Sub()
-                UseWaitCursor = True
                 Using Export = CreateTemporaryFileExport(Entries)
-                    UseWaitCursor = False
                     Dim Data = New DataObject(DataFormats.FileDrop, Export.Paths)
                     lvFiles.DoDragDrop(Data, DragDropEffects.Copy)
                 End Using
@@ -613,11 +653,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub BeginExternalDirectoryDrag(Info As DirectoryNodeInfo)
-        ExecuteUiOperation(
+        ExecuteLongBlockingActionOnThread(
             Sub()
-                UseWaitCursor = True
                 Using Export = CreateTemporaryDirectoryExport(Info)
-                    UseWaitCursor = False
                     Dim Data = New DataObject(DataFormats.FileDrop, Export.Paths)
                     tvFolders.DoDragDrop(Data, DragDropEffects.Copy)
                 End Using
@@ -694,18 +732,19 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End If
     End Sub
 
-    Private Sub ExecuteUiOperation(Operation As Action, ErrorMessage As String)
-        Try
-            Operation()
-        Catch OperationException As Exception
-            MessageBox.Show(Me,
-                            $"{ErrorMessage}{Environment.NewLine}{Environment.NewLine}{OperationException.Message}",
-                            Text,
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Error)
-        Finally
-            UseWaitCursor = False
-        End Try
+    Private Sub ExecuteLongBlockingActionOnThread(Operation As Action, ErrorMessage As String)
+        Using frmProgress As New i00CodeLib.frmProgress(
+                Sub(Parameter, ProgressReport)
+                    Try
+                        Operation()
+                    Catch ex As Exception When ex.getThreadAbortException Is Nothing
+                        i00CodeLib.MsgBox(ProgressReport.frmProgress,
+                            $"{ErrorMessage}{Environment.NewLine}{ex.GetType.Name}: {Environment.NewLine}{ex.Message}",
+                            MsgBoxStyle.Critical)
+                    End Try
+                End Sub, Nothing)
+            frmProgress.ShowDialog(Me)
+        End Using
     End Sub
 
     Private Shared Function PromptForText(Title As String, Prompt As String) As String
@@ -763,11 +802,115 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If _Disposed Then Return
 
         If Disposing Then
-            If Components IsNot Nothing Then Components.Dispose()
-            If _OwnsFileSystem Then _FileSystem.Dispose()
+            If components IsNot Nothing Then components.Dispose()
         End If
 
         _Disposed = True
         MyBase.Dispose(Disposing)
+    End Sub
+
+    Private Sub tsiFragmentation_Paint(sender As Object, e As PaintEventArgs) Handles tsiFragmentation.Paint
+        Dim Struct = FileSystem.ChunkedStream.GetStructure()
+        Struct.DrawFragmentation(e.Graphics, tsiFragmentation.ContentRectangle,
+                                 New FragmentationDrawOptions() With {
+                                    .MaxXBlockCount = 100,
+                                    .MaxYBlockCount = 1
+                                 })
+        'Struct.DrawFragmentation(e.Graphics, New Rectangle(0, 0, tsiFragmentation.ContentRectangle.Width, 1))
+    End Sub
+
+    Private Sub tsiExit_Click(sender As Object, e As EventArgs) Handles tsiExit.Click
+        Me.Close()
+    End Sub
+
+    Private Sub tsiDefrag_Click(sender As Object, e As EventArgs) Handles tsiDefrag.Click
+        Defrag()
+    End Sub
+
+    Private Sub tsiScan_Click(sender As Object, e As EventArgs) Handles tsiScan.Click
+        Using frmProgress As New i00CodeLib.frmProgress(
+                Sub(Parameter, ProgressReport)
+                    ProgressReport.SetText("Scanning Files...")
+
+                    Dim Removed = FileSystem.RecoverPendingFiles(EmbeddedFileSystem.PendingFileRecoveryActions.Remove)
+
+                    ProgressReport.SetText("Validating...")
+
+                    Dim ValidationException As Exception = Nothing
+                    Try
+                        FileSystem.ChunkedStream.Validate(
+                            Sub(ProcessedUnits, TotalUnits, UnitType, CancellationToken)
+                                Dim Progress = If(TotalUnits = 0, 1.0R, ProcessedUnits / CDbl(TotalUnits))
+                                ProgressReport.SetText($"Validating ({Progress:P0})...")
+                            End Sub)
+                    Catch ex As Exception
+                        ValidationException = ex
+                    End Try
+                    Dim Icon = If(ValidationException Is Nothing, MsgBoxStyle.Information, MsgBoxStyle.Critical)
+                    i00CodeLib.MsgBox(ProgressReport.frmProgress, $"Partial Files Removed: {Removed}{Environment.NewLine}Validation: {If(ValidationException Is Nothing, "Pass", $"{ValidationException.GetType.Name}: {ValidationException.Message}")}", Icon)
+                End Sub, Nothing)
+
+            frmProgress.ShowInTaskbar = True
+            frmProgress.ShowDialog(Me)
+            frmProgress.Text = "Scanning"
+        End Using
+
+        RefreshFileSystemView()
+
+    End Sub
+
+    Private Sub tsiFragmentation_Click(sender As Object, e As EventArgs) Handles tsiFragmentation.Click
+        Defrag()
+    End Sub
+
+    Private Sub Defrag()
+        Using frmProgress As New i00CodeLib.frmProgress(
+                Sub(Parameter, ProgressReport)
+                    ProgressReport.SetText("Defragmenting...")
+
+                    Dim pnlDefrag As Panel = Nothing
+                    ProgressReport.frmProgress.Invoke(
+                        Sub()
+                            pnlDefrag = New Panel
+                            pnlDefrag.Bounds = New Rectangle(ProgressReport.frmProgress.nbProgress.Left,
+                                                             ProgressReport.frmProgress.nbProgress.Bottom,
+                                                             ProgressReport.frmProgress.nbProgress.Width,
+                                                             ProgressReport.frmProgress.nbProgress.Height)
+                            ProgressReport.frmProgress.Controls.Add(pnlDefrag)
+                        End Sub)
+
+                    Dim OldFragmentation = FileSystem.ChunkedStream.GetFragmentation()
+
+                    Dim LastUpdate As Date
+                    Dim Saved = FileSystem.ChunkedStream.Defragment(ChunkedStream.DefragTypes.Move,
+                        Sub(ProcessedUnits, TotalUnits, UnitType, CancellationToken)
+                            Dim Progress = If(TotalUnits = 0, 1.0R, ProcessedUnits / CDbl(TotalUnits))
+                            ProgressReport.SetText($"Defragmenting ({Progress:P0})...")
+                            ProgressReport.SetProgress(CLng(Progress * 100), 100)
+
+                            Dim CurrentTime = Now()
+                            Dim Done = ProcessedUnits = TotalUnits
+                            If CurrentTime.Subtract(LastUpdate).TotalMilliseconds >= 250 OrElse Done Then
+                                Dim S = FileSystem.ChunkedStream.GetStructure()
+                                LastUpdate = CurrentTime
+                                pnlDefrag.BackgroundImage = S.GenerateFragmentationBitmap(pnlDefrag.ClientSize.Width, 1)
+                            End If
+                        End Sub)
+
+                    'Dim Struct = FileSystem.ChunkedStream.GetStructure()
+                    'For Each rr In Struct.Regions
+                    '    Debug.Print($"{rr}")
+                    'Next
+                    'Dim Hc = Struct.Regions.Where(Function(x) x.RegionType = ChunkedStreamStructure.RegionTypes.Hole).Count
+
+                    i00CodeLib.MsgBox(ProgressReport.frmProgress, $"Saved: {Saved.FormatFileSizeFromBytes}{Environment.NewLine}Fragmentation: {OldFragmentation:P0} > {FileSystem.ChunkedStream.GetFragmentation():P0}", MsgBoxStyle.Information)
+                End Sub, Nothing)
+
+            frmProgress.ShowInTaskbar = True
+            frmProgress.ShowDialog(Me)
+            frmProgress.Text = "Defragmenting"
+        End Using
+
+        RefreshFileSystemView()
     End Sub
 End Class

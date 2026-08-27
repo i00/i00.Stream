@@ -312,7 +312,7 @@ Namespace Streams
             End If
 
             If IsMetadata = False AndAlso HasOpenCheckpoint Then
-                Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
+                Return Math.Max(Math.Max(BaseStream.Length, GetDataEndFromIndex()), _IndexOffset)
             End If
 
             Select Case Policy
@@ -333,7 +333,7 @@ Namespace Streams
 
             End Select
 
-            Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
+            Return Math.Max(Math.Max(BaseStream.Length, GetDataEndFromIndex()), _IndexOffset)
 
         End Function
 
@@ -380,7 +380,7 @@ Namespace Streams
                              OrderBy(Function(range) range.Item1).
                              ToList()
 
-            Dim ScanEnd = Math.Max(Math.Max(_Fs.Length, _IndexOffset), GetDataEndFromIndex())
+            Dim ScanEnd = Math.Max(Math.Max(BaseStream.Length, _IndexOffset), GetDataEndFromIndex())
             Dim Cursor = CLng(DataStartOffset)
 
             For Each Range In ReservedRanges
@@ -584,7 +584,7 @@ Namespace Streams
             If Record.RecordId <= SparsePhysicalRecordId Then Throw New InvalidDataException("Invalid physical record id.")
             If Record.PhysicalOffset < DataStartOffset Then Throw New InvalidDataException($"Invalid physical record offset for record {Record.RecordId}.")
             If Record.PhysicalLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
-            If Record.PhysicalOffset + Record.PhysicalLength > _Fs.Length Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
+            If Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
 
             Dim StoredRecord(Record.PhysicalLength - 1) As Byte
 

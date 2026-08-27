@@ -83,7 +83,7 @@ Namespace Streams
 
                 Case ChunkedStreamOptions.HoleDirectoryModes.Auto
                     If Durable = False Then Return False
-                    Return Math.Max(_Fs.Length, GetDataEndFromIndex()) >= Options.HoleDirectoryAutoThresholdBytes
+                    Return Math.Max(BaseStream.Length, GetDataEndFromIndex()) >= Options.HoleDirectoryAutoThresholdBytes
 
                 Case Else
                     Return False
@@ -843,7 +843,7 @@ Namespace Streams
             Else
 
                 _MetadataRootOffset =
-                    Math.Max(_Fs.Length,
+                    Math.Max(BaseStream.Length,
                                 GetDataEndFromIndex())
 
             End If
@@ -857,11 +857,11 @@ Namespace Streams
                                                 OldRootLength)
             End If
 
-            If Durable Then FlushDurable(_Fs)
+            If Durable Then FlushDurable(BaseStream)
 
             UpdateHeader(Durable)
 
-            If Durable Then FlushDurable(_Fs)
+            If Durable Then FlushDurable(BaseStream)
 
         End Sub
 
@@ -899,14 +899,14 @@ Namespace Streams
 
         End Function
 
-        Private Shared Function ReadPagedMetadata(Fs As Stream,
+        Private Shared Function ReadPagedMetadata(BaseStream As Stream,
                                                   RootOffset As Long,
                                                   RootLength As Integer,
                                                   ExpectedMac As Byte(),
                                                   ByRef IndexPageEntryCount As Integer,
                                                   ByRef IndexDirectoryEntryCount As Integer) As MetadataReadResult
 
-            Dim Root = ReadMetadataRoot(Fs, RootOffset, RootLength, ExpectedMac)
+            Dim Root = ReadMetadataRoot(BaseStream, RootOffset, RootLength, ExpectedMac)
 
             IndexPageEntryCount = Root.IndexPageEntryCount
             IndexDirectoryEntryCount = Root.IndexDirectoryEntryCount
@@ -914,16 +914,16 @@ Namespace Streams
             Dim ExtentPageDescriptors =
                 If(Root.DirectExtentPageDescriptors.Count > 0,
                    Root.DirectExtentPageDescriptors,
-                   ReadDirectoryPages(Fs, Root.ExtentDirectoryPageDescriptors, DirectoryTypes.ExtentPages))
+                   ReadDirectoryPages(BaseStream, Root.ExtentDirectoryPageDescriptors, DirectoryTypes.ExtentPages))
 
             Dim PhysicalRecordPageDescriptors =
                 If(Root.DirectPhysicalRecordPageDescriptors.Count > 0,
                    Root.DirectPhysicalRecordPageDescriptors,
-                   ReadDirectoryPages(Fs, Root.PhysicalRecordDirectoryPageDescriptors, DirectoryTypes.PhysicalRecordPages))
+                   ReadDirectoryPages(BaseStream, Root.PhysicalRecordDirectoryPageDescriptors, DirectoryTypes.PhysicalRecordPages))
 
-            Dim Extents = ReadExtentPages(Fs, ExtentPageDescriptors, Root.ExtentCount, IndexPageEntryCount)
-            Dim PhysicalRecords = ReadPhysicalRecordPages(Fs, PhysicalRecordPageDescriptors, Root.PhysicalRecordCount, IndexPageEntryCount)
-            Dim HoleRecords = ReadHoleDirectoryPages(Fs, Root.HoleDirectoryPageDescriptors)
+            Dim Extents = ReadExtentPages(BaseStream, ExtentPageDescriptors, Root.ExtentCount, IndexPageEntryCount)
+            Dim PhysicalRecords = ReadPhysicalRecordPages(BaseStream, PhysicalRecordPageDescriptors, Root.PhysicalRecordCount, IndexPageEntryCount)
+            Dim HoleRecords = ReadHoleDirectoryPages(BaseStream, Root.HoleDirectoryPageDescriptors)
 
             If PhysicalRecords.Count = 0 AndAlso
                Extents.Count = 1 AndAlso
@@ -932,8 +932,8 @@ Namespace Streams
                 Dim RecordId = Extents(0).PhysicalRecordId
                 Dim Header(ChunkRecordHeaderSize - 1) As Byte
 
-                Fs.Position = DataStartOffset
-                ReadExactly(Fs, Header, 0, Header.Length)
+                BaseStream.Position = DataStartOffset
+                ReadExactly(BaseStream, Header, 0, Header.Length)
 
                 Dim StoredRecordId = BitConverter.ToInt64(Header, 0)
 
@@ -974,7 +974,7 @@ Namespace Streams
         End Function
 
         'TODO: Check
-        Private Shared Function ReadMetadataRoot(Fs As Stream,
+        Private Shared Function ReadMetadataRoot(BaseStream As Stream,
                                                  RootOffset As Long,
                                                  RootLength As Integer,
                                                  ExpectedMac As Byte()) As MetadataRootReadResult
@@ -997,12 +997,12 @@ Namespace Streams
 
             If RootOffset < DataStartOffset Then Throw New InvalidDataException("Invalid metadata root offset.")
             If RootLength < MetadataRootHeaderSize + MacSize Then Throw New InvalidDataException("Invalid metadata root length.")
-            If RootOffset + RootLength > Fs.Length Then Throw New InvalidDataException("Metadata root extends beyond end of stream.")
+            If RootOffset + RootLength > BaseStream.Length Then Throw New InvalidDataException("Metadata root extends beyond end of stream.")
 
             Dim Root(RootLength - 1) As Byte
 
-            Fs.Position = RootOffset
-            ReadExactly(Fs, Root, 0, Root.Length)
+            BaseStream.Position = RootOffset
+            ReadExactly(BaseStream, Root, 0, Root.Length)
 
             If FixedTimeEquals(MetadataRootMagic, 0, Root, 0, MetadataRootMagicSize) = False Then
                 Throw New InvalidDataException("Invalid metadata root magic.")
@@ -1090,7 +1090,7 @@ Namespace Streams
 
         End Sub
 
-        Private Shared Function ReadDirectoryPages(Fs As Stream,
+        Private Shared Function ReadDirectoryPages(BaseStream As Stream,
                                                    Descriptors As IEnumerable(Of MetadataPageDescriptor),
                                                    ExpectedDirectoryType As DirectoryTypes) As List(Of MetadataPageDescriptor)
 
@@ -1099,8 +1099,8 @@ Namespace Streams
             For Each Descriptor In Descriptors.OrderBy(Function(x) x.PageNumber)
                 Dim Page(Descriptor.Length - 1) As Byte
 
-                Fs.Position = Descriptor.Offset
-                ReadExactly(Fs, Page, 0, Page.Length)
+                BaseStream.Position = Descriptor.Offset
+                ReadExactly(BaseStream, Page, 0, Page.Length)
 
                 Dim Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
 
@@ -1135,12 +1135,12 @@ Namespace Streams
 
         End Function
 
-        Private Shared Function ReadExtentPages(Fs As Stream,
+        Private Shared Function ReadExtentPages(BaseStream As Stream,
                                                 Descriptors As IEnumerable(Of MetadataPageDescriptor),
                                                 ExtentCount As Integer,
                                                 PageEntryCount As Integer) As List(Of ExtentIndexEntry)
 
-            If Fs Is Nothing Then Throw New ArgumentNullException(NameOf(Fs))
+            If BaseStream Is Nothing Then Throw New ArgumentNullException(NameOf(BaseStream))
             If Descriptors Is Nothing Then Throw New ArgumentNullException(NameOf(Descriptors))
             If ExtentCount < 0 Then Throw New ArgumentOutOfRangeException(NameOf(ExtentCount))
             If PageEntryCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageEntryCount))
@@ -1155,8 +1155,8 @@ Namespace Streams
 
                 Dim Page(Descriptor.Length - 1) As Byte
 
-                Fs.Position = Descriptor.Offset
-                ReadExactly(Fs, Page, 0, Page.Length)
+                BaseStream.Position = Descriptor.Offset
+                ReadExactly(BaseStream, Page, 0, Page.Length)
 
                 Dim Mac = ComputeMac(Page,
                                      Page.Length - MacSize,
@@ -1238,7 +1238,7 @@ Namespace Streams
 
         End Function
 
-        Private Shared Function ReadPhysicalRecordPages(Fs As Stream,
+        Private Shared Function ReadPhysicalRecordPages(BaseStream As Stream,
                                                         Descriptors As IEnumerable(Of MetadataPageDescriptor),
                                                         PhysicalRecordCount As Integer,
                                                         PageEntryCount As Integer) As Dictionary(Of Long, PhysicalRecordEntry)
@@ -1251,8 +1251,8 @@ Namespace Streams
             For Each Descriptor In Descriptors.OrderBy(Function(x) x.PageNumber)
                 Dim Page(Descriptor.Length - 1) As Byte
 
-                Fs.Position = Descriptor.Offset
-                ReadExactly(Fs, Page, 0, Page.Length)
+                BaseStream.Position = Descriptor.Offset
+                ReadExactly(BaseStream, Page, 0, Page.Length)
 
                 Dim Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
 
@@ -1302,7 +1302,7 @@ Namespace Streams
 
         End Function
 
-        Private Shared Function ReadHoleDirectoryPages(Fs As Stream,
+        Private Shared Function ReadHoleDirectoryPages(BaseStream As Stream,
                                                        Descriptors As IEnumerable(Of MetadataPageDescriptor)) As List(Of HoleDirectoryRecord)
 
             Dim Result As New List(Of HoleDirectoryRecord)()
@@ -1310,8 +1310,8 @@ Namespace Streams
             For Each Descriptor In Descriptors.OrderBy(Function(x) x.PageNumber)
                 Dim Page(Descriptor.Length - 1) As Byte
 
-                Fs.Position = Descriptor.Offset
-                ReadExactly(Fs, Page, 0, Page.Length)
+                BaseStream.Position = Descriptor.Offset
+                ReadExactly(BaseStream, Page, 0, Page.Length)
 
                 Dim Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
 

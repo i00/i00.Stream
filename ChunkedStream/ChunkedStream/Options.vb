@@ -463,8 +463,8 @@ Namespace Streams
             InvalidateChunkCache()
 
             Dim Result As New ApplyOptionsResult With {
-                .PhysicalLengthBefore = _Fs.Length,
-                .PhysicalLengthAfter = _Fs.Length
+                .PhysicalLengthBefore = BaseStream.Length,
+                .PhysicalLengthAfter = BaseStream.Length
             }
 
             If Types = ApplyOptionTypes.None Then
@@ -479,7 +479,7 @@ Namespace Streams
 
                 If CancellationToken.Cancel Then
                     Result.WasCancelled = True
-                    Result.PhysicalLengthAfter = _Fs.Length
+                    Result.PhysicalLengthAfter = BaseStream.Length
                     Return Result
                 End If
 
@@ -493,7 +493,7 @@ Namespace Streams
                     PersistIndexAndHeader(_IndexOffset, Durable)
                 End If
 
-                Result.PhysicalLengthAfter = _Fs.Length
+                Result.PhysicalLengthAfter = BaseStream.Length
                 Return Result
 
             End If
@@ -504,7 +504,7 @@ Namespace Streams
 
                 If CancellationToken.Cancel Then
                     Result.WasCancelled = True
-                    Result.PhysicalLengthAfter = _Fs.Length
+                    Result.PhysicalLengthAfter = BaseStream.Length
                     Return Result
                 End If
 
@@ -557,7 +557,7 @@ Namespace Streams
                 PersistIndexAndHeader(_IndexOffset, Durable)
             End If
 
-            Result.PhysicalLengthAfter = _Fs.Length
+            Result.PhysicalLengthAfter = BaseStream.Length
 
             Return Result
 
@@ -718,7 +718,7 @@ Namespace Streams
             Dim OriginalNextPhysicalRecordId = _NextPhysicalRecordId
             Dim OriginalNextAnchorId = _NextAnchorId
             Dim OriginalIndexOffset = _IndexOffset
-            Dim OriginalPhysicalLength = _Fs.Length
+            Dim OriginalPhysicalLength = BaseStream.Length
             Dim OriginalChunkSize = _ChunkSize
             Dim OriginalChunkPlain = _ChunkPlain
             Dim OriginalCachedChunkPlain = _CachedChunkPlain
@@ -938,8 +938,8 @@ Namespace Streams
 
             MarkAllMetadataPagesDirty()
 
-            If _Fs.Length > OriginalPhysicalLength Then
-                _Fs.SetLength(OriginalPhysicalLength)
+            If BaseStream.Length > OriginalPhysicalLength Then
+                BaseStream.SetLength(OriginalPhysicalLength)
             End If
 
         End Sub
@@ -1109,7 +1109,7 @@ Namespace Streams
                 Throw New System.IO.InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
             End If
 
-            If Record.PhysicalOffset + Record.PhysicalLength > _Fs.Length Then
+            If Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then
                 Throw New System.IO.InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
             End If
 

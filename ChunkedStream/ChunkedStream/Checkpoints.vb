@@ -223,7 +223,7 @@ Namespace Streams
                 If Owner Is Nothing Then Throw New ArgumentNullException(NameOf(Owner))
 
                 LogicalLength = Owner._Length
-                PhysicalLength = Owner._Fs.Length
+                PhysicalLength = Owner.BaseStream.Length
                 IndexOffset = Owner._IndexOffset
                 HeaderFlags = Owner._HeaderFlags
                 Extents = New List(Of ExtentIndexEntry)(Owner._Extents)
@@ -301,7 +301,7 @@ Namespace Streams
                 Return
             End If
 
-            Dim CommitIndexOffset = Math.Max(_Fs.Length, GetDataEndFromIndex())
+            Dim CommitIndexOffset = Math.Max(BaseStream.Length, GetDataEndFromIndex())
 
             PersistIndexAndHeader(CommitIndexOffset, Durable)
 
@@ -411,8 +411,8 @@ Namespace Streams
 
             MarkAllMetadataPagesDirty()
 
-            If _Fs.Length > State.PhysicalLength Then
-                _Fs.SetLength(State.PhysicalLength)
+            If BaseStream.Length > State.PhysicalLength Then
+                BaseStream.SetLength(State.PhysicalLength)
             End If
 
         End Sub

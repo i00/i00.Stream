@@ -94,7 +94,7 @@ Namespace Streams
                     If Record.RefCount <= 0 Then Continue For
                     If Record.PhysicalOffset < DataStartOffset Then Continue For
                     If Record.PhysicalLength < MinChunkRecordSize Then Continue For
-                    If Record.PhysicalOffset > _Fs.Length - Record.PhysicalLength Then Continue For
+                    If Record.PhysicalOffset > BaseStream.Length - Record.PhysicalLength Then Continue For
                     Dim Buffer(Record.PhysicalLength - 1) As Byte
                     ReadAt(Record.PhysicalOffset, Buffer, 0, Buffer.Length)
                     Snapshot.StoredRecords.Add(Record.RecordId, Buffer)

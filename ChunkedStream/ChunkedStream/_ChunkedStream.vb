@@ -305,19 +305,19 @@ Namespace Streams
 
         Public Overrides ReadOnly Property CanRead As Boolean
             Get
-                Return _Fs.CanRead
+                Return BaseStream.CanRead
             End Get
         End Property
 
         Public Overrides ReadOnly Property CanWrite As Boolean
             Get
-                Return _Fs.CanWrite
+                Return BaseStream.CanWrite
             End Get
         End Property
 
         Public Overrides ReadOnly Property CanSeek As Boolean
             Get
-                Return _Fs.CanSeek
+                Return BaseStream.CanSeek
             End Get
         End Property
 
@@ -581,7 +581,7 @@ Namespace Streams
             Public HeaderCopyIndex As Integer
         End Structure
 
-        Private ReadOnly _Fs As Stream
+        Public ReadOnly BaseStream As Stream
 
         <Flags>
         Protected Enum PhysicalIoLockStates
@@ -605,7 +605,7 @@ Namespace Streams
         ''' </remarks>
         Protected Overridable ReadOnly Property RequiredPhysicalIoLocks As PhysicalIoLockStates
             Get
-                Dim PositionedStream = TryCast(_Fs, IPositionedStream)
+                Dim PositionedStream = TryCast(BaseStream, IPositionedStream)
 
                 If PositionedStream Is Nothing Then
                     Return PhysicalIoLockStates.FullLock
@@ -661,7 +661,7 @@ Namespace Streams
                                              BufferOffset As Integer,
                                              Count As Integer)
 
-            Dim PositionedStream = TryCast(_Fs, IPositionedStream)
+            Dim PositionedStream = TryCast(BaseStream, IPositionedStream)
 
             If PositionedStream IsNot Nothing Then
                 Dim TotalRead = 0
@@ -695,8 +695,8 @@ Namespace Streams
                     $"or provide a backing stream that implements {NameOf(IPositionedStream)}.")
             End If
 
-            _Fs.Position = PhysicalOffset
-            ReadExactly(_Fs, Buffer, BufferOffset, Count)
+            BaseStream.Position = PhysicalOffset
+            ReadExactly(BaseStream, Buffer, BufferOffset, Count)
 
         End Sub
 
@@ -705,7 +705,7 @@ Namespace Streams
                                               BufferOffset As Integer,
                                               Count As Integer)
 
-            Dim PositionedStream = TryCast(_Fs, IPositionedStream)
+            Dim PositionedStream = TryCast(BaseStream, IPositionedStream)
 
             If PositionedStream IsNot Nothing Then
                 PositionedStream.WriteAt(
@@ -724,8 +724,8 @@ Namespace Streams
                     $"or provide a backing stream that implements {NameOf(IPositionedStream)}.")
             End If
 
-            _Fs.Position = PhysicalOffset
-            _Fs.Write(Buffer, BufferOffset, Count)
+            BaseStream.Position = PhysicalOffset
+            BaseStream.Write(Buffer, BufferOffset, Count)
 
         End Sub
 
@@ -897,7 +897,7 @@ Namespace Streams
             Return _ChunkSize
         End Function
 
-        Private Sub New(Fs As Stream,
+        Private Sub New(BaseStream As Stream,
                         Header As Byte(),
                         HeaderSequence As Long,
                         ActiveHeaderCopy As Integer,
@@ -914,7 +914,7 @@ Namespace Streams
                         IndexPageEntryCount As Integer,
                         IndexDirectoryEntryCount As Integer)
 
-            _Fs = Fs
+            Me.BaseStream = BaseStream
             _Header = Header
             _HeaderSequence = HeaderSequence
             _ActiveHeaderCopy = ActiveHeaderCopy
@@ -985,37 +985,37 @@ Namespace Streams
         ''' <summary>
         ''' Opens an existing ChunkedStream or creates a new one if the backing stream is empty.
         ''' </summary>
-        ''' <param name="Fs">Backing storage stream. The caller owns the stream lifetime.</param>
+        ''' <param name="BaseStream">Backing storage stream. The caller owns the stream lifetime.</param>
         ''' <returns>An opened ChunkedStream.</returns>
-        Public Shared Function Open(Fs As Stream) As ChunkedStream
-            Return Open(Fs, Nothing)
+        Public Shared Function Open(BaseStream As Stream) As ChunkedStream
+            Return Open(BaseStream, Nothing)
         End Function
 
         ''' <summary>
         ''' Opens an existing ChunkedStream or creates a new one if the backing stream is empty.
         ''' </summary>
-        ''' <param name="Fs">Backing storage stream. The caller owns the stream lifetime.</param>
+        ''' <param name="BaseStream">Backing storage stream. The caller owns the stream lifetime.</param>
         ''' <param name="Options">Options controlling newly written chunks.</param>
         ''' <returns>An opened ChunkedStream.</returns>
-        Public Shared Function Open(Fs As Stream,
+        Public Shared Function Open(BaseStream As Stream,
                                     Optional Options As ChunkedStreamOptions = Nothing,
                                     Optional AllowOpeningWhenRecoveryFails As Boolean = False) As ChunkedStream
 
-            If Fs Is Nothing Then Throw New ArgumentNullException(NameOf(Fs))
+            If BaseStream Is Nothing Then Throw New ArgumentNullException(NameOf(BaseStream))
 
-            If Fs.CanRead = False OrElse Fs.CanSeek = False Then
-                Throw New NotSupportedException($"Provided {NameOf(Fs)} must support {NameOf(Fs.CanRead)} and {NameOf(Fs.CanSeek)}.")
+            If BaseStream.CanRead = False OrElse BaseStream.CanSeek = False Then
+                Throw New NotSupportedException($"Provided {NameOf(BaseStream)} must support {NameOf(BaseStream.CanRead)} and {NameOf(BaseStream.CanSeek)}.")
             End If
 
-            If Fs.Length < DataStartOffset Then
-                If Fs.CanWrite = False Then
-                    Throw New NotSupportedException($"Provided {NameOf(Fs)} must support {NameOf(Fs.CanWrite)}.")
+            If BaseStream.Length < DataStartOffset Then
+                If BaseStream.CanWrite = False Then
+                    Throw New NotSupportedException($"Provided {NameOf(BaseStream)} must support {NameOf(BaseStream.CanWrite)}.")
                 End If
-                Return CreateNew(Fs, Options)
+                Return CreateNew(BaseStream, Options)
             End If
 
             Dim EffectiveOptions = If(Options, New ChunkedStreamOptions())
-            Dim Candidate = ReadBestHeader(Fs)
+            Dim Candidate = ReadBestHeader(BaseStream)
 
             If Candidate.Header Is Nothing Then
                 Throw New InvalidDataException("No valid chunked stream header was found.")
@@ -1072,7 +1072,7 @@ Namespace Streams
 
             If FileLength < 0 Then Throw New InvalidDataException("Invalid chunked stream length.")
             If IndexOffset < DataStartOffset Then Throw New InvalidDataException("Invalid chunked stream index offset.")
-            If IndexOffset > Fs.Length Then Throw New InvalidDataException("Chunked stream index offset is beyond end of stream.")
+            If IndexOffset > BaseStream.Length Then Throw New InvalidDataException("Chunked stream index offset is beyond end of stream.")
             If IndexCount < 0 OrElse IndexCount > Integer.MaxValue Then Throw New InvalidDataException("Invalid chunked stream index count.")
             If StoredIndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid index page entry count.")
             If StoredIndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid index directory entry count.")
@@ -1085,7 +1085,7 @@ Namespace Streams
             Buffer.BlockCopy(Header, IndexMacOffset, RootMac, 0, RootMac.Length)
 
             Dim Metadata =
-                ReadPagedMetadata(Fs,
+                ReadPagedMetadata(BaseStream,
                                   MetadataRootOffset,
                                   MetadataRootLength,
                                   RootMac,
@@ -1096,7 +1096,7 @@ Namespace Streams
                 Throw New InvalidDataException("Loaded extent count does not match header index count.")
             End If
 
-            Dim Result = New ChunkedStream(Fs,
+            Dim Result = New ChunkedStream(BaseStream,
                                            Header,
                                            Candidate.HeaderSequence,
                                            Candidate.HeaderCopyIndex,
@@ -1143,7 +1143,7 @@ Namespace Streams
 
             Result._RecoveryStateAtOpen = Result.GetRecoveryState()
             If Result._RecoveryStateAtOpen <> RecoveryStates.None Then
-                If Fs.CanWrite Then
+                If BaseStream.CanWrite Then
                     Try
                         Result.RecoverState()
                         Result.RebuildPhysicalRecordOrdinals()
@@ -1198,7 +1198,7 @@ Namespace Streams
             End Get
         End Property
 
-        Private Shared Function CreateNew(Fs As Stream, Options As ChunkedStreamOptions) As ChunkedStream
+        Private Shared Function CreateNew(BaseStream As Stream, Options As ChunkedStreamOptions) As ChunkedStream
 
             Dim Header(HeaderSize - 1) As Byte
             Dim EffectiveOptions = If(Options, New ChunkedStreamOptions())
@@ -1232,17 +1232,17 @@ Namespace Streams
 
             WriteHeaderMac(Header, PublicIntegrityKey)
 
-            Fs.Position = 0
-            Fs.Write(Header, 0, Header.Length)
+            BaseStream.Position = 0
+            BaseStream.Write(Header, 0, Header.Length)
 
-            Fs.Position = HeaderSize
-            Fs.Write(Header, 0, Header.Length)
+            BaseStream.Position = HeaderSize
+            BaseStream.Write(Header, 0, Header.Length)
 
-            Fs.SetLength(DataStartOffset)
+            BaseStream.SetLength(DataStartOffset)
 
-            FlushDurable(Fs)
+            FlushDurable(BaseStream)
 
-            Dim Result = New ChunkedStream(Fs,
+            Dim Result = New ChunkedStream(BaseStream,
                                            Header,
                                            1L,
                                            0,
@@ -1267,7 +1267,7 @@ Namespace Streams
 
         End Function
 
-        Private Shared Function ReadBestHeader(Fs As Stream) As HeaderCandidate
+        Private Shared Function ReadBestHeader(BaseStream As Stream) As HeaderCandidate
 
             Dim Best As New HeaderCandidate()
 
@@ -1276,8 +1276,8 @@ Namespace Streams
                 Dim Header(HeaderSize - 1) As Byte
                 Dim HeaderOffset = HeaderCopyIndex * HeaderSize
 
-                Fs.Position = HeaderOffset
-                ReadExactly(Fs, Header, 0, Header.Length)
+                BaseStream.Position = HeaderOffset
+                ReadExactly(BaseStream, Header, 0, Header.Length)
 
                 If Not FixedTimeEquals(HeaderMagic, 0, Header, MagicOffset, MagicSize) Then Continue For
                 If Not VerifyHeaderMac(Header, PublicIntegrityKey) Then Continue For
@@ -2240,8 +2240,8 @@ Namespace Streams
 
             ThrowIfDisposed()
 
-            If _Fs.CanWrite Then
-                _Fs.Flush()
+            If BaseStream.CanWrite Then
+                BaseStream.Flush()
             End If
 
 
@@ -2270,9 +2270,9 @@ Namespace Streams
                     CloseCheckpointCore(_CheckpointStack(_CheckpointStack.Count - 1))
                 End While
 
-                If Disposing AndAlso _Fs IsNot Nothing AndAlso _Fs.CanWrite Then
+                If Disposing AndAlso BaseStream IsNot Nothing AndAlso BaseStream.CanWrite Then
                     PersistIndexAndHeader(_IndexOffset, True)
-                    _Fs.Flush()
+                    BaseStream.Flush()
                 End If
 
             Finally
@@ -2340,8 +2340,8 @@ Namespace Streams
 
                 Dim Root(_MetadataRootLength - 1) As Byte
 
-                _Fs.Position = _MetadataRootOffset
-                ReadExactly(_Fs, Root, 0, Root.Length)
+                BaseStream.Position = _MetadataRootOffset
+                ReadExactly(BaseStream, Root, 0, Root.Length)
 
                 Dim RootMac = ComputeMac(Root, Root.Length - MacSize, PublicIntegrityKey)
 
@@ -2368,10 +2368,10 @@ Namespace Streams
 
             Dim HeaderOffset = _ActiveHeaderCopy * HeaderSize
 
-            _Fs.Position = HeaderOffset
-            _Fs.Write(_Header, 0, _Header.Length)
+            BaseStream.Position = HeaderOffset
+            BaseStream.Write(_Header, 0, _Header.Length)
 
-            If Durable Then FlushDurable(_Fs)
+            If Durable Then FlushDurable(BaseStream)
 
         End Sub
 

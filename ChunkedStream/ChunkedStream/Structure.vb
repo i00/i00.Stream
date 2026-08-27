@@ -143,7 +143,7 @@ Namespace Streams
 
             Dim Result = New StructureSnapshot With {
                 .LogicalLength = _Length,
-                .PhysicalLength = _Fs.Length,
+                .PhysicalLength = BaseStream.Length,
                 .ChunkSize = _ChunkSize,
                 .Extents = New List(Of ExtentIndexEntry)(_Extents),
                 .PhysicalRecords = New Dictionary(Of Long, PhysicalRecordEntry)(_PhysicalRecords),
@@ -653,7 +653,7 @@ Namespace Streams
                 Throw New InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
             End If
 
-            If Record.PhysicalOffset + Record.PhysicalLength > _Fs.Length Then
+            If Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then
                 Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
             End If
 
