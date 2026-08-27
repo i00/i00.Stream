@@ -123,6 +123,25 @@ Namespace Streams
 
         Private ReadOnly _FreeSpaces As New FreeSpaceAllocator()
 
+        '
+        ' Space freed by superseding a previously persisted metadata page, metadata root
+        ' or chunk record is held here instead of being made immediately allocatable.
+        '
+        ' The alternating-header crash-recovery model relies on the most recently
+        ' persisted generation remaining byte-for-byte intact until a newer generation
+        ' has been durably published. Making just-freed space reusable straight away
+        ' breaks that guarantee: a non-durable publish (or the window inside a durable
+        ' one) could place a new record or page on top of storage the on-disk header
+        ' still references, so a crash before the new header is durable would leave an
+        ' unopenable stream.
+        '
+        ' Deferred space is promoted into _FreeSpaces only by PromoteDeferredFreeSpaces,
+        ' which runs after a durable PersistIndexAndHeader has flushed the new header.
+        ' At that point every generation the deferred space belonged to is obsolete and
+        ' the space is genuinely safe to reuse.
+        '
+        Private ReadOnly _DeferredFreeSpaces As New FreeSpaceAllocator()
+
         Private Shared Function StorageRangesOverlap(Offset1 As Long,
                                                      Length1 As Long,
                                                      Offset2 As Long,
@@ -291,6 +310,7 @@ Namespace Streams
 
         Private Sub ClearFreeSpaceMap()
             _FreeSpaces.Clear()
+            _DeferredFreeSpaces.Clear()
         End Sub
 
         Private Sub AddFreeSpace(Offset As Long, Length As Long)
@@ -299,8 +319,41 @@ Namespace Streams
             _FreeSpaces.Add(Offset, Length)
         End Sub
 
+        '
+        ' Records space that has just been superseded but must not be reallocated until
+        ' the next durable metadata publish. Reusing it before then would let a crash
+        ' fall back to a header whose storage we have already overwritten. See
+        ' _DeferredFreeSpaces.
+        '
+        Private Sub DeferFreeSpace(Offset As Long, Length As Long)
+            If Offset < DataStartOffset Then Return
+            If Length <= 0 Then Return
+            _DeferredFreeSpaces.Add(Offset, Length)
+        End Sub
+
+        '
+        ' Moves all deferred free space into the allocatable free-space map. Called only
+        ' after a durable PersistIndexAndHeader, once the superseded generations can no
+        ' longer be selected by Open.
+        '
+        Private Sub PromoteDeferredFreeSpaces()
+            For Each DeferredRange In _DeferredFreeSpaces.Snapshot()
+                AddFreeSpace(DeferredRange.Offset, DeferredRange.Length)
+            Next
+            _DeferredFreeSpaces.Clear()
+        End Sub
+
         Private Function GetKnownHoleRecords() As List(Of HoleDirectoryRecord)
-            Return _FreeSpaces.Snapshot()
+            '
+            ' The persisted hole directory is only ever written as part of a durable
+            ' publish, which promotes deferred space immediately afterwards. Advertising
+            ' the deferred space here too keeps hole reuse working across a reopen
+            ' without waiting for a second durable publish; every range is safe once the
+            ' publish in progress becomes the newest durable generation.
+            '
+            Dim Records = _FreeSpaces.Snapshot()
+            Records.AddRange(_DeferredFreeSpaces.Snapshot())
+            Return Records
         End Function
 
         Private Sub LoadKnownHoleRecords(Records As IEnumerable(Of HoleDirectoryRecord))
@@ -440,6 +493,17 @@ Namespace Streams
             Next
 
             ReservedRanges.AddRange(GetActiveMetadataRanges())
+
+            '
+            ' Deferred free space is not yet safe to reallocate, so treat it as reserved
+            ' while rebuilding the map. It is folded back in by PromoteDeferredFreeSpaces
+            ' after the next durable publish. ClearFreeSpaceMap discards the deferred list
+            ' outright for the authoritative rebuilds performed by defragmentation.
+            '
+            For Each DeferredRange In _DeferredFreeSpaces.Snapshot()
+                ReservedRanges.Add(Tuple.Create(DeferredRange.Offset, DeferredRange.Offset + DeferredRange.Length))
+            Next
+
             ReservedRanges = ReservedRanges.
                              Where(Function(range) range.Item2 > DataStartOffset AndAlso range.Item2 > range.Item1).
                              OrderBy(Function(range) range.Item1).

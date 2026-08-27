@@ -258,7 +258,12 @@ Namespace Streams
 
             RemoveLivePhysicalRecordOffset(Record)
 
-            AddFreeSpace(Record.PhysicalOffset,
+            '
+            ' Hold the freed span until the next durable publish. Reusing it before the
+            ' superseding generation is durable would let a crash fall back to a header
+            ' that still references this record's storage. See _DeferredFreeSpaces.
+            '
+            DeferFreeSpace(Record.PhysicalOffset,
                               Record.PhysicalLength)
 
             _PhysicalRecords.Remove(RecordId)

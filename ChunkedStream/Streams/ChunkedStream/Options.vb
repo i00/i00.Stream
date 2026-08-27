@@ -958,6 +958,7 @@ Namespace Streams
                 RebuildAnchorIndex()
 
                 DiscardPendingPhysicalRecordReclaims()
+                _DeferredFreeSpaces.Clear()
                 InvalidateChunkCache()
 
                 MarkAllMetadataPagesDirty()

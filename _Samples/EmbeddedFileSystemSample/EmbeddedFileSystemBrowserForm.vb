@@ -377,7 +377,6 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Using SourceStream = New FileStream(SourceFilePath, FileMode.Open, FileAccess.Read, FileShare.Read)
                 Using DestinationStream = _FileSystem.OpenFile(FileAnchorId)
                     SourceStream.CopyTo(DestinationStream, 1024 * 1024)
-                    'TODO: Why does a crash here corrupt the file!?
                     DestinationStream.Flush()
                 End Using
             End Using

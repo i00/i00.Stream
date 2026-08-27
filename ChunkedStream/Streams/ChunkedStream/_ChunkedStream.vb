@@ -1166,11 +1166,53 @@ Namespace Streams
             End If
 
             Dim EffectiveOptions = If(Options, New ChunkedStreamOptions())
-            Dim Candidate = ReadBestHeader(BaseStream)
+            Dim Candidates = ReadHeaderCandidates(BaseStream)
 
-            If Candidate.Header Is Nothing Then
+            If Candidates.Count = 0 Then
                 Throw New InvalidDataException("No valid chunked stream header was found.")
             End If
+
+            Dim FirstFailure As Exception = Nothing
+            Dim Result As ChunkedStream = Nothing
+
+            For Each Candidate In Candidates
+
+                Try
+                    Result = OpenFromHeaderCandidate(BaseStream,
+                                                     Candidate,
+                                                     EffectiveOptions,
+                                                     AdaptedFlushDurableAction)
+                    Exit For
+
+                Catch ex As Exception When TypeOf ex Is InvalidDataException OrElse
+                                           TypeOf ex Is CryptographicException OrElse
+                                           TypeOf ex Is EndOfStreamException
+
+                    '
+                    ' This header copy is valid but its metadata could not be loaded - a
+                    ' crash may have left a newer generation's appended root or pages
+                    ' half-written. Try the next, older, fully written copy. The
+                    ' append-only non-durable publish rule guarantees it was not
+                    ' overwritten by the generation that failed here.
+                    '
+                    If FirstFailure Is Nothing Then FirstFailure = ex
+
+                End Try
+
+            Next
+
+            If Result Is Nothing Then Throw FirstFailure
+
+            RunOpenRecovery(Result, BaseStream, AllowOpeningWhenRecoveryFails)
+
+            Return Result
+
+        End Function
+
+        Private Shared Function OpenFromHeaderCandidate(BaseStream As Stream,
+                                                       Candidate As HeaderCandidate,
+                                                       EffectiveOptions As ChunkedStreamOptions,
+                                                       AdaptedFlushDurableAction As Action) As ChunkedStream
 
             Dim Header = Candidate.Header
             Dim WrapMode = CType(BitConverter.ToInt32(Header, MasterKeyWrapModeOffset), MasterKeyWrapModes)
@@ -1294,34 +1336,46 @@ Namespace Streams
                 Throw New EncryptionMismatchException("The supplied encryption information could not unwrap the file master key.")
             End If
 
-            Result._RecoveryStateAtOpen = Result.GetRecoveryState()
-            If Result._RecoveryStateAtOpen <> RecoveryStates.None Then
-                If BaseStream.CanWrite Then
-                    Try
-                        Result.RecoverState()
-                        Result.RebuildPhysicalRecordOrdinals()
-                        Result.RebuildAnchorIndex()
-                        Result._AutoRecoveryState = AutoRecoveryStates.Repaired
-                    Catch ex As Exception When AllowOpeningWhenRecoveryFails
-                        'we ignore errors to allow diagnostics if AllowOpeningRecoveryFails is set
-                        Result._AutoRecoveryException = ex
-                        Result._AutoRecoveryState = AutoRecoveryStates.Failed
-                    End Try
-                Else
-                    If AllowOpeningWhenRecoveryFails Then
-
-                    Else
-                        Throw New NotSupportedException(
-                            $"The stream is pending recovery ({Result._RecoveryStateAtOpen}). " &
-                            $"The backing stream must support write access to perform recovery, " &
-                            $"or {NameOf(AllowOpeningWhenRecoveryFails)} must be set to True to allow diagnostic access.")
-                    End If
-                End If
-            End If
-
             Return Result
 
         End Function
+
+        '
+        ' Runs automatic crash recovery on a freshly opened stream. This is deliberately
+        ' outside the header-candidate fallback loop: a pending recovery journal marks an
+        ' in-progress protected operation, so a recovery failure is a hard error and must
+        ' not be masked by silently opening an older header copy.
+        '
+        Private Shared Sub RunOpenRecovery(Result As ChunkedStream,
+                                           BaseStream As Stream,
+                                           AllowOpeningWhenRecoveryFails As Boolean)
+
+            Result._RecoveryStateAtOpen = Result.GetRecoveryState()
+            If Result._RecoveryStateAtOpen = RecoveryStates.None Then Return
+
+            If BaseStream.CanWrite Then
+                Try
+                    Result.RecoverState()
+                    Result.RebuildPhysicalRecordOrdinals()
+                    Result.RebuildAnchorIndex()
+                    Result._AutoRecoveryState = AutoRecoveryStates.Repaired
+                Catch ex As Exception When AllowOpeningWhenRecoveryFails
+                    'we ignore errors to allow diagnostics if AllowOpeningRecoveryFails is set
+                    Result._AutoRecoveryException = ex
+                    Result._AutoRecoveryState = AutoRecoveryStates.Failed
+                End Try
+            Else
+                If AllowOpeningWhenRecoveryFails Then
+
+                Else
+                    Throw New NotSupportedException(
+                        $"The stream is pending recovery ({Result._RecoveryStateAtOpen}). " &
+                        $"The backing stream must support write access to perform recovery, " &
+                        $"or {NameOf(AllowOpeningWhenRecoveryFails)} must be set to True to allow diagnostic access.")
+                End If
+            End If
+
+        End Sub
 
         Dim _RecoveryStateAtOpen As RecoveryStates
         ''' <summary>
@@ -1455,9 +1509,16 @@ Namespace Streams
 
         End Function
 
-        Private Shared Function ReadBestHeader(BaseStream As Stream) As HeaderCandidate
+        '
+        ' Returns every structurally valid header copy, most recent sequence first. Open
+        ' tries them in order: normally the newest copy is used, but if its metadata
+        ' cannot be loaded - for example a crash left a newer generation's appended root
+        ' or pages half-written - Open falls back to the next copy, which the append-only
+        ' non-durable publish rule guarantees is still intact.
+        '
+        Private Shared Function ReadHeaderCandidates(BaseStream As Stream) As List(Of HeaderCandidate)
 
-            Dim Best As New HeaderCandidate()
+            Dim Candidates As New List(Of HeaderCandidate)()
 
             For HeaderCopyIndex = 0 To HeaderCopyCount - 1
 
@@ -1470,17 +1531,17 @@ Namespace Streams
                 If Not FixedTimeEquals(HeaderMagic, 0, Header, MagicOffset, MagicSize) Then Continue For
                 If Not VerifyHeaderMac(Header, PublicIntegrityKey) Then Continue For
 
-                Dim HeaderSequence = BitConverter.ToInt64(Header, HeaderSequenceOffset)
-
-                If Best.Header Is Nothing OrElse HeaderSequence > Best.HeaderSequence Then
-                    Best.Header = Header
-                    Best.HeaderSequence = HeaderSequence
-                    Best.HeaderCopyIndex = HeaderCopyIndex
-                End If
+                Candidates.Add(New HeaderCandidate With {
+                    .Header = Header,
+                    .HeaderSequence = BitConverter.ToInt64(Header, HeaderSequenceOffset),
+                    .HeaderCopyIndex = HeaderCopyIndex
+                })
 
             Next
 
-            Return Best
+            Candidates.Sort(Function(left, right) right.HeaderSequence.CompareTo(left.HeaderSequence))
+
+            Return Candidates
 
         End Function
 

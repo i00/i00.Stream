@@ -345,6 +345,168 @@ Namespace Tests
             End Sub
 
             ' ================================================================================
+            ' Uncommitted-churn crash safety
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Verifies that a long run of mutations that are never published durably cannot
+            ''' overwrite storage that an earlier, still-selectable header generation
+            ''' references. Simulates a crash whose newest header copy is unusable, forcing
+            ''' Open to fall back to the previous copy, and requires that fallback generation
+            ''' to load cleanly and to be a state the stream genuinely passed through.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub UncommittedChurnDoesNotCorruptEarlierHeaderGeneration()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 256,
+                        .IndexPageEntryCount = 4,
+                        .IndexDirectoryEntryCount = 4
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        For ChunkIndex = 0 To 47
+
+                            Cs.Write(
+                                ChunkIndex * Options.ChunkSize,
+                                GenerateRandomData(Options.ChunkSize, 9000 + ChunkIndex))
+
+                        Next
+
+                    End Using
+
+                    '
+                    ' Reopen and churn without ever publishing durably. Every metadata
+                    ' publish here is non-durable and must therefore be append-only: it
+                    ' cannot touch storage that either on-disk header copy still points at.
+                    '
+                    Dim Snapshots As New List(Of Byte())()
+                    Dim Live = ChunkedStream.Open(Ms, Options)
+
+                    Snapshots.Add(Live.ToArray())
+
+                    For Pass = 0 To 15
+
+                        For ChunkIndex = 0 To 47 Step 2
+
+                            Live.Write(
+                                ChunkIndex * Options.ChunkSize,
+                                GenerateRandomData(Options.ChunkSize, 40000 + (Pass * 100) + ChunkIndex))
+
+                            '
+                            ' Every individual write is its own non-durable publish and
+                            ' its own header-copy flip, so any of these states can become
+                            ' the fallback generation after the crash.
+                            '
+                            Snapshots.Add(Live.ToArray())
+
+                        Next
+
+                    Next
+
+                    GC.KeepAlive(Live)
+                    Live = Nothing
+
+                    '
+                    ' Simulate the crash-recovery fallback path: the newest header copy is
+                    ' unusable (torn write or a lost write-buffer tail), so Open must select
+                    ' the older copy.
+                    '
+                    CorruptHeaderCopy(Ms, GetNewerHeaderCopyIndex(Ms))
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+
+                        Reopened.Validate()
+
+                        Dim Recovered = Reopened.ToArray()
+
+                        AssertTrue(
+                            Snapshots.Any(Function(snapshot) BytesEqual(snapshot, Recovered)),
+                            "Falling back to the earlier header generation did not yield a state the stream actually passed through, so uncommitted churn had overwritten its storage.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that when the newest header is itself valid but the generation it
+            ''' describes was only partly written before the crash, Open falls back to the
+            ''' previous header copy and still opens a coherent state rather than failing.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub OpenFallsBackToPreviousHeaderWhenNewestGenerationMetadataIsTruncated()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 256,
+                        .IndexPageEntryCount = 4,
+                        .IndexDirectoryEntryCount = 4
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        For ChunkIndex = 0 To 47
+
+                            Cs.Write(
+                                ChunkIndex * Options.ChunkSize,
+                                GenerateRandomData(Options.ChunkSize, 8100 + ChunkIndex))
+
+                        Next
+
+                    End Using
+
+                    Dim Snapshots As New List(Of Byte())()
+                    Dim Live = ChunkedStream.Open(Ms, Options)
+
+                    Snapshots.Add(Live.ToArray())
+
+                    For Pass = 0 To 10
+
+                        For ChunkIndex = 0 To 47 Step 2
+
+                            Live.Write(
+                                ChunkIndex * Options.ChunkSize,
+                                GenerateRandomData(Options.ChunkSize, 50000 + (Pass * 100) + ChunkIndex))
+
+                            Snapshots.Add(Live.ToArray())
+
+                        Next
+
+                    Next
+
+                    GC.KeepAlive(Live)
+                    Live = Nothing
+
+                    '
+                    ' Simulate a crash that lost the tail of the backing store: the newest
+                    ' generation's appended metadata root is truncated away, but its header
+                    ' copy (written at the front of the file) survived and still validates.
+                    '
+                    Ms.SetLength(Ms.Length - 64)
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+
+                        Reopened.Validate()
+
+                        Dim Recovered = Reopened.ToArray()
+
+                        AssertTrue(
+                            Snapshots.Any(Function(snapshot) BytesEqual(snapshot, Recovered)),
+                            "Open did not fall back to a coherent earlier generation after the newest generation's metadata was truncated.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ' ================================================================================
             ' Chunk-size rebuild recovery
             ' ================================================================================
 

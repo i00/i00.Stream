@@ -218,6 +218,7 @@ Namespace Streams
             Public Property NextPhysicalRecordId As Long
             Public Property NextAnchorId As Long
             Public Property FreeSpaceSnapshot As SortedDictionary(Of Long, Long)
+            Public Property DeferredFreeSpaceSnapshot As SortedDictionary(Of Long, Long)
 
             Public Sub Capture(Owner As ChunkedStream)
 
@@ -232,6 +233,7 @@ Namespace Streams
                 NextPhysicalRecordId = Owner._NextPhysicalRecordId
                 NextAnchorId = Owner._NextAnchorId
                 FreeSpaceSnapshot = Owner._FreeSpaces.CloneSpaces()
+                DeferredFreeSpaceSnapshot = Owner._DeferredFreeSpaces.CloneSpaces()
 
             End Sub
 
@@ -385,6 +387,7 @@ Namespace Streams
 
             InvalidateChunkCache()
             _FreeSpaces.RestoreSpaces(State.FreeSpaceSnapshot)
+            _DeferredFreeSpaces.RestoreSpaces(State.DeferredFreeSpaceSnapshot)
             DiscardPendingPhysicalRecordReclaims()
 
             _Length = State.LogicalLength

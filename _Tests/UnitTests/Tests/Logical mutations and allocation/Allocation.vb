@@ -590,6 +590,14 @@ Namespace Tests
                                 Cs.Options.ChunkSize,
                                 12001))
 
+                        ' Space freed by superseding a chunk record is held back until the
+                        ' next durable publish, so a crash cannot fall back onto storage a
+                        ' later write has reused. Commit a checkpoint to release it before
+                        ' the reuse write below.
+                        Using Checkpoint = Cs.CreateCheckpoint()
+                            Checkpoint.Commit()
+                        End Using
+
                         Cs.Write(
                             Cs.Options.ChunkSize * 4L,
                             GeneratePatternData(

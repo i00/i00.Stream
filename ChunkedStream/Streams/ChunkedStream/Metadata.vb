@@ -165,7 +165,7 @@ Namespace Streams
             If EntryCount = 0 Then
                 If HadOldDescriptor Then
                     If OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                        AddFreeSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                        DeferFreeSpace(OldDescriptor.Offset, OldDescriptor.Length)
                     End If
 
                     _ExtentPageDescriptors.Remove(PageNumber)
@@ -187,7 +187,7 @@ Namespace Streams
             }
 
             If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                AddFreeSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                DeferFreeSpace(OldDescriptor.Offset, OldDescriptor.Length)
             End If
 
             _ExtentPageDescriptors(PageNumber) = Descriptor
@@ -282,7 +282,7 @@ Namespace Streams
                     If OldDescriptor.Offset > 0 AndAlso
                         OldDescriptor.Length > 0 Then
 
-                        AddFreeSpace(OldDescriptor.Offset,
+                        DeferFreeSpace(OldDescriptor.Offset,
                                                 OldDescriptor.Length)
 
                     End If
@@ -314,7 +314,7 @@ Namespace Streams
                 OldDescriptor.Offset > 0 AndAlso
                 OldDescriptor.Length > 0 Then
 
-                AddFreeSpace(OldDescriptor.Offset,
+                DeferFreeSpace(OldDescriptor.Offset,
                                         OldDescriptor.Length)
 
             End If
@@ -395,7 +395,7 @@ Namespace Streams
                 }
 
                 If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                    AddFreeSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                    DeferFreeSpace(OldDescriptor.Offset, OldDescriptor.Length)
                 End If
 
                 Result(PageNumber) = NewDescriptor
@@ -471,7 +471,7 @@ Namespace Streams
                 }
 
                 If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                    AddFreeSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                    DeferFreeSpace(OldDescriptor.Offset, OldDescriptor.Length)
                 End If
 
                 Result(PageNumber) = NewDescriptor
@@ -655,7 +655,7 @@ Namespace Streams
 
                 Dim Descriptor = _ExtentPageDescriptors(PageNumber)
 
-                AddFreeSpace(Descriptor.Offset,
+                DeferFreeSpace(Descriptor.Offset,
                                         Descriptor.Length)
 
                 _ExtentPageDescriptors.Remove(PageNumber)
@@ -678,7 +678,7 @@ Namespace Streams
                 Dim Descriptor =
                     _PhysicalRecordPageDescriptors(PageNumber)
 
-                AddFreeSpace(Descriptor.Offset,
+                DeferFreeSpace(Descriptor.Offset,
                                         Descriptor.Length)
 
                 _PhysicalRecordPageDescriptors.Remove(PageNumber)
@@ -738,7 +738,7 @@ Namespace Streams
                 For Each Descriptor In _ExtentDirectoryPageDescriptors.Values.ToArray()
 
                     If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                        AddFreeSpace(Descriptor.Offset,
+                        DeferFreeSpace(Descriptor.Offset,
                                                         Descriptor.Length)
                     End If
 
@@ -782,7 +782,7 @@ Namespace Streams
                 For Each Descriptor In _PhysicalRecordDirectoryPageDescriptors.Values.ToArray()
 
                     If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                        AddFreeSpace(Descriptor.Offset,
+                        DeferFreeSpace(Descriptor.Offset,
                                                         Descriptor.Length)
                     End If
 
@@ -805,7 +805,7 @@ Namespace Streams
                 If NewHoleDirectoryDescriptors.ContainsKey(Descriptor.PageNumber) = False Then
 
                     If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                        AddFreeSpace(Descriptor.Offset,
+                        DeferFreeSpace(Descriptor.Offset,
                                                         Descriptor.Length)
                     End If
 
@@ -853,7 +853,7 @@ Namespace Streams
             WriteAt(_MetadataRootOffset, Root, 0, Root.Length)
 
             If OldRootOffset > 0 AndAlso OldRootLength > 0 Then
-                AddFreeSpace(OldRootOffset,
+                DeferFreeSpace(OldRootOffset,
                                                 OldRootLength)
             End If
 
@@ -862,6 +862,13 @@ Namespace Streams
             UpdateHeader(Durable)
 
             If Durable Then FlushDurable()
+
+            '
+            ' The new header is now durable. Every generation the deferred free space
+            ' belonged to is superseded and can no longer be selected by Open, so the
+            ' space is finally safe to reallocate.
+            '
+            If Durable Then PromoteDeferredFreeSpaces()
 
         End Sub
 
