@@ -217,6 +217,7 @@ Namespace Streams
             Public Property PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry)
             Public Property NextPhysicalRecordId As Long
             Public Property NextAnchorId As Long
+            Public Property FreeSpaceSnapshot As SortedDictionary(Of Long, Long)
 
             Public Sub Capture(Owner As ChunkedStream)
 
@@ -230,6 +231,7 @@ Namespace Streams
                 PhysicalRecords = Owner._PhysicalRecords.ToDictionary(Function(pair) pair.Key, Function(pair) pair.Value)
                 NextPhysicalRecordId = Owner._NextPhysicalRecordId
                 NextAnchorId = Owner._NextAnchorId
+                FreeSpaceSnapshot = Owner._FreeSpaces.CloneSpaces()
 
             End Sub
 
@@ -382,7 +384,7 @@ Namespace Streams
             If State Is Nothing Then Throw New ArgumentNullException(NameOf(State))
 
             InvalidateChunkCache()
-            ClearFreeSpaceMap()
+            _FreeSpaces.RestoreSpaces(State.FreeSpaceSnapshot)
             DiscardPendingPhysicalRecordReclaims()
 
             _Length = State.LogicalLength

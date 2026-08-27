@@ -8,6 +8,36 @@ Namespace Streams
 
             Private ReadOnly _SpacesByOffset As New SortedDictionary(Of Long, Long)()
 
+            ''' <summary>
+            ''' Returns an independent copy of the current free-space state, suitable for
+            ''' storing alongside a checkpoint baseline and restoring later without re-running
+            ''' merge logic that a valid, already-merged snapshot doesn't need.
+            ''' </summary>
+            Public Function CloneSpaces() As SortedDictionary(Of Long, Long)
+
+                Return New SortedDictionary(Of Long, Long)(_SpacesByOffset)
+
+            End Function
+
+            ''' <summary>
+            ''' Replaces the current free-space state with a previously cloned one verbatim -
+            ''' no merge-scanning, since a cloned snapshot is already valid and already merged.
+            ''' </summary>
+            Public Sub RestoreSpaces(Spaces As SortedDictionary(Of Long, Long))
+
+                If Spaces Is Nothing Then
+                    _SpacesByOffset.Clear()
+                    Return
+                End If
+
+                _SpacesByOffset.Clear()
+
+                For Each pair In Spaces
+                    _SpacesByOffset(pair.Key) = pair.Value
+                Next
+
+            End Sub
+
             Public Sub Add(Offset As Long, Length As Long)
 
                 If Offset < DataStartOffset Then Return
