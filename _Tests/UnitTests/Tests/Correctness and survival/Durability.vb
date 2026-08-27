@@ -635,9 +635,8 @@ Namespace Tests
             End Sub
 
             ''' <summary>
-            ''' Verifies HoleDirectoryModes.Auto behaves like Never below the configured threshold
-            ''' (a hole freed before close is unknown after reopen, so FillHoles - which does not scan -
-            ''' cannot reuse it) and like Always once the threshold is met.
+            ''' Verifies HoleDirectoryModes.Auto behaves like Never below the configured
+            ''' threshold and like Always once the threshold is met.
             ''' </summary>
             <UnitTester.SimpleTest()>
             Public Shared Sub HoleDirectoryAutoModeRespectsThresholdBytes()
@@ -648,25 +647,30 @@ Namespace Tests
                             .ChunkSize = 256,
                             .IndexPageEntryCount = 4,
                             .IndexDirectoryEntryCount = 4,
-                            .HoleDirectoryMode = ChunkedStream.ChunkedStreamOptions.HoleDirectoryModes.Auto,
+                            .HoleDirectoryMode =
+                                ChunkedStream.ChunkedStreamOptions.HoleDirectoryModes.Auto,
                             .HoleDirectoryAutoThresholdBytes = ThresholdBytes,
-                            .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles
+                            .NewChunkWriteLocationPolicy =
+                                ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit,
+                            .NewIndexPageWriteLocationPolicy =
+                                ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.Append,
+                            .NewIndexDirectoryPageWriteLocationPolicy =
+                                ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.Append
                         }
                     End Function
 
-                Dim FreedPhysicalOffset As Long
+                Dim PhysicalLengthBeforeBelowThresholdWrite As Long
                 Dim ReusedOffsetBelowThreshold As Long?
 
                 Using Ms As New MemoryStream()
 
-                    Dim Options = MakeOptions(Long.MaxValue) ' physical stream will never reach this
+                    Dim Options = MakeOptions(Long.MaxValue)
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
                         Cs.Write(0, GenerateRandomData(Options.ChunkSize, 6501))
-                        Cs.Write(Options.ChunkSize, GenerateRandomData(Options.ChunkSize, 6502))
-
-                        FreedPhysicalOffset = Cs.GetStructure().Chunks(1).PhysicalOffset.Value
+                        Cs.Write(Options.ChunkSize,
+                                 GenerateRandomData(Options.ChunkSize, 6502))
 
                         Cs.Remove(Options.ChunkSize, Options.ChunkSize)
 
@@ -674,42 +678,15 @@ Namespace Tests
 
                     Using Reopened = ChunkedStream.Open(Ms, Options)
 
-                        Reopened.Write(Reopened.Length, GenerateRandomData(Options.ChunkSize, 6503))
+                        PhysicalLengthBeforeBelowThresholdWrite = Ms.Length
+
+                        Reopened.Write(Reopened.Length,
+                                       GenerateRandomData(Options.ChunkSize, 6503))
 
                         Dim ReopenedChunks = Reopened.GetStructure().Chunks
-                        ReusedOffsetBelowThreshold = ReopenedChunks(ReopenedChunks.Count - 1).PhysicalOffset
 
-                    End Using
-
-                End Using
-
-                AssertFalse(
-                    ReusedOffsetBelowThreshold.HasValue AndAlso ReusedOffsetBelowThreshold.Value = FreedPhysicalOffset,
-                    "Expected the below-threshold hole to be unknown after reopen, so the new chunk should not land at the freed offset.")
-
-                Dim ReusedOffsetAboveThreshold As Long?
-
-                Using Ms As New MemoryStream()
-
-                    Dim Options = MakeOptions(0) ' any non-empty stream is "above" the threshold
-
-                    Using Cs = ChunkedStream.Open(Ms, Options)
-
-                        Cs.Write(0, GenerateRandomData(Options.ChunkSize, 6501))
-                        Cs.Write(Options.ChunkSize, GenerateRandomData(Options.ChunkSize, 6502))
-
-                        FreedPhysicalOffset = Cs.GetStructure().Chunks(1).PhysicalOffset.Value
-
-                        Cs.Remove(Options.ChunkSize, Options.ChunkSize)
-
-                    End Using
-
-                    Using Reopened = ChunkedStream.Open(Ms, Options)
-
-                        Reopened.Write(Reopened.Length, GenerateRandomData(Options.ChunkSize, 6503))
-
-                        Dim ReopenedChunks = Reopened.GetStructure().Chunks
-                        ReusedOffsetAboveThreshold = ReopenedChunks(ReopenedChunks.Count - 1).PhysicalOffset
+                        ReusedOffsetBelowThreshold =
+                            ReopenedChunks(ReopenedChunks.Count - 1).PhysicalOffset
 
                         Reopened.Validate()
 
@@ -717,10 +694,64 @@ Namespace Tests
 
                 End Using
 
-                AssertEqual(
-                    FreedPhysicalOffset,
-                    ReusedOffsetAboveThreshold.Value,
-                    "Expected an above-threshold hole to be persisted and reused after reopen, landing the new chunk at the freed offset.")
+                AssertTrue(
+                    ReusedOffsetBelowThreshold.HasValue,
+                    "Expected the below-threshold chunk to have a physical offset.")
+
+                AssertTrue(
+                    ReusedOffsetBelowThreshold.Value >=
+                        PhysicalLengthBeforeBelowThresholdWrite,
+                    $"Expected BestFit to append because no hole directory was persisted. " &
+                    $"Physical length before write: " &
+                    $"{PhysicalLengthBeforeBelowThresholdWrite:N0}; " &
+                    $"new chunk offset: {ReusedOffsetBelowThreshold.Value:N0}.")
+
+                Dim PhysicalLengthBeforeAboveThresholdWrite As Long
+                Dim ReusedOffsetAboveThreshold As Long?
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options = MakeOptions(0)
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, GenerateRandomData(Options.ChunkSize, 6501))
+                        Cs.Write(Options.ChunkSize,
+                                 GenerateRandomData(Options.ChunkSize, 6502))
+
+                        Cs.Remove(Options.ChunkSize, Options.ChunkSize)
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                        PhysicalLengthBeforeAboveThresholdWrite = Ms.Length
+
+                        Reopened.Write(Reopened.Length,
+                                       GenerateRandomData(Options.ChunkSize, 6503))
+
+                        Dim ReopenedChunks = Reopened.GetStructure().Chunks
+
+                        ReusedOffsetAboveThreshold =
+                            ReopenedChunks(ReopenedChunks.Count - 1).PhysicalOffset
+
+                        Reopened.Validate()
+
+                    End Using
+
+                End Using
+
+                AssertTrue(
+                    ReusedOffsetAboveThreshold.HasValue,
+                    "Expected the above-threshold chunk to have a physical offset.")
+
+                AssertTrue(
+                    ReusedOffsetAboveThreshold.Value <
+                        PhysicalLengthBeforeAboveThresholdWrite,
+                    $"Expected BestFit to reuse persisted free space below the previous " &
+                    $"physical end. Physical length before write: " &
+                    $"{PhysicalLengthBeforeAboveThresholdWrite:N0}; " &
+                    $"new chunk offset: {ReusedOffsetAboveThreshold.Value:N0}.")
 
             End Sub
 

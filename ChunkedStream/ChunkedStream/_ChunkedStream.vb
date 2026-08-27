@@ -501,11 +501,10 @@ Namespace Streams
             Holes = 3
         End Enum
 
+        'TODO: IS THIS ENUM USEFUL ANYMORE ... REMOVE IT?
         Private Enum HoleSpaceTypes As Integer
             None = 0
-            ChunkRecord = 1
-            IndexPage = 2
-            DirectoryPage = 3
+            FreeSpace = 1
         End Enum
 
         Private Structure MetadataPageDescriptor

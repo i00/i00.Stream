@@ -6,108 +6,101 @@ Namespace Streams
 
         Private NotInheritable Class FreeSpaceAllocator
 
-            Private ReadOnly _SpacesByLength As New SortedDictionary(Of Long, Queue(Of Long))()
+            Private ReadOnly _SpacesByOffset As New SortedDictionary(Of Long, Long)()
 
             Public Sub Add(Offset As Long, Length As Long)
 
                 If Offset < DataStartOffset Then Return
                 If Length <= 0 Then Return
+                If Offset > Long.MaxValue - Length Then Throw New ArgumentOutOfRangeException(NameOf(Length))
 
-                Dim Offsets As Queue(Of Long) = Nothing
+                Dim MergedStart = Offset
+                Dim MergedEnd = Offset + Length
+                Dim OffsetsToRemove As New List(Of Long)()
 
-                If _SpacesByLength.TryGetValue(Length, Offsets) = False Then
-                    Offsets = New Queue(Of Long)()
-                    _SpacesByLength.Add(Length, Offsets)
-                End If
+                For Each pair In _SpacesByOffset
 
-                Offsets.Enqueue(Offset)
+                    Dim ExistingStart = pair.Key
+                    Dim ExistingEnd = ExistingStart + pair.Value
+
+                    If ExistingEnd < MergedStart Then Continue For
+                    If ExistingStart > MergedEnd Then Exit For
+
+                    MergedStart = Math.Min(MergedStart, ExistingStart)
+                    MergedEnd = Math.Max(MergedEnd, ExistingEnd)
+                    OffsetsToRemove.Add(ExistingStart)
+
+                Next
+
+                For Each existingOffset In OffsetsToRemove
+                    _SpacesByOffset.Remove(existingOffset)
+                Next
+
+                _SpacesByOffset(MergedStart) = MergedEnd - MergedStart
 
             End Sub
 
-            Public Function TryAllocate(RequiredLength As Long, ByRef Offset As Long) As Boolean
+            Public Function TryAllocate(RequiredLength As Long, FromStart As Boolean, ByRef Offset As Long) As Boolean
 
                 If RequiredLength <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(RequiredLength))
 
-                Dim SelectedLength As Long = -1
+                Dim SelectedOffset As Long = -1
+                Dim SelectedLength As Long = Long.MaxValue
 
-                For Each pair In _SpacesByLength
-                    If pair.Key >= RequiredLength Then
-                        SelectedLength = pair.Key
+                For Each pair In _SpacesByOffset
+
+                    If pair.Value < RequiredLength Then Continue For
+
+                    If FromStart Then
+                        SelectedOffset = pair.Key
+                        SelectedLength = pair.Value
                         Exit For
                     End If
+
+                    If pair.Value < SelectedLength Then
+                        SelectedOffset = pair.Key
+                        SelectedLength = pair.Value
+                    End If
+
                 Next
 
-                If SelectedLength < 0 Then
+                If SelectedOffset < 0 Then
                     Offset = -1
                     Return False
                 End If
 
-                Dim Offsets = _SpacesByLength(SelectedLength)
-
-                Offset = Offsets.Dequeue()
-
-                If Offsets.Count = 0 Then
-                    _SpacesByLength.Remove(SelectedLength)
-                End If
+                _SpacesByOffset.Remove(SelectedOffset)
+                Offset = SelectedOffset
 
                 Dim RemainingLength = SelectedLength - RequiredLength
 
                 If RemainingLength > 0 Then
-                    Add(Offset + RequiredLength, RemainingLength)
+                    Add(SelectedOffset + RequiredLength, RemainingLength)
                 End If
 
                 Return True
 
             End Function
 
-            Public Function Snapshot(SpaceType As HoleSpaceTypes) As List(Of HoleDirectoryRecord)
+            Public Function Snapshot() As List(Of HoleDirectoryRecord)
 
-                Dim Result As New List(Of HoleDirectoryRecord)()
-
-                For Each pair In _SpacesByLength
-                    For Each offset In pair.Value
-                        Result.Add(New HoleDirectoryRecord With {
-                            .SpaceType = SpaceType,
-                            .Offset = offset,
-                            .Length = pair.Key
-                        })
-                    Next
-                Next
-
-                Return Result
+                Return _SpacesByOffset.
+                       Select(Function(pair) New HoleDirectoryRecord With {
+                           .SpaceType = HoleSpaceTypes.FreeSpace,
+                           .Offset = pair.Key,
+                           .Length = pair.Value
+                       }).
+                       ToList()
 
             End Function
 
             Public Sub Clear()
-
-                _SpacesByLength.Clear()
-
+                _SpacesByOffset.Clear()
             End Sub
 
         End Class
 
-        Private ReadOnly _FreeChunkSpaces As New FreeSpaceAllocator()
-        Private ReadOnly _FreeIndexPageSpaces As New FreeSpaceAllocator()
-        Private ReadOnly _FreeIndexDirectoryPageSpaces As New FreeSpaceAllocator()
-
-        Private Sub ClearFreeSpaceMaps()
-
-            _FreeChunkSpaces.Clear()
-            _FreeIndexPageSpaces.Clear()
-            _FreeIndexDirectoryPageSpaces.Clear()
-
-        End Sub
-
-        Private Sub AddFreeChunkSpace(Offset As Long,
-                              Length As Long)
-
-            If Offset < DataStartOffset Then Return
-            If Length <= 0 Then Return
-            If IsRangeSafeForPhysicalRecord(Offset, Length) = False Then Return
-
-            _FreeChunkSpaces.Add(Offset, Length)
-
-        End Sub
+        Private ReadOnly _FreeSpaces As New FreeSpaceAllocator()
 
         Private Shared Function StorageRangesOverlap(Offset1 As Long,
                                                      Length1 As Long,
@@ -275,38 +268,18 @@ Namespace Streams
 
         End Function
 
-        Private Sub AddFreeIndexPageSpace(Offset As Long,
-                                          Length As Long)
-
-            If Offset < DataStartOffset Then Return
-            If Length <= 0 Then Return
-            If IsRangeSafeForMetadata(Offset, Length) = False Then Return
-
-            _FreeIndexPageSpaces.Add(Offset, Length)
-
+        Private Sub ClearFreeSpaceMap()
+            _FreeSpaces.Clear()
         End Sub
 
-        Private Sub AddFreeIndexDirectoryPageSpace(Offset As Long,
-                                                   Length As Long)
-
+        Private Sub AddFreeSpace(Offset As Long, Length As Long)
             If Offset < DataStartOffset Then Return
             If Length <= 0 Then Return
-            If IsRangeSafeForMetadata(Offset, Length) = False Then Return
-
-            _FreeIndexDirectoryPageSpaces.Add(Offset, Length)
-
+            _FreeSpaces.Add(Offset, Length)
         End Sub
 
         Private Function GetKnownHoleRecords() As List(Of HoleDirectoryRecord)
-
-            Dim Result As New List(Of HoleDirectoryRecord)()
-
-            Result.AddRange(_FreeChunkSpaces.Snapshot(HoleSpaceTypes.ChunkRecord))
-            Result.AddRange(_FreeIndexPageSpaces.Snapshot(HoleSpaceTypes.IndexPage))
-            Result.AddRange(_FreeIndexDirectoryPageSpaces.Snapshot(HoleSpaceTypes.DirectoryPage))
-
-            Return Result
-
+            Return _FreeSpaces.Snapshot()
         End Function
 
         Private Sub LoadKnownHoleRecords(Records As IEnumerable(Of HoleDirectoryRecord))
@@ -314,30 +287,120 @@ Namespace Streams
             If Records Is Nothing Then Return
 
             For Each Record In Records
+                If Record.SpaceType = HoleSpaceTypes.None Then Continue For
+                If IsRangeSafeForPhysicalRecord(Record.Offset, Record.Length) Then
+                    _FreeSpaces.Add(Record.Offset, Record.Length)
+                End If
+            Next
 
-                Select Case Record.SpaceType
+        End Sub
 
-                    Case HoleSpaceTypes.ChunkRecord
+        Private Function GetNextWriteOffset(Length As Integer,
+                                            Policy As ChunkedStreamOptions.NewWriteLocationPolicies,
+                                            IsMetadata As Boolean) As Long
 
-                        If IsRangeSafeForPhysicalRecord(Record.Offset, Record.Length) Then
-                            _FreeChunkSpaces.Add(Record.Offset, Record.Length)
+            If Length <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
+            If IsMetadata = False AndAlso Length < MinChunkRecordSize Then Throw New ArgumentOutOfRangeException(NameOf(Length))
+
+            Dim Offset As Long
+
+            If IsMetadata AndAlso TryGetCompactMetadataWriteOffset(Length, Offset) Then
+                If IsRangeSafeForMetadata(Offset, Length) = False Then
+                    Throw New InvalidOperationException($"Compact metadata allocation overlaps live physical data. Offset={Offset}, Length={Length}.")
+                End If
+                Return Offset
+            End If
+
+            If IsMetadata = False AndAlso HasOpenCheckpoint Then
+                Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
+            End If
+
+            Select Case Policy
+
+                Case ChunkedStreamOptions.NewWriteLocationPolicies.BestFit,
+                     ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan
+
+                    If TryAllocateSafeSpace(Length, IsMetadata, False, Offset) Then
+                        Return Offset
+                    End If
+
+                    If Policy = ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan Then
+                        BuildFreeSpaceMap()
+                        If TryAllocateSafeSpace(Length, IsMetadata, True, Offset) Then
+                            Return Offset
                         End If
+                    End If
 
-                    Case HoleSpaceTypes.IndexPage
+            End Select
 
-                        If IsRangeSafeForMetadata(Record.Offset, Record.Length) Then
-                            _FreeIndexPageSpaces.Add(Record.Offset, Record.Length)
-                        End If
+            Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
 
-                    Case HoleSpaceTypes.DirectoryPage
+        End Function
 
-                        If IsRangeSafeForMetadata(Record.Offset, Record.Length) Then
-                            _FreeIndexDirectoryPageSpaces.Add(Record.Offset, Record.Length)
-                        End If
+        Private Function TryAllocateSafeSpace(Length As Integer,
+                                              IsMetadata As Boolean,
+                                              FromStart As Boolean,
+                                              ByRef Offset As Long) As Boolean
 
-                End Select
+            Dim CandidateOffset As Long
+
+            While _FreeSpaces.TryAllocate(Length, FromStart, CandidateOffset)
+
+                Dim IsSafe = If(IsMetadata,
+                                IsRangeSafeForMetadata(CandidateOffset, Length),
+                                IsRangeSafeForPhysicalRecord(CandidateOffset, Length))
+
+                If IsSafe Then
+                    Offset = CandidateOffset
+                    Return True
+                End If
+
+            End While
+
+            Offset = -1
+            Return False
+
+        End Function
+
+        Private Sub BuildFreeSpaceMap()
+
+            _FreeSpaces.Clear()
+
+            Dim ReservedRanges As New List(Of Tuple(Of Long, Long))()
+
+            For Each Record In _PhysicalRecords.Values
+                If Record.RefCount <= 0 Then Continue For
+                ReservedRanges.Add(Tuple.Create(Record.PhysicalOffset,
+                                                Record.PhysicalOffset + CLng(Record.PhysicalLength)))
+            Next
+
+            ReservedRanges.AddRange(GetActiveMetadataRanges())
+            ReservedRanges = ReservedRanges.
+                             Where(Function(range) range.Item2 > DataStartOffset AndAlso range.Item2 > range.Item1).
+                             OrderBy(Function(range) range.Item1).
+                             ToList()
+
+            Dim ScanEnd = Math.Max(Math.Max(_Fs.Length, _IndexOffset), GetDataEndFromIndex())
+            Dim Cursor = CLng(DataStartOffset)
+
+            For Each Range In ReservedRanges
+
+                Dim RangeStart = Math.Max(CLng(DataStartOffset), Range.Item1)
+                Dim RangeEnd = Range.Item2
+
+                If RangeEnd <= Cursor Then Continue For
+
+                If RangeStart > Cursor Then
+                    AddFreeSpace(Cursor, RangeStart - Cursor)
+                End If
+
+                Cursor = Math.Max(Cursor, RangeEnd)
 
             Next
+
+            If ScanEnd > Cursor Then
+                AddFreeSpace(Cursor, ScanEnd - Cursor)
+            End If
 
         End Sub
 
@@ -484,7 +547,7 @@ Namespace Streams
             End Using
 
             Dim NewRecordOffset =
-                GetNextPhysicalRecordWriteOffset(StoredRecord.Length)
+                GetNextWriteOffset(StoredRecord.Length, Options.NewChunkWriteLocationPolicy, False)
 
             WriteAt(NewRecordOffset, StoredRecord, 0, StoredRecord.Length)
 
@@ -513,44 +576,6 @@ Namespace Streams
             MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
 
             Return Result
-
-        End Function
-
-        Private Function GetNextPhysicalRecordWriteOffset(RecordLength As Integer) As Long
-
-            If RecordLength < MinChunkRecordSize Then Throw New ArgumentOutOfRangeException(NameOf(RecordLength))
-
-            If HasOpenCheckpoint Then
-                Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
-            End If
-
-            Select Case Options.NewChunkWriteLocationPolicy
-
-                Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles
-
-                    Dim HoleOffset As Long
-
-                    If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
-                        Return HoleOffset
-                    End If
-
-                Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
-
-                    Dim HoleOffset As Long
-
-                    If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
-                        Return HoleOffset
-                    End If
-
-                    BuildFreeChunkSpaceMap()
-
-                    If _FreeChunkSpaces.TryAllocate(RecordLength, HoleOffset) Then
-                        Return HoleOffset
-                    End If
-
-            End Select
-
-            Return Math.Max(Math.Max(_Fs.Length, GetDataEndFromIndex()), _IndexOffset)
 
         End Function
 
@@ -603,60 +628,6 @@ Namespace Streams
             Return _PhysicalDataEnd
 
         End Function
-
-        Private Sub BuildFreeChunkSpaceMap()
-
-            _FreeChunkSpaces.Clear()
-
-            Dim ReservedRanges As New List(Of Tuple(Of Long, Long))()
-
-            For Each Record In _PhysicalRecords.Values
-
-                If Record.RefCount <= 0 Then Continue For
-
-                ReservedRanges.Add(
-                    Tuple.Create(
-                        Record.PhysicalOffset,
-                        Record.PhysicalOffset + CLng(Record.PhysicalLength)))
-
-            Next
-
-            ReservedRanges.AddRange(GetActiveMetadataRanges())
-
-            ReservedRanges =
-                ReservedRanges.
-                Where(Function(range) range.Item2 > DataStartOffset AndAlso range.Item2 > range.Item1).
-                OrderBy(Function(range) range.Item1).
-                ToList()
-
-            Dim ScanEnd = Math.Max(_IndexOffset, GetDataEndFromIndex())
-
-            For Each Range In ReservedRanges
-                ScanEnd = Math.Max(ScanEnd, Range.Item2)
-            Next
-
-            Dim Cursor = CLng(DataStartOffset)
-
-            For Each Range In ReservedRanges
-
-                Dim RangeStart = Math.Max(CLng(DataStartOffset), Range.Item1)
-                Dim RangeEnd = Range.Item2
-
-                If RangeEnd <= RangeStart Then Continue For
-
-                If RangeStart > Cursor Then
-                    AddFreeChunkSpace(Cursor, RangeStart - Cursor)
-                End If
-
-                Cursor = Math.Max(Cursor, RangeEnd)
-
-            Next
-
-            If ScanEnd > Cursor Then
-                AddFreeChunkSpace(Cursor, ScanEnd - Cursor)
-            End If
-
-        End Sub
 
     End Class
 End Namespace

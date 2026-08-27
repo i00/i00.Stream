@@ -535,7 +535,7 @@ Namespace Tests
                         .ChunkSize = 1024,
                         .IndexPageEntryCount = 8,
                         .IndexDirectoryEntryCount = 8,
-                        .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
+                        .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan
                     }
 
                     Dim Model As New List(Of Byte)()
@@ -659,7 +659,7 @@ Namespace Tests
                         .ChunkSize = 256,
                         .IndexPageEntryCount = 4,
                         .IndexDirectoryEntryCount = 4,
-                        .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles
+                        .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit
                     }
 
                     Dim Expected As New List(Of Byte)()
@@ -761,7 +761,7 @@ Namespace Tests
                         .IndexPageEntryCount = 4,
                         .IndexDirectoryEntryCount = 4,
                         .HoleDirectoryMode = ChunkedStream.ChunkedStreamOptions.HoleDirectoryModes.Always,
-                        .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles
+                        .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit
                     }
 
                     Dim Expected As New List(Of Byte)()

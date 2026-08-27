@@ -100,8 +100,8 @@ Public Class Form1
         {
             .CompressionRatioThreshold = 1,
             .CompressionMethod = Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
-            .NewIndexPageWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
-            .NewChunkWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
+            .NewIndexPageWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit,
+            .NewChunkWriteLocationPolicy = Streams.ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit,
             .EncryptionInfo = New Streams.ChunkedStream.EncryptionInfo("MySecretPassword")
         }
         '.EncryptionInfo = New Streams.ChunkedStream.EncryptionInfo("MySecretPassword"),

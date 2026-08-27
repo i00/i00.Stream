@@ -258,7 +258,7 @@ Namespace Streams
 
             RemoveLivePhysicalRecordOffset(Record)
 
-            AddFreeChunkSpace(Record.PhysicalOffset,
+            AddFreeSpace(Record.PhysicalOffset,
                               Record.PhysicalLength)
 
             _PhysicalRecords.Remove(RecordId)

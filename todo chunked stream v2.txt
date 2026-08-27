@@ -1,0 +1,8 @@
+- Read-time coalescing of contiguous extents
+- make extent scan / refcount option work (currently always uses refcount)
+- PersistPagedMetadata unconditionally rewrites the metadata root on every single persist call, regardless of whether anything in the root actually changed
+- Async
+- Shrink file header?
+- Directory type tag (DirectoryTypes) only has 4 types???
+- Chunk cache is one chunk only... Options.ReadCacheChunkCount = 1
+- Have a deep option for Validate() that decompresses/decrypts data - currently does this all of the time

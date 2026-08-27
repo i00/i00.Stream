@@ -97,7 +97,7 @@ Namespace Streams
             End If
 
             InvalidateChunkCache()
-            ClearFreeSpaceMaps()
+            ClearFreeSpaceMap()
 
             Dim OriginalLength = _Fs.Length
             Dim CancellationToken As New CancellationToken()
@@ -118,7 +118,7 @@ Namespace Streams
                     Throw New ArgumentOutOfRangeException(NameOf(Type))
             End Select
 
-            ClearFreeSpaceMaps()
+            ClearFreeSpaceMap()
 
             If CancellationToken.Cancel Then
                 Return -1
@@ -283,10 +283,10 @@ Namespace Streams
             '
             PersistDefragMoveMetadata()
 
-            AddFreeChunkSpaceExcludingRange(OldOffset,
-                                            OldLength,
-                                            NewOffset,
-                                            OldLength)
+            AddFreeSpaceExcludingRange(OldOffset,
+                                       OldLength,
+                                       NewOffset,
+                                       OldLength)
 
             ClearJournal()
 
@@ -337,10 +337,10 @@ Namespace Streams
 
         End Sub
 
-        Private Sub AddFreeChunkSpaceExcludingRange(SourceOffset As Long,
-                                                    SourceLength As Long,
-                                                    ExcludeOffset As Long,
-                                                    ExcludeLength As Long)
+        Private Sub AddFreeSpaceExcludingRange(SourceOffset As Long,
+                                               SourceLength As Long,
+                                               ExcludeOffset As Long,
+                                               ExcludeLength As Long)
 
             If SourceLength <= 0 Then Return
 
@@ -348,16 +348,16 @@ Namespace Streams
             Dim ExcludeEnd = ExcludeOffset + ExcludeLength
 
             If RangesOverlap(SourceOffset, SourceLength, ExcludeOffset, ExcludeLength) = False Then
-                AddFreeChunkSpace(SourceOffset, SourceLength)
+                AddFreeSpace(SourceOffset, SourceLength)
                 Return
             End If
 
             If ExcludeOffset > SourceOffset Then
-                AddFreeChunkSpace(SourceOffset, ExcludeOffset - SourceOffset)
+                AddFreeSpace(SourceOffset, ExcludeOffset - SourceOffset)
             End If
 
             If ExcludeEnd < SourceEnd Then
-                AddFreeChunkSpace(ExcludeEnd, SourceEnd - ExcludeEnd)
+                AddFreeSpace(ExcludeEnd, SourceEnd - ExcludeEnd)
             End If
 
         End Sub
@@ -583,11 +583,11 @@ Namespace Streams
             End If
 
             InvalidateChunkCache()
-            ClearFreeSpaceMaps()
+            ClearFreeSpaceMap()
 
             _IndexOffset = CompactDataEnd
 
-            BuildFreeChunkSpaceMap()
+            BuildFreeSpaceMap()
 
             _ExtentPageDescriptors.Clear()
             _ExtentDirectoryPageDescriptors.Clear()
@@ -792,10 +792,10 @@ Namespace Streams
             ' Individual record moves after this point publish only the changed
             ' physical-record metadata page and suppress hole-directory persistence.
             '
-            ClearFreeSpaceMaps()
+            ClearFreeSpaceMap()
             MarkAllMetadataPagesDirty()
             PersistDefragMoveMetadata()
-            ClearFreeSpaceMaps()
+            ClearFreeSpaceMap()
 
         End Sub
 
@@ -850,7 +850,7 @@ Namespace Streams
             RebuildPhysicalRecordOrdinals()
             RebuildAnchorIndex()
 
-            ClearFreeSpaceMaps()
+            ClearFreeSpaceMap()
             DiscardPendingPhysicalRecordReclaims()
             InvalidateChunkCache()
 
@@ -923,7 +923,7 @@ Namespace Streams
 
             Try
 
-                ClearFreeSpaceMaps()
+                ClearFreeSpaceMap()
 
                 Dim TargetChunkSize = Options.ChunkSize
                 Dim NewExtents As New List(Of ExtentIndexEntry)()
@@ -1059,7 +1059,7 @@ Namespace Streams
                 _HoleDirectoryPageDescriptors.Clear()
 
                 InvalidateChunkCache()
-                ClearFreeSpaceMaps()
+                ClearFreeSpaceMap()
                 DiscardPendingPhysicalRecordReclaims()
 
                 MarkAllMetadataPagesDirty()

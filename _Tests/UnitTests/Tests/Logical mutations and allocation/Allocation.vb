@@ -93,65 +93,84 @@ Namespace Tests
                     Using Ms As New MemoryStream()
 
                         Dim Options As New ChunkedStream.ChunkedStreamOptions With {
-                            .NewChunkWriteLocationPolicy = Policy
+                            .NewChunkWriteLocationPolicy = Policy,
+                            .HoleDirectoryMode = If(Policy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan,
+                                                    ChunkedStream.ChunkedStreamOptions.HoleDirectoryModes.Never,
+                                                    ChunkedStream.ChunkedStreamOptions.HoleDirectoryModes.Always)
                         }
 
                         Using Cs = ChunkedStream.Open(Ms, Options)
 
-                            For ChunkIndex = 0 To 3
+                            'First write ... lets say 10 chunks
+                            Cs.Write(0, GeneratePatternData(Cs.Options.ChunkSize * 10, 1234))
+                            'Chunks: 0123456789
 
-                                Cs.Write(
-                                    CLng(ChunkIndex) * CLng(Cs.Options.ChunkSize),
-                                    GeneratePatternData(
-                                        Cs.Options.ChunkSize,
-                                        3000 + ChunkIndex))
+                            Dim Struct = Cs.GetStructure()
+                            'check we have expected chunks
+                            AssertEqual(10, Struct.ChunkCount, "Written data did not create expected number of chunks")
 
-                            Next
+                            'now lets clear the first 5 to create a big hole
+                            Cs.Remove(0, Cs.Options.ChunkSize * 5)
+                            'Chunks: 56789
 
-                            Dim OriginalChunk1Offset =
-                                Cs.
-                                GetStructure().
-                                Chunks.
-                                Single(Function(chunk) chunk.Index = 1).
-                                PhysicalOffset.
-                                Value
+                            'check we have expected chunks
+                            AssertEqual(5, Cs.GetStructure().ChunkCount, "Cleared data did not result in expected number of chunks")
 
-                            Cs.Write(
-                                Cs.Options.ChunkSize,
-                                GeneratePatternData(
-                                    Cs.Options.ChunkSize,
-                                    4001))
+                        End Using
 
-                            Cs.Write(
-                                Cs.Options.ChunkSize * 4L,
-                                GeneratePatternData(
-                                    Cs.Options.ChunkSize,
-                                    4004))
+                        ' This is closed and then opened again to ensure that FillHolesFromStart fills holes in the newly cleared
+                        ' area that is from the next Remove() call rather than writing into the initial free space
 
-                            Dim Struct =
-                                Cs.GetStructure()
+                        Using Cs = ChunkedStream.Open(Ms, Options)
 
-                            Dim Chunk4 =
-                                Struct.
-                                Chunks.
-                                Single(Function(chunk) chunk.Index = 4)
+                            Cs.Remove(Cs.Options.ChunkSize * 4, Cs.Options.ChunkSize)
+                            ' Chunks: 5678
+
+                            Dim Struct = Cs.GetStructure()
+                            AssertEqual(4, Struct.ChunkCount, "Cleared data did not result in expected number of chunks")
+
+                            ' Lets add a chunk to ... somewhere ;)
+                            Cs.Write(Cs.Length, GeneratePatternData(Cs.Options.ChunkSize \ 2, 1234))
+                            ' Chunks: 5678x
+
+                            ' Check we have expected chunks
+                            Dim After = Cs.GetStructure()
+                            AssertEqual(5, After.ChunkCount, "Newly written data did not result in expected number of chunks")
+
+                            Dim NewChunks = After.Chunks.Where(Function(x) Struct.Chunks.All(Function(y) x.PhysicalOffset.Value <> y.PhysicalOffset.Value)).
+                                                         ToArray()
+
+                            AssertEqual(1, NewChunks.Count, "The number of newly created chunks was not correct")
+
+                            Dim OldEnd = Struct.Regions.Max(Function(x) x.PhysicalOffset + x.PhysicalLength)
 
                             Select Case Policy
-
                                 Case ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.Append
 
-                                    AssertTrue(
-                                        Chunk4.PhysicalOffset.Value <> OriginalChunk1Offset,
-                                        $"Append policy should not reuse the freed chunk-1 hole. Policy={Policy}")
+
+                                    AssertTrue(NewChunks.Single.PhysicalOffset.Value >= OldEnd, $"{NameOf(Policy)} policy should be >= {OldEnd}")
+
+                                Case ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit
+
+                                    AssertTrue(NewChunks.Single.PhysicalOffset.Value < OldEnd, $"{NameOf(Policy)} policy should be < {OldEnd}")
+
+                                Case ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan
+
+                                    Cs.Write(Cs.Length, GeneratePatternData(Cs.Options.ChunkSize \ 2, 1234))
+
+                                    Dim PlaceBefore = Struct.Chunks.First.PhysicalOffset.Value
+
+                                    Dim After2 = Cs.GetStructure()
+                                    NewChunks = After2.Chunks.Where(Function(x) After.Chunks.All(Function(y) x.PhysicalOffset.Value <> y.PhysicalOffset.Value)).
+                                                              ToArray()
+                                    AssertEqual(1, NewChunks.Count, "The number of newly created chunks was not correct")
+
+                                    AssertTrue(NewChunks.Single.PhysicalOffset.Value < PlaceBefore, $"{NameOf(Policy)} policy should be < {PlaceBefore}")
 
                                 Case Else
-
-                                    AssertEqual(
-                                        OriginalChunk1Offset,
-                                        Chunk4.PhysicalOffset.Value,
-                                        $"Hole-filling policy should reuse the freed chunk-1 hole. Policy={Policy}")
-
+                                    Throw New NotSupportedException($"No test found for {Policy}")
                             End Select
+
 
                             Cs.Validate()
 
@@ -176,7 +195,7 @@ Namespace Tests
 
                 Dim FillHolesResult =
                     CreateHoleReuseResult(
-                        ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles)
+                        ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit)
 
                 AssertTrue(
                     FillHolesResult.LiveDataEndOffset < AppendResult.LiveDataEndOffset,

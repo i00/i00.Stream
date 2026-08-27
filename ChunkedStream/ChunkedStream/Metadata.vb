@@ -72,97 +72,6 @@ Namespace Streams
 
         End Function
 
-        Private Function GetNextIndexPageWriteOffset(Length As Integer) As Long
-
-            If Length <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
-
-            Dim Offset As Long
-
-            If TryGetCompactMetadataWriteOffset(Length, Offset) Then
-
-                If IsRangeSafeForMetadata(Offset, Length) = False Then
-                    Throw New InvalidOperationException(
-                        $"Compact index page allocation overlaps live physical data. Offset={Offset}, Length={Length}.")
-                End If
-
-                Return Offset
-
-            End If
-
-            Select Case Options.NewIndexPageWriteLocationPolicy
-
-                Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
-                     ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
-
-                    If TryAllocateSafeMetadataSpace(_FreeIndexPageSpaces, Length, Offset) Then
-                        Return Offset
-                    End If
-
-            End Select
-
-            Return Math.Max(_Fs.Length, GetDataEndFromIndex())
-
-        End Function
-
-        Private Function TryAllocateSafeMetadataSpace(Allocator As FreeSpaceAllocator,
-                                                      Length As Integer,
-                                                      ByRef Offset As Long) As Boolean
-
-            If Allocator Is Nothing Then Throw New ArgumentNullException(NameOf(Allocator))
-            If Length <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
-
-            Dim CandidateOffset As Long
-
-            While Allocator.TryAllocate(Length, CandidateOffset)
-
-                If IsRangeSafeForMetadata(CandidateOffset, Length) Then
-                    Offset = CandidateOffset
-                    Return True
-                End If
-
-                '
-                ' Stale hole. Discard it and keep looking.
-                '
-
-            End While
-
-            Offset = -1
-            Return False
-
-        End Function
-
-        Private Function GetNextIndexDirectoryPageWriteOffset(Length As Integer) As Long
-
-            If Length <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
-
-            Dim Offset As Long
-
-            If TryGetCompactMetadataWriteOffset(Length, Offset) Then
-
-                If IsRangeSafeForMetadata(Offset, Length) = False Then
-                    Throw New InvalidOperationException(
-                        $"Compact directory page allocation overlaps live physical data. Offset={Offset}, Length={Length}.")
-                End If
-
-                Return Offset
-
-            End If
-
-            Select Case Options.NewIndexDirectoryPageWriteLocationPolicy
-
-                Case ChunkedStreamOptions.NewWriteLocationPolicies.FillHoles,
-                     ChunkedStreamOptions.NewWriteLocationPolicies.FillHolesFromStart
-
-                    If TryAllocateSafeMetadataSpace(_FreeIndexDirectoryPageSpaces, Length, Offset) Then
-                        Return Offset
-                    End If
-
-            End Select
-
-            Return Math.Max(_Fs.Length, GetDataEndFromIndex())
-
-        End Function
-
         Private Function ShouldPersistHoleDirectory(Durable As Boolean) As Boolean
 
             Select Case Options.HoleDirectoryMode
@@ -256,7 +165,7 @@ Namespace Streams
             If EntryCount = 0 Then
                 If HadOldDescriptor Then
                     If OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                        AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                        AddFreeSpace(OldDescriptor.Offset, OldDescriptor.Length)
                     End If
 
                     _ExtentPageDescriptors.Remove(PageNumber)
@@ -266,7 +175,7 @@ Namespace Streams
             End If
 
             Dim Page = BuildExtentPage(PageNumber)
-            Dim Offset = GetNextIndexPageWriteOffset(Page.Length)
+            Dim Offset = GetNextWriteOffset(Page.Length, Options.NewIndexPageWriteLocationPolicy, True)
 
             WriteAt(Offset, Page, 0, Page.Length)
 
@@ -278,7 +187,7 @@ Namespace Streams
             }
 
             If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                AddFreeIndexPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                AddFreeSpace(OldDescriptor.Offset, OldDescriptor.Length)
             End If
 
             _ExtentPageDescriptors(PageNumber) = Descriptor
@@ -373,7 +282,7 @@ Namespace Streams
                     If OldDescriptor.Offset > 0 AndAlso
                         OldDescriptor.Length > 0 Then
 
-                        AddFreeIndexPageSpace(OldDescriptor.Offset,
+                        AddFreeSpace(OldDescriptor.Offset,
                                                 OldDescriptor.Length)
 
                     End If
@@ -387,7 +296,7 @@ Namespace Streams
             End If
 
             Dim Page = BuildPhysicalRecordPage(PageNumber)
-            Dim Offset = GetNextIndexPageWriteOffset(Page.Length)
+            Dim Offset = GetNextWriteOffset(Page.Length, Options.NewIndexPageWriteLocationPolicy, True)
 
             WriteAt(Offset, Page, 0, Page.Length)
 
@@ -405,7 +314,7 @@ Namespace Streams
                 OldDescriptor.Offset > 0 AndAlso
                 OldDescriptor.Length > 0 Then
 
-                AddFreeIndexPageSpace(OldDescriptor.Offset,
+                AddFreeSpace(OldDescriptor.Offset,
                                         OldDescriptor.Length)
 
             End If
@@ -472,7 +381,7 @@ Namespace Streams
 
             For PageNumber = 0 To DirectoryPageCount - 1
                 Dim Page = BuildDirectoryPage(DirectoryType, PageNumber, DescriptorList)
-                Dim Offset = GetNextIndexDirectoryPageWriteOffset(Page.Length)
+                Dim Offset = GetNextWriteOffset(Page.Length, Options.NewIndexDirectoryPageWriteLocationPolicy, True)
                 Dim OldDescriptor As MetadataPageDescriptor = Nothing
                 Dim HadOldDescriptor = ExistingDirectoryDescriptors.TryGetValue(PageNumber, OldDescriptor)
 
@@ -486,7 +395,7 @@ Namespace Streams
                 }
 
                 If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                    AddFreeIndexDirectoryPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                    AddFreeSpace(OldDescriptor.Offset, OldDescriptor.Length)
                 End If
 
                 Result(PageNumber) = NewDescriptor
@@ -548,7 +457,7 @@ Namespace Streams
 
             For PageNumber = 0 To DirectoryPageCount - 1
                 Dim Page = BuildHoleDirectoryPage(PageNumber, Records)
-                Dim Offset = GetNextIndexDirectoryPageWriteOffset(Page.Length)
+                Dim Offset = GetNextWriteOffset(Page.Length, Options.NewIndexDirectoryPageWriteLocationPolicy, True)
                 Dim OldDescriptor As MetadataPageDescriptor = Nothing
                 Dim HadOldDescriptor = _HoleDirectoryPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
 
@@ -562,7 +471,7 @@ Namespace Streams
                 }
 
                 If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
-                    AddFreeIndexDirectoryPageSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                    AddFreeSpace(OldDescriptor.Offset, OldDescriptor.Length)
                 End If
 
                 Result(PageNumber) = NewDescriptor
@@ -746,7 +655,7 @@ Namespace Streams
 
                 Dim Descriptor = _ExtentPageDescriptors(PageNumber)
 
-                AddFreeIndexPageSpace(Descriptor.Offset,
+                AddFreeSpace(Descriptor.Offset,
                                         Descriptor.Length)
 
                 _ExtentPageDescriptors.Remove(PageNumber)
@@ -769,7 +678,7 @@ Namespace Streams
                 Dim Descriptor =
                     _PhysicalRecordPageDescriptors(PageNumber)
 
-                AddFreeIndexPageSpace(Descriptor.Offset,
+                AddFreeSpace(Descriptor.Offset,
                                         Descriptor.Length)
 
                 _PhysicalRecordPageDescriptors.Remove(PageNumber)
@@ -829,7 +738,7 @@ Namespace Streams
                 For Each Descriptor In _ExtentDirectoryPageDescriptors.Values.ToArray()
 
                     If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                        AddFreeIndexDirectoryPageSpace(Descriptor.Offset,
+                        AddFreeSpace(Descriptor.Offset,
                                                         Descriptor.Length)
                     End If
 
@@ -873,7 +782,7 @@ Namespace Streams
                 For Each Descriptor In _PhysicalRecordDirectoryPageDescriptors.Values.ToArray()
 
                     If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                        AddFreeIndexDirectoryPageSpace(Descriptor.Offset,
+                        AddFreeSpace(Descriptor.Offset,
                                                         Descriptor.Length)
                     End If
 
@@ -896,7 +805,7 @@ Namespace Streams
                 If NewHoleDirectoryDescriptors.ContainsKey(Descriptor.PageNumber) = False Then
 
                     If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                        AddFreeIndexDirectoryPageSpace(Descriptor.Offset,
+                        AddFreeSpace(Descriptor.Offset,
                                                         Descriptor.Length)
                     End If
 
@@ -944,7 +853,7 @@ Namespace Streams
             WriteAt(_MetadataRootOffset, Root, 0, Root.Length)
 
             If OldRootOffset > 0 AndAlso OldRootLength > 0 Then
-                AddFreeIndexDirectoryPageSpace(OldRootOffset,
+                AddFreeSpace(OldRootOffset,
                                                 OldRootLength)
             End If
 

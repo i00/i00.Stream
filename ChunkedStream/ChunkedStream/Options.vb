@@ -115,7 +115,7 @@ Namespace Streams
                 ''' This does not scan the existing physical stream layout to discover
                 ''' unknown holes.
                 ''' </summary>
-                FillHoles = 1
+                BestFit = 1
 
                 ''' <summary>
                 ''' Reuses known free spaces and, when no suitable known space exists,
@@ -124,7 +124,7 @@ Namespace Streams
                 ''' This can reclaim holes that were not already known, but may add
                 ''' extra write-time overhead when the scan is required.
                 ''' </summary>
-                FillHolesFromStart = 2
+                FirstFitScan = 2
             End Enum
 
             ''' <summary>
@@ -138,17 +138,17 @@ Namespace Streams
             ''' When a checkpoint is active, ChunkedStream always uses append behaviour to preserve
             ''' checkpoint rollback and crash-recovery semantics.
             ''' </remarks>
-            Public Property NewChunkWriteLocationPolicy As NewWriteLocationPolicies = NewWriteLocationPolicies.FillHoles
+            Public Property NewChunkWriteLocationPolicy As NewWriteLocationPolicies = NewWriteLocationPolicies.BestFit
 
             ''' <summary>
             ''' Gets or sets the placement policy used for newly written index pages.
             ''' </summary>
-            Public Property NewIndexPageWriteLocationPolicy As NewWriteLocationPolicies = NewWriteLocationPolicies.FillHoles
+            Public Property NewIndexPageWriteLocationPolicy As NewWriteLocationPolicies = NewWriteLocationPolicies.BestFit
 
             ''' <summary>
             ''' Gets or sets the placement policy used for newly written index-directory pages.
             ''' </summary>
-            Public Property NewIndexDirectoryPageWriteLocationPolicy As NewWriteLocationPolicies = NewWriteLocationPolicies.FillHoles
+            Public Property NewIndexDirectoryPageWriteLocationPolicy As NewWriteLocationPolicies = NewWriteLocationPolicies.BestFit
 
             ''' <summary>
             ''' Number of extent or physical-record entries stored in each authenticated metadata page.
@@ -932,7 +932,7 @@ Namespace Streams
             RebuildPhysicalRecordOrdinals()
             RebuildAnchorIndex()
 
-            ClearFreeSpaceMaps()
+            ClearFreeSpaceMap()
             DiscardPendingPhysicalRecordReclaims()
             InvalidateChunkCache()
 
@@ -1088,7 +1088,7 @@ Namespace Streams
                 If NewRecordIds IsNot Nothing AndAlso NewRecordIds.Contains(record.RecordId) Then Continue For
 
                 If HasOpenCheckpoint = False Then
-                    AddFreeChunkSpace(record.PhysicalOffset, record.PhysicalLength)
+                    AddFreeSpace(record.PhysicalOffset, record.PhysicalLength)
                 End If
 
             Next

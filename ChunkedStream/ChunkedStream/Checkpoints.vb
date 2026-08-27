@@ -382,7 +382,7 @@ Namespace Streams
             If State Is Nothing Then Throw New ArgumentNullException(NameOf(State))
 
             InvalidateChunkCache()
-            ClearFreeSpaceMaps()
+            ClearFreeSpaceMap()
             DiscardPendingPhysicalRecordReclaims()
 
             _Length = State.LogicalLength
