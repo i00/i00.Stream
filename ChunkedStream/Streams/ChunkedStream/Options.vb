@@ -46,20 +46,28 @@ Namespace Streams
             Public Enum ExtentReclaimTypes
 
                 ''' <summary>
-                ''' Track physical-record reference counts as extents are added and removed.
+                ''' Reclaim a physical record as soon as the reference count maintained while
+                ''' extents are added and removed reaches zero.
                 ''' </summary>
                 RefCount = 0
 
                 ''' <summary>
-                ''' Determine whether a physical record is unreferenced by scanning the extent table.
+                ''' Determine whether a physical record is unreferenced by scanning the extent
+                ''' table after each edit, rather than trusting the maintained reference count.
+                ''' This is more resilient to reference-count drift but adds a scan of the
+                ''' extent table and physical-record set to every edit that removes extents.
                 ''' </summary>
                 Scan = 1
 
             End Enum
 
             ''' <summary>
-            ''' Controls how unreferenced physical records are identified for reuse.
+            ''' Controls how unreferenced physical records are identified for reclamation.
             ''' </summary>
+            ''' <remarks>
+            ''' Physical-record reference counts are maintained regardless of this setting, so
+            ''' it may be changed at any time and takes effect from the next edit.
+            ''' </remarks>
             Public Property ExtentReclaimType As ExtentReclaimTypes = ExtentReclaimTypes.RefCount
 
             Private _BisectLimit As Integer = 0

@@ -1,5 +1,4 @@
 - Read-time coalescing of contiguous extents
-- make extent scan / refcount option work (currently always uses refcount)
 - Async
 - Shrink file header?
 - Directory type tag (DirectoryTypes) only has 4 types???

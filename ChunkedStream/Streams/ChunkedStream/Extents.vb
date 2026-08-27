@@ -229,6 +229,13 @@ Namespace Streams
                 Return
             End If
 
+            '
+            ' In Scan mode the decision to reclaim is not taken from this counter.
+            ' ReclaimUnreferencedPhysicalRecordsByScan runs once the surrounding edit
+            ' has rebuilt the extent layout and reclaims every record no extent points at.
+            '
+            If Options.ExtentReclaimType = ChunkedStreamOptions.ExtentReclaimTypes.Scan Then Return
+
             ReclaimPhysicalRecord(RecordId)
 
         End Sub
@@ -479,6 +486,54 @@ Namespace Streams
         Private Sub DiscardPendingPhysicalRecordReclaims()
 
             _PendingReclaimedPhysicalRecords.Clear()
+
+        End Sub
+
+        '
+        ' Scan-based reclamation used when Options.ExtentReclaimType is Scan.
+        '
+        ' Rather than relying on the maintained physical-record reference counts to know
+        ' when a record has become unreferenced, this rebuilds the set of referenced
+        ' record ids directly from the current extent table and reclaims every physical
+        ' record that no surviving extent points at. It is invoked after an edit has
+        ' finished rebuilding the extent layout.
+        '
+        Private Sub ReclaimUnreferencedPhysicalRecordsByScan()
+
+            If Options.ExtentReclaimType <> ChunkedStreamOptions.ExtentReclaimTypes.Scan Then Return
+            If HasOpenCheckpoint Then Return
+            If _PhysicalRecords.Count = 0 Then Return
+
+            Dim ReferencedRecordIds As New HashSet(Of Long)()
+
+            For Each extent In _Extents
+                If extent.PhysicalRecordId <> SparsePhysicalRecordId Then
+                    ReferencedRecordIds.Add(extent.PhysicalRecordId)
+                End If
+            Next
+
+            Dim UnreferencedRecordIds =
+                _PhysicalRecords.Keys.
+                                 Where(Function(recordId) ReferencedRecordIds.Contains(recordId) = False).
+                                 ToList()
+
+            For Each recordId In UnreferencedRecordIds
+
+                Dim Record = _PhysicalRecords(recordId)
+
+                '
+                ' The counter is normally already zero here. Force it to agree with the
+                ' scan before the record is dropped so ReclaimPhysicalRecord's
+                ' still-referenced guard does not trip on a drifted count.
+                '
+                If Record.RefCount <> 0 Then
+                    Record.RefCount = 0
+                    _PhysicalRecords(recordId) = Record
+                End If
+
+                ReclaimPhysicalRecord(recordId)
+
+            Next
 
         End Sub
 
@@ -872,6 +927,8 @@ Namespace Streams
                                                RemovedExtentCount,
                                                InsertedExtentCount)
 
+            ReclaimUnreferencedPhysicalRecordsByScan()
+
         End Sub
 
         Private Sub ReplaceRangeCore(LogicalOffset As Long,
@@ -969,6 +1026,8 @@ Namespace Streams
             MarkExtentPagesDirtyForReplacement(StartIndex,
                                                RemovedExtentCount,
                                                Materialised.Count)
+
+            ReclaimUnreferencedPhysicalRecordsByScan()
 
         End Sub
 

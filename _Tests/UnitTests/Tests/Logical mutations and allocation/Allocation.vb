@@ -606,9 +606,169 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Verifies that Scan reclamation frees exactly the same physical storage as
+            ''' RefCount reclamation for an identical write, overwrite, remove and shrink
+            ''' workload.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ScanExtentReclaimMatchesRefCountReclaim()
+
+                Dim RefCountResult = RunReclaimWorkload(ChunkedStream.ChunkedStreamOptions.ExtentReclaimTypes.RefCount)
+                Dim ScanResult = RunReclaimWorkload(ChunkedStream.ChunkedStreamOptions.ExtentReclaimTypes.Scan)
+
+                AssertBytesEqual(RefCountResult.Data, ScanResult.Data, "Scan reclamation changed the logical data.")
+                AssertEqual(RefCountResult.ChunkCount, ScanResult.ChunkCount, "Scan reclamation produced a different chunk count.")
+                AssertEqual(RefCountResult.AllocatedChunkCount, ScanResult.AllocatedChunkCount, "Scan reclamation produced a different allocated-chunk count.")
+                AssertEqual(RefCountResult.LivePhysicalRecordCount, ScanResult.LivePhysicalRecordCount, "Scan reclamation left a different number of live physical records.")
+                AssertEqual(RefCountResult.PhysicalChunkRecordBytes, ScanResult.PhysicalChunkRecordBytes, "Scan reclamation left a different live chunk-record byte count.")
+                AssertEqual(RefCountResult.LiveDataEndOffset, ScanResult.LiveDataEndOffset, "Scan reclamation left a different live-data end offset.")
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that Scan reclamation identifies an unreferenced physical record from
+            ''' the extent table even when its maintained reference count has drifted, a case
+            ''' RefCount reclamation cannot recover from.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ScanExtentReclaimToleratesReferenceCountDrift()
+
+                For Each ReclaimType In {ChunkedStream.ChunkedStreamOptions.ExtentReclaimTypes.RefCount,
+                                         ChunkedStream.ChunkedStreamOptions.ExtentReclaimTypes.Scan}
+
+                    Using Ms As New MemoryStream()
+
+                        Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                            .ChunkSize = 1024,
+                            .ExtentReclaimType = ReclaimType
+                        }
+
+                        Dim Expected = GenerateRandomData(Options.ChunkSize * 4, 13000)
+
+                        Using Cs = ChunkedStream.Open(Ms, Options)
+
+                            Cs.Write(0, Expected)
+
+                            Dim TargetRecordId =
+                                Cs.GetStructure().
+                                   Chunks.
+                                   Single(Function(chunk) chunk.Index = 1).
+                                   PhysicalRecordId.
+                                   Value
+
+                            Dim RecordBytesBeforeDrift = Cs.GetStructure().PhysicalChunkRecordBytes
+
+                            ' Simulate reference-count drift on the record backing chunk 1.
+                            Cs.Debug_CorruptPhysicalRecordMetadataRefCount(TargetRecordId, 5000)
+
+                            Dim Replacement = GenerateRandomData(Options.ChunkSize, 13099)
+                            Overlay(Expected, Replacement, Options.ChunkSize)
+
+                            ' Overwrite chunk 1 so no extent references the drifted record any more.
+                            Cs.Write(Options.ChunkSize, Replacement)
+
+                            Select Case ReclaimType
+
+                                Case ChunkedStream.ChunkedStreamOptions.ExtentReclaimTypes.Scan
+
+                                    ' The scan reclaims the record despite the drifted count, so the
+                                    ' stream stays consistent and no storage is leaked.
+                                    Cs.Validate()
+                                    AssertBytesEqual(Expected, Cs.ToArray(), "Scan reclamation corrupted logical data.")
+                                    AssertEqual(RecordBytesBeforeDrift,
+                                                Cs.GetStructure().PhysicalChunkRecordBytes,
+                                                "Scan reclamation leaked the drifted record's storage.")
+
+                                Case Else
+
+                                    ' RefCount reclamation trusts the drifted count and cannot tell
+                                    ' the record is now unreferenced.
+                                    AssertThrows(Of IO.InvalidDataException)(
+                                        Sub() Cs.Validate(),
+                                        "RefCount reclamation should leave the drifted reference count inconsistent.")
+
+                            End Select
+
+                        End Using
+
+                    End Using
+
+                Next
+
+            End Sub
+
             ' ================================================================================
             ' Helpers
             ' ================================================================================
+
+            Private NotInheritable Class ReclaimWorkloadResult
+
+                Public Property Data As Byte()
+
+                Public Property ChunkCount As Integer
+
+                Public Property AllocatedChunkCount As Integer
+
+                Public Property LivePhysicalRecordCount As Integer
+
+                Public Property PhysicalChunkRecordBytes As Long
+
+                Public Property LiveDataEndOffset As Long
+
+            End Class
+
+            Private Shared Function RunReclaimWorkload(ReclaimType As ChunkedStream.ChunkedStreamOptions.ExtentReclaimTypes) As ReclaimWorkloadResult
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 1024,
+                        .ExtentReclaimType = ReclaimType
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        For ChunkIndex = 0 To 15
+                            Cs.Write(CLng(ChunkIndex) * Options.ChunkSize,
+                                     GenerateRandomData(Options.ChunkSize, 14000 + ChunkIndex))
+                        Next
+
+                        ' Overwrite a run of chunks, freeing their original records.
+                        Cs.Write(Options.ChunkSize * 4L, GenerateRandomData(Options.ChunkSize * 4, 14100))
+
+                        ' Remove a middle range.
+                        Cs.Remove(Options.ChunkSize * 9L, Options.ChunkSize * 3L)
+
+                        ' Clone a shared range then drop it again.
+                        Cs.Clone(Options.ChunkSize, Options.ChunkSize * 2L, Cs.Length)
+                        Cs.Remove(Cs.Length - Options.ChunkSize * 2L, Options.ChunkSize * 2L)
+
+                        ' Shrink away the tail.
+                        Cs.SetLength(Options.ChunkSize * 6L)
+
+                        Cs.Validate()
+
+                        Dim Struct = Cs.GetStructure()
+
+                        Return New ReclaimWorkloadResult With {
+                            .Data = Cs.ToArray(),
+                            .ChunkCount = Struct.ChunkCount,
+                            .AllocatedChunkCount = Struct.AllocatedChunkCount,
+                            .LivePhysicalRecordCount = Struct.Chunks.
+                                                             Where(Function(chunk) chunk.PhysicalRecordId.HasValue).
+                                                             Select(Function(chunk) chunk.PhysicalRecordId.Value).
+                                                             Distinct().
+                                                             Count(),
+                            .PhysicalChunkRecordBytes = Struct.PhysicalChunkRecordBytes,
+                            .LiveDataEndOffset = Struct.LiveDataEndOffset
+                        }
+
+                    End Using
+
+                End Using
+
+            End Function
 
             Private NotInheritable Class HoleReuseResult
 
