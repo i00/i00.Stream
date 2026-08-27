@@ -645,6 +645,8 @@ Namespace Streams
         ''' </summary>
         Public ReadOnly BaseStream As Stream
 
+        Private _FlushDurableAction As Action
+
         ''' <summary>
         ''' Identifies which categories of physical I/O operation acquire the shared
         ''' physical-I/O lock.
@@ -1126,10 +1128,24 @@ Namespace Streams
         ''' fails or cannot run. Inspect <see cref="AutoRecoveryState" /> and
         ''' <see cref="AutoRecoveryException" /> after opening.
         ''' </param>
+        ''' <param name="FlushDurableAction">
+        ''' Optional durable-flush implementation for the backing stream. It is invoked
+        ''' whenever ChunkedStream needs the backing stream's pending writes to reach stable
+        ''' storage (recovery-journal barriers, checkpoint state, durable metadata publishes).
+        ''' The implementation must not return until the write barrier is complete. When
+        ''' Nothing, a FileStream backing store is flushed with Flush(True) and any other
+        ''' stream falls back to Stream.Flush().
+        ''' </param>
+        ''' <typeparam name="T">
+        ''' Concrete backing-stream type, so <paramref name="FlushDurableAction" /> receives
+        ''' it without a cast.
+        ''' </typeparam>
         ''' <returns>An opened ChunkedStream.</returns>
-        Public Shared Function Open(BaseStream As Stream,
+        Public Shared Function Open(Of T As Stream)(
+                                    BaseStream As T,
                                     Optional Options As ChunkedStreamOptions = Nothing,
-                                    Optional AllowOpeningWhenRecoveryFails As Boolean = False) As ChunkedStream
+                                    Optional AllowOpeningWhenRecoveryFails As Boolean = False,
+                                    Optional FlushDurableAction As Action(Of T) = Nothing) As ChunkedStream
 
             If BaseStream Is Nothing Then Throw New ArgumentNullException(NameOf(BaseStream))
 
@@ -1137,11 +1153,16 @@ Namespace Streams
                 Throw New NotSupportedException($"Provided {NameOf(BaseStream)} must support {NameOf(BaseStream.CanRead)} and {NameOf(BaseStream.CanSeek)}.")
             End If
 
+            Dim AdaptedFlushDurableAction As Action = Nothing
+            If FlushDurableAction IsNot Nothing Then
+                AdaptedFlushDurableAction = Sub() FlushDurableAction(BaseStream)
+            End If
+
             If BaseStream.Length < DataStartOffset Then
                 If BaseStream.CanWrite = False Then
                     Throw New NotSupportedException($"Provided {NameOf(BaseStream)} must support {NameOf(BaseStream.CanWrite)}.")
                 End If
-                Return CreateNew(BaseStream, Options)
+                Return CreateNew(BaseStream, Options, AdaptedFlushDurableAction)
             End If
 
             Dim EffectiveOptions = If(Options, New ChunkedStreamOptions())
@@ -1242,6 +1263,8 @@ Namespace Streams
                                            MetadataRootLength,
                                            EffectiveOptions.IndexPageEntryCount,
                                            EffectiveOptions.IndexDirectoryEntryCount)
+
+            Result._FlushDurableAction = AdaptedFlushDurableAction
 
             For Each pair In Metadata.ExtentPageDescriptors
                 Result._ExtentPageDescriptors(pair.Key) = pair.Value
@@ -1359,7 +1382,9 @@ Namespace Streams
             End Get
         End Property
 
-        Private Shared Function CreateNew(BaseStream As Stream, Options As ChunkedStreamOptions) As ChunkedStream
+        Private Shared Function CreateNew(BaseStream As Stream,
+                                          Options As ChunkedStreamOptions,
+                                          FlushDurableAction As Action) As ChunkedStream
 
             Dim Header(HeaderSize - 1) As Byte
             Dim EffectiveOptions = If(Options, New ChunkedStreamOptions())
@@ -1401,7 +1426,7 @@ Namespace Streams
 
             BaseStream.SetLength(DataStartOffset)
 
-            FlushDurable(BaseStream)
+            FlushDurable(BaseStream, FlushDurableAction)
 
             Dim Result = New ChunkedStream(BaseStream,
                                            Header,
@@ -1419,6 +1444,8 @@ Namespace Streams
                                            0,
                                            EffectiveOptions.IndexPageEntryCount,
                                            EffectiveOptions.IndexDirectoryEntryCount)
+
+            Result._FlushDurableAction = FlushDurableAction
 
             If EffectiveOptions.EncryptionInfo IsNot Nothing Then
                 Result.InitialiseEncryptionForNewStream(EffectiveOptions.EncryptionInfo)
@@ -2619,7 +2646,7 @@ Namespace Streams
             BaseStream.Position = HeaderOffset
             BaseStream.Write(_Header, 0, _Header.Length)
 
-            If Durable Then FlushDurable(BaseStream)
+            If Durable Then FlushDurable()
 
         End Sub
 
@@ -2680,10 +2707,21 @@ Namespace Streams
 
         End Function
 
-        Private Shared Sub FlushDurable(Target As Stream)
+        Private Sub FlushDurable()
+
+            FlushDurable(BaseStream, _FlushDurableAction)
+
+        End Sub
+
+        Private Shared Sub FlushDurable(Target As Stream,
+                                        FlushDurableAction As Action)
+
+            If FlushDurableAction IsNot Nothing Then
+                FlushDurableAction()
+                Return
+            End If
 
             Dim TargetFileStream = TryCast(Target, FileStream)
-
             If TargetFileStream IsNot Nothing Then
                 TargetFileStream.Flush(True)
                 Return

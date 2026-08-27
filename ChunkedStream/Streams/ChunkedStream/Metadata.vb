@@ -857,11 +857,11 @@ Namespace Streams
                                                 OldRootLength)
             End If
 
-            If Durable Then FlushDurable(BaseStream)
+            If Durable Then FlushDurable()
 
             UpdateHeader(Durable)
 
-            If Durable Then FlushDurable(BaseStream)
+            If Durable Then FlushDurable()
 
         End Sub
 

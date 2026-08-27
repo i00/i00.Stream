@@ -251,7 +251,7 @@ Namespace Streams
                              NewOffset,
                              OldLength)
 
-            FlushDurable(BaseStream)
+            FlushDurable()
 
             If IsValidPhysicalRecordAt(Record.RecordId,
                                        NewOffset,
