@@ -907,40 +907,47 @@ Namespace Streams
                 Throw New ArgumentNullException(NameOf(OriginalPhysicalRecords))
             End If
 
-            _Extents.Clear()
-            _Extents.AddRange(OriginalExtents)
+            Try
 
-            _PhysicalRecords.Clear()
+                _Extents.Clear()
+                _Extents.AddRange(OriginalExtents)
 
-            For Each pair In OriginalPhysicalRecords
-                _PhysicalRecords(pair.Key) = pair.Value
-            Next
+                _PhysicalRecords.Clear()
 
-            _NextPhysicalRecordId =
-                Math.Max(SparsePhysicalRecordId + 1,
-                         OriginalNextPhysicalRecordId)
+                For Each pair In OriginalPhysicalRecords
+                    _PhysicalRecords(pair.Key) = pair.Value
+                Next
 
-            _NextAnchorId =
-                Math.Max(1L,
-                         OriginalNextAnchorId)
+                _NextPhysicalRecordId =
+                    Math.Max(SparsePhysicalRecordId + 1,
+                             OriginalNextPhysicalRecordId)
 
-            _IndexOffset = OriginalIndexOffset
-            _ChunkSize = OriginalChunkSize
-            _ChunkPlain = OriginalChunkPlain
-            _CachedChunkPlain = OriginalCachedChunkPlain
+                _NextAnchorId =
+                    Math.Max(1L,
+                             OriginalNextAnchorId)
 
-            RebuildPhysicalRecordOrdinals()
-            RebuildAnchorIndex()
+                _IndexOffset = OriginalIndexOffset
+                _ChunkSize = OriginalChunkSize
+                _ChunkPlain = OriginalChunkPlain
+                _CachedChunkPlain = OriginalCachedChunkPlain
 
-            ClearFreeSpaceMap()
-            DiscardPendingPhysicalRecordReclaims()
-            InvalidateChunkCache()
+                RebuildPhysicalRecordOrdinals()
+                RebuildAnchorIndex()
 
-            MarkAllMetadataPagesDirty()
+                DiscardPendingPhysicalRecordReclaims()
+                InvalidateChunkCache()
 
-            If BaseStream.Length > OriginalPhysicalLength Then
-                BaseStream.SetLength(OriginalPhysicalLength)
-            End If
+                MarkAllMetadataPagesDirty()
+
+                If BaseStream.Length > OriginalPhysicalLength Then
+                    BaseStream.SetLength(OriginalPhysicalLength)
+                End If
+
+            Finally
+
+                BuildFreeSpaceMap()
+
+            End Try
 
         End Sub
 

@@ -495,6 +495,159 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Verifies that cancelling a chunk-size rewrite rolls back cleanly, leaves the
+            ''' stream valid and resumable, and rebuilds the free-space map so a later write
+            ''' still reuses an existing physical-record hole rather than only appending.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ChunkSizeRewriteCancelledMidRunStaysValidAndReusesHoles()
+
+                Const OriginalChunkSize As Integer = 256
+                Const RewrittenChunkSize As Integer = 128
+                Const ChunkCount As Integer = 6
+
+                Using Ms As New MemoryStream()
+
+                    ' Small metadata pages keep the physical layout dominated by chunk
+                    ' records so the freed-chunk hole is the significant free region.
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = OriginalChunkSize,
+                        .IndexPageEntryCount = 16,
+                        .IndexDirectoryEntryCount = 16
+                    }
+
+                    Dim ExpectedFinal As Byte()
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Expected =
+                            GenerateRandomData(
+                                OriginalChunkSize * ChunkCount,
+                                7301)
+
+                        Cs.Write(0, Expected)
+
+                        ' Overwrite one chunk in place. Copy-on-write appends a replacement
+                        ' physical record and frees the original, leaving a hole the size of a
+                        ' full chunk record part way through the data area.
+                        Dim ReplacementChunk =
+                            GenerateRandomData(
+                                OriginalChunkSize,
+                                7302)
+
+                        Dim ReplacedOffset = OriginalChunkSize * 3
+
+                        Cs.Write(ReplacedOffset, ReplacementChunk)
+                        Overlay(Expected, ReplacementChunk, ReplacedOffset)
+
+                        Dim FragmentationBefore = Cs.GetFragmentation()
+
+                        AssertTrue(
+                            FragmentationBefore > 0,
+                            "Test setup expected a physical-record hole after overwriting a chunk.")
+
+                        Cs.Options.ChunkSize = RewrittenChunkSize
+
+                        Dim ProgressCalls = 0
+
+                        Dim Result =
+                            Cs.ApplyOptions(
+                                ChunkedStream.ApplyOptionTypes.ChunkSize,
+                                Sub(ProcessedUnits As Long,
+                                    TotalUnits As Long,
+                                    UnitType As ChunkedStream.ProcessUnitTypes,
+                                    CancellationToken As ChunkedStream.CancellationToken)
+
+                                    ProgressCalls += 1
+                                    CancellationToken.Cancel = True
+
+                                End Sub)
+
+                        AssertTrue(
+                            ProgressCalls > 0,
+                            "Test setup failed to invoke the progress callback.")
+
+                        AssertTrue(
+                            Result.WasCancelled,
+                            "Expected the cancelled chunk-size rewrite to report WasCancelled.")
+
+                        AssertEqual(
+                            OriginalChunkSize,
+                            Cs.GetStructure().Chunks(0).PayloadLength,
+                            "Cancelled chunk-size rewrite should have rolled back to the original chunk size.")
+
+                        AssertBytesEqual(
+                            Expected,
+                            Cs.ToArray(),
+                            "Cancelling the chunk-size rewrite must not alter logical data.")
+
+                        Cs.Validate()
+
+                        ' The rollback must also have rebuilt the free-space map. Abandon the
+                        ' rewrite, then append one more full chunk: its physical record should
+                        ' drop into the freed hole, below the previous live-data end. If the
+                        ' map had only been cleared, BestFit allocation would append past the
+                        ' live data instead.
+                        Cs.Options.ChunkSize = OriginalChunkSize
+
+                        Dim LiveDataEndBeforeAppend = Cs.GetStructure().LiveDataEndOffset
+
+                        Dim AppendedChunk =
+                            GenerateRandomData(
+                                OriginalChunkSize,
+                                7303)
+
+                        Cs.Write(Cs.Length, AppendedChunk)
+
+                        Dim AppendedChunkOffset = Cs.GetStructure().Chunks(ChunkCount).PhysicalOffset
+
+                        AssertTrue(
+                            AppendedChunkOffset.HasValue AndAlso AppendedChunkOffset.Value < LiveDataEndBeforeAppend,
+                            $"Expected the appended chunk to reuse the freed hole below the prior live-data end ({LiveDataEndBeforeAppend}), proving the free-space map was rebuilt after cancellation rather than left empty. Appended chunk offset was {AppendedChunkOffset}.")
+
+                        ExpectedFinal = CombineArrays(Expected, AppendedChunk)
+
+                        ' The stream must remain resumable: a full, uncancelled rewrite should
+                        ' complete and apply the requested chunk size.
+                        Cs.Options.ChunkSize = RewrittenChunkSize
+
+                        Dim FinalResult =
+                            Cs.ApplyOptions(ChunkedStream.ApplyOptionTypes.ChunkSize)
+
+                        AssertFalse(
+                            FinalResult.WasCancelled,
+                            "Expected the follow-up chunk-size rewrite to complete.")
+
+                        AssertEqual(
+                            RewrittenChunkSize,
+                            Cs.GetStructure().Chunks(0).PayloadLength,
+                            "Follow-up chunk-size rewrite did not apply the requested chunk size.")
+
+                        AssertBytesEqual(
+                            ExpectedFinal,
+                            Cs.ToArray(),
+                            "Follow-up chunk-size rewrite changed logical data.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+
+                        AssertBytesEqual(
+                            ExpectedFinal,
+                            Reopened.ToArray(),
+                            "Data did not survive reopen after a cancelled then completed chunk-size rewrite.")
+
+                        Reopened.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
             ' ================================================================================
             ' Defragmentation durability
             ' ================================================================================

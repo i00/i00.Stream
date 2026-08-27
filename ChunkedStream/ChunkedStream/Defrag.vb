@@ -87,7 +87,7 @@ Namespace Streams
         End Function
 
         Private Function DefragmentCore(Optional Type As DefragTypes = DefragTypes.Move,
-                                   Optional ProgressCallback As StreamProgressCallback = Nothing) As Long
+                                        Optional ProgressCallback As StreamProgressCallback = Nothing) As Long
 
 
             ThrowIfDisposed()
@@ -102,23 +102,29 @@ Namespace Streams
             Dim OriginalLength = BaseStream.Length
             Dim CancellationToken As New CancellationToken()
 
-            Select Case Type
-                Case DefragTypes.Move
-                    DefragmentMove(ProgressCallback, CancellationToken)
+            Try
 
-                Case DefragTypes.Sequence
-                    DefragmentSequence(DefragmentSequenceProgressModes.Normal,
-                                       ProgressCallback,
-                                       CancellationToken)
+                Select Case Type
+                    Case DefragTypes.Move
+                        DefragmentMove(ProgressCallback, CancellationToken)
 
-                Case DefragTypes.Rebuild
-                    DefragmentRebuild(ProgressCallback, CancellationToken)
+                    Case DefragTypes.Sequence
+                        DefragmentSequence(DefragmentSequenceProgressModes.Normal,
+                                           ProgressCallback,
+                                           CancellationToken)
 
-                Case Else
-                    Throw New ArgumentOutOfRangeException(NameOf(Type))
-            End Select
+                    Case DefragTypes.Rebuild
+                        DefragmentRebuild(ProgressCallback, CancellationToken)
 
-            ClearFreeSpaceMap()
+                    Case Else
+                        Throw New ArgumentOutOfRangeException(NameOf(Type))
+                End Select
+
+            Finally
+
+                BuildFreeSpaceMap()
+
+            End Try
 
             If CancellationToken.Cancel Then
                 Return -1
