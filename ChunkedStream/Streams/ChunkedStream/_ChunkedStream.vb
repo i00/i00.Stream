@@ -2686,12 +2686,23 @@ Namespace Streams
 
             If _MetadataRootOffset > 0 AndAlso _MetadataRootLength > 0 Then
 
-                Dim Root(_MetadataRootLength - 1) As Byte
+                Dim RootMac = _MetadataRootMac
 
-                BaseStream.Position = _MetadataRootOffset
-                ReadExactly(BaseStream, Root, 0, Root.Length)
+                If RootMac Is Nothing Then
 
-                Dim RootMac = ComputeMac(Root, Root.Length - MacSize, PublicIntegrityKey)
+                    '
+                    ' _MetadataRootMac is kept in step with _MetadataRootOffset by every root
+                    ' write and by Open, so this read-back is only a fallback for the not
+                    ' expected case of the cache being empty while a root exists on disk.
+                    '
+                    Dim Root(_MetadataRootLength - 1) As Byte
+
+                    BaseStream.Position = _MetadataRootOffset
+                    ReadExactly(BaseStream, Root, 0, Root.Length)
+
+                    RootMac = ComputeMac(Root, Root.Length - MacSize, PublicIntegrityKey)
+
+                End If
 
                 Buffer.BlockCopy(RootMac, 0, _Header, IndexMacOffset, MacSize)
 
