@@ -122,7 +122,7 @@ Namespace Streams
 
             Finally
 
-                BuildFreeSpaceMap()
+                BuildFreeSpaceMapCore()
 
             End Try
 
@@ -593,7 +593,7 @@ Namespace Streams
 
             _IndexOffset = CompactDataEnd
 
-            BuildFreeSpaceMap()
+            BuildFreeSpaceMapCore()
 
             _ExtentPageDescriptors.Clear()
             _ExtentDirectoryPageDescriptors.Clear()

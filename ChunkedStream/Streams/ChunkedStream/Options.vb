@@ -40,9 +40,21 @@ Namespace Streams
         ''' </summary>
         Public Class ChunkedStreamOptions
 
+            ''' <summary>
+            ''' Controls how unreferenced physical records are identified for reclamation.
+            ''' </summary>
             Public Enum ExtentReclaimTypes
+
+                ''' <summary>
+                ''' Track physical-record reference counts as extents are added and removed.
+                ''' </summary>
                 RefCount = 0
+
+                ''' <summary>
+                ''' Determine whether a physical record is unreferenced by scanning the extent table.
+                ''' </summary>
                 Scan = 1
+
             End Enum
 
             ''' <summary>
@@ -945,7 +957,7 @@ Namespace Streams
 
             Finally
 
-                BuildFreeSpaceMap()
+                BuildFreeSpaceMapCore()
 
             End Try
 

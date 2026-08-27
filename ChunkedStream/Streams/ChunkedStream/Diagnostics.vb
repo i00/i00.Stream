@@ -14,6 +14,14 @@ Namespace Streams
             Public ChunkMacKey As Byte()
         End Class
 
+        ''' <summary>
+        ''' Calculates physical-record fragmentation as a ratio of the live data area.
+        ''' </summary>
+        ''' <param name="CancellationToken">Token used to cancel the calculation.</param>
+        ''' <returns>
+        ''' The proportion of the data area between <see cref="DataStartOffset" /> and the
+        ''' live data end that is not occupied by live physical records, in the range 0 to 1.
+        ''' </returns>
         Public Function GetFragmentation(Optional CancellationToken As Threading.CancellationToken = Nothing) As Double
 
             Dim Snapshot As DiagnosticsSnapshot
@@ -28,6 +36,12 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Asynchronously calculates physical-record fragmentation as a ratio of the live
+        ''' data area.
+        ''' </summary>
+        ''' <param name="CancellationToken">Token used to cancel the operation.</param>
+        ''' <returns>A task producing the fragmentation ratio, in the range 0 to 1.</returns>
         Public Async Function GetFragmentationAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Double)
             Return Await Task.Run(
                 Function()
@@ -53,6 +67,13 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Validates the extent layout, physical-record reference counts, anchor index and
+        ''' every live physical record, throwing if the stream structure is inconsistent or
+        ''' a physical record fails authentication.
+        ''' </summary>
+        ''' <param name="ProgressCallback">Optional callback invoked as physical records are validated.</param>
+        ''' <param name="CancellationToken">Token used to cancel validation.</param>
         Public Sub Validate(Optional ProgressCallback As StreamProgressCallback = Nothing, Optional CancellationToken As Threading.CancellationToken = Nothing)
 
             Dim Snapshot As DiagnosticsSnapshot
@@ -67,6 +88,11 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Asynchronously validates the stream structure and every live physical record.
+        ''' </summary>
+        ''' <param name="ProgressCallback">Optional callback invoked as physical records are validated.</param>
+        ''' <param name="CancellationToken">Token used to cancel validation.</param>
         Public Async Function ValidateAsync(Optional ProgressCallback As StreamProgressCallback = Nothing, Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
             Await Task.Run(
                 Sub()

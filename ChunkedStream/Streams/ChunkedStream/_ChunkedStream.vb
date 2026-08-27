@@ -275,10 +275,25 @@ Imports System.Threading
 
 Namespace Streams
 
+    ''' <summary>
+    ''' A seekable <see cref="Stream" /> providing random-access, authenticated, optionally
+    ''' encrypted and optionally compressed chunk storage over a caller-owned backing stream,
+    ''' with sparse regions, stable logical anchors, data-only checkpoints, defragmentation,
+    ''' crash recovery and structure diagnostics.
+    ''' </summary>
+    ''' <remarks>
+    ''' See the file header for a full description of the stream, logical/physical, anchor,
+    ''' metadata, checkpoint and recovery models.
+    ''' </remarks>
     Public Class ChunkedStream
         Inherits Stream
 
         Private _Position As Long
+        ''' <summary>
+        ''' Gets or sets the current position within the logical stream used by the
+        ''' standard <see cref="Stream" /> Read and Write methods. The random-access
+        ''' Read and Write overloads do not use or modify this value.
+        ''' </summary>
         Public Overrides Property Position As Long
             Get
                 Using EnterStateLock()
@@ -303,24 +318,43 @@ Namespace Streams
             _Position = Value
         End Sub
 
+        ''' <summary>
+        ''' Gets a value indicating whether the stream supports reading. Reflects the
+        ''' capability of the backing stream.
+        ''' </summary>
         Public Overrides ReadOnly Property CanRead As Boolean
             Get
                 Return BaseStream.CanRead
             End Get
         End Property
 
+        ''' <summary>
+        ''' Gets a value indicating whether the stream supports writing. Reflects the
+        ''' capability of the backing stream.
+        ''' </summary>
         Public Overrides ReadOnly Property CanWrite As Boolean
             Get
                 Return BaseStream.CanWrite
             End Get
         End Property
 
+        ''' <summary>
+        ''' Gets a value indicating whether the stream supports seeking. Reflects the
+        ''' capability of the backing stream.
+        ''' </summary>
         Public Overrides ReadOnly Property CanSeek As Boolean
             Get
                 Return BaseStream.CanSeek
             End Get
         End Property
 
+        ''' <summary>
+        ''' Sets the position within the logical stream used by the standard
+        ''' <see cref="Stream" /> Read and Write methods.
+        ''' </summary>
+        ''' <param name="Offset">Byte offset relative to <paramref name="Origin" />.</param>
+        ''' <param name="Origin">Reference point used to interpret <paramref name="Offset" />.</param>
+        ''' <returns>The new position within the logical stream.</returns>
         Public Overrides Function Seek(Offset As Long,
                                        Origin As SeekOrigin) As Long
 
@@ -395,11 +429,35 @@ Namespace Streams
                                                    UnitType As ProcessUnitTypes,
                                                    CancellationToken As CancellationToken)
 
+        ''' <summary>
+        ''' Default logical chunk size, in bytes, used when no chunk size is configured.
+        ''' </summary>
         Public Const DefaultChunkSize As Integer = 64 * 1024
+
+        ''' <summary>
+        ''' Size, in bytes, of the initialisation vector stored in each physical chunk record.
+        ''' </summary>
         Public Const IvSize As Integer = 16
+
+        ''' <summary>
+        ''' Size, in bytes, of the HMAC-SHA256 authentication tag used throughout the format.
+        ''' </summary>
         Public Const MacSize As Integer = 32
+
+        ''' <summary>
+        ''' Size, in bytes, of a single stream header copy.
+        ''' </summary>
         Public Const HeaderSize As Integer = 512
+
+        ''' <summary>
+        ''' Number of alternating header copies written at the start of the backing stream.
+        ''' </summary>
         Public Const HeaderCopyCount As Integer = 2
+
+        ''' <summary>
+        ''' Physical offset at which chunk records and metadata may begin, immediately after
+        ''' the header copies.
+        ''' </summary>
         Public Const DataStartOffset As Integer = HeaderSize * HeaderCopyCount
 
         Private Const MagicOffset As Integer = 0
@@ -581,13 +639,36 @@ Namespace Streams
             Public HeaderCopyIndex As Integer
         End Structure
 
+        ''' <summary>
+        ''' The backing storage stream. The caller owns its lifetime; disposing the
+        ''' ChunkedStream does not dispose this stream.
+        ''' </summary>
         Public ReadOnly BaseStream As Stream
 
+        ''' <summary>
+        ''' Identifies which categories of physical I/O operation acquire the shared
+        ''' physical-I/O lock.
+        ''' </summary>
         <Flags>
         Protected Enum PhysicalIoLockStates
+            ''' <summary>
+            ''' No physical-I/O locking is required.
+            ''' </summary>
             None = 0
+
+            ''' <summary>
+            ''' Position-based writes acquire the physical-I/O lock.
+            ''' </summary>
             WriteLock = 1 << 0
+
+            ''' <summary>
+            ''' Position-based reads acquire the physical-I/O lock.
+            ''' </summary>
             ReadLock = 1 << 1
+
+            ''' <summary>
+            ''' Both position-based reads and writes acquire the physical-I/O lock.
+            ''' </summary>
             FullLock = WriteLock Or ReadLock
         End Enum
 
@@ -656,6 +737,19 @@ Namespace Streams
             End If
         End Sub
 
+        ''' <summary>
+        ''' Reads exactly <paramref name="Count" /> bytes from the backing stream at the
+        ''' specified physical offset.
+        ''' </summary>
+        ''' <remarks>
+        ''' The default implementation uses <see cref="IPositionedStream" /> when the backing
+        ''' stream supports it, otherwise it seeks and reads while holding the physical-I/O
+        ''' lock. Override to provide a custom positioned-read strategy.
+        ''' </remarks>
+        ''' <param name="PhysicalOffset">Physical offset within the backing stream to read from.</param>
+        ''' <param name="Buffer">Destination buffer.</param>
+        ''' <param name="BufferOffset">Offset within <paramref name="Buffer" /> to store the first byte.</param>
+        ''' <param name="Count">Number of bytes to read.</param>
         Protected Overridable Sub ReadAtCore(PhysicalOffset As Long,
                                              Buffer As Byte(),
                                              BufferOffset As Integer,
@@ -700,6 +794,19 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Writes <paramref name="Count" /> bytes to the backing stream at the specified
+        ''' physical offset.
+        ''' </summary>
+        ''' <remarks>
+        ''' The default implementation uses <see cref="IPositionedStream" /> when the backing
+        ''' stream supports it, otherwise it seeks and writes while holding the physical-I/O
+        ''' lock. Override to provide a custom positioned-write strategy.
+        ''' </remarks>
+        ''' <param name="PhysicalOffset">Physical offset within the backing stream to write to.</param>
+        ''' <param name="Buffer">Source buffer.</param>
+        ''' <param name="BufferOffset">Offset within <paramref name="Buffer" /> of the first byte to write.</param>
+        ''' <param name="Count">Number of bytes to write.</param>
         Protected Overridable Sub WriteAtCore(PhysicalOffset As Long,
                                               Buffer As Byte(),
                                               BufferOffset As Integer,
@@ -766,6 +873,13 @@ Namespace Streams
         End Class
 
         Private _Options As ChunkedStreamOptions
+        ''' <summary>
+        ''' Gets or sets the options controlling newly written chunks and metadata pages.
+        ''' </summary>
+        ''' <remarks>
+        ''' Assigning a new options instance re-evaluates the encryption configuration.
+        ''' Existing chunk records are not rewritten as a side effect of changing options.
+        ''' </remarks>
         Public Property Options As ChunkedStreamOptions
             Get
                 Return _Options
@@ -826,7 +940,18 @@ Namespace Streams
         Private _CompactMetadataWriteOffset As Long?
         Private _CompactMetadataWriteLimit As Long?
 
+        ''' <summary>
+        ''' Internal implementation detail. Not part of the supported public API.
+        ''' Tracks extent metadata pages modified in memory that must be rewritten on the
+        ''' next metadata publication.
+        ''' </summary>
         Public ReadOnly _DirtyExtentPages As New HashSet(Of Integer)()
+
+        ''' <summary>
+        ''' Internal implementation detail. Not part of the supported public API.
+        ''' Tracks physical-record metadata pages modified in memory that must be rewritten
+        ''' on the next metadata publication.
+        ''' </summary>
         Public ReadOnly _DirtyPhysicalRecordPages As New HashSet(Of Integer)()
 
         Private ReadOnly _ExtentPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
@@ -996,6 +1121,11 @@ Namespace Streams
         ''' </summary>
         ''' <param name="BaseStream">Backing storage stream. The caller owns the stream lifetime.</param>
         ''' <param name="Options">Options controlling newly written chunks.</param>
+        ''' <param name="AllowOpeningWhenRecoveryFails">
+        ''' When True, the stream is opened for diagnostic access even if automatic recovery
+        ''' fails or cannot run. Inspect <see cref="AutoRecoveryState" /> and
+        ''' <see cref="AutoRecoveryException" /> after opening.
+        ''' </param>
         ''' <returns>An opened ChunkedStream.</returns>
         Public Shared Function Open(BaseStream As Stream,
                                     Optional Options As ChunkedStreamOptions = Nothing,
@@ -1171,20 +1301,47 @@ Namespace Streams
         End Function
 
         Dim _RecoveryStateAtOpen As RecoveryStates
+        ''' <summary>
+        ''' Gets the recovery state that was recorded in the header when the stream was
+        ''' opened, before any automatic recovery was performed.
+        ''' </summary>
         Public ReadOnly Property RecoveryStateAtOpen As RecoveryStates
             Get
                 Return _RecoveryStateAtOpen
             End Get
         End Property
 
+        ''' <summary>
+        ''' Outcome of the automatic recovery attempt performed while opening the stream.
+        ''' </summary>
         Public Enum AutoRecoveryStates
+            ''' <summary>
+            ''' The stream was not pending recovery when it was opened.
+            ''' </summary>
             NotRequired
+
+            ''' <summary>
+            ''' The stream is pending recovery.
+            ''' </summary>
             Required
+
+            ''' <summary>
+            ''' The stream was pending recovery and recovery completed successfully.
+            ''' </summary>
             Repaired
+
+            ''' <summary>
+            ''' The stream was pending recovery and recovery failed. The stream was opened
+            ''' for diagnostic access only.
+            ''' </summary>
             Failed
         End Enum
 
         Private Property _AutoRecoveryState As AutoRecoveryStates
+        ''' <summary>
+        ''' Gets the outcome of the automatic recovery attempt performed while the stream
+        ''' was opened.
+        ''' </summary>
         Public ReadOnly Property AutoRecoveryState As AutoRecoveryStates
             Get
                 Return _AutoRecoveryState
@@ -1192,6 +1349,10 @@ Namespace Streams
         End Property
 
         Private Property _AutoRecoveryException As Exception
+        ''' <summary>
+        ''' Gets the exception captured when automatic recovery failed and the stream was
+        ''' opened for diagnostic access, or Nothing when recovery did not fail.
+        ''' </summary>
         Public ReadOnly Property AutoRecoveryException As Exception
             Get
                 Return _AutoRecoveryException
@@ -1390,6 +1551,17 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Reads a sequence of bytes from the logical stream at the current
+        ''' <see cref="Position" /> and advances the position by the number of bytes read.
+        ''' </summary>
+        ''' <param name="Buffer">Destination buffer.</param>
+        ''' <param name="Offset">Offset within <paramref name="Buffer" /> at which to begin storing data.</param>
+        ''' <param name="Count">Maximum number of bytes to read.</param>
+        ''' <returns>
+        ''' The number of bytes read into <paramref name="Buffer" />. This may be less than
+        ''' <paramref name="Count" />, and is zero once the end of the stream is reached.
+        ''' </returns>
         Public Overrides Function Read(Buffer As Byte(),
                                        Offset As Integer,
                                        Count As Integer) As Integer
@@ -1524,6 +1696,13 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Writes a sequence of bytes to the logical stream at the current
+        ''' <see cref="Position" /> and advances the position by the number of bytes written.
+        ''' </summary>
+        ''' <param name="Buffer">Source buffer.</param>
+        ''' <param name="Offset">Offset within <paramref name="Buffer" /> of the first byte to write.</param>
+        ''' <param name="Count">Number of bytes to write.</param>
         Public Overrides Sub Write(Buffer As Byte(),
                                    Offset As Integer,
                                    Count As Integer)
@@ -1700,6 +1879,17 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Replaces a logical range with the supplied data. The replacement length does not
+        ''' need to match the length of the range being replaced.
+        ''' </summary>
+        ''' <param name="LogicalOffset">Logical offset at which the replaced range begins.</param>
+        ''' <param name="Length">Number of existing logical bytes to replace.</param>
+        ''' <param name="Data">Replacement data.</param>
+        ''' <param name="AnchorActionAtLogicalOffset">
+        ''' Controls whether an anchor at <paramref name="LogicalOffset" /> transfers to the
+        ''' replacement data.
+        ''' </param>
         Public Sub Replace(LogicalOffset As Long,
                            Length As Long,
                            Data As Byte(),
@@ -1717,6 +1907,19 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Replaces a logical range with a region of the supplied buffer. The replacement
+        ''' length does not need to match the length of the range being replaced.
+        ''' </summary>
+        ''' <param name="LogicalOffset">Logical offset at which the replaced range begins.</param>
+        ''' <param name="Length">Number of existing logical bytes to replace.</param>
+        ''' <param name="Data">Buffer containing the replacement data.</param>
+        ''' <param name="DataOffset">Offset within <paramref name="Data" /> of the first replacement byte.</param>
+        ''' <param name="Count">Number of replacement bytes to read from <paramref name="Data" />.</param>
+        ''' <param name="AnchorActionAtLogicalOffset">
+        ''' Controls whether an anchor at <paramref name="LogicalOffset" /> transfers to the
+        ''' replacement data.
+        ''' </param>
         Public Sub Replace(LogicalOffset As Long,
                            Length As Long,
                            Data As Byte(),
@@ -1834,6 +2037,16 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Copies a logical range and inserts the copy at another logical offset. Bytes and
+        ''' physical-record references are cloned; source anchor identities are not.
+        ''' </summary>
+        ''' <param name="SourceLogicalOffset">Logical offset of the data to clone.</param>
+        ''' <param name="CloneLength">Number of logical bytes to clone.</param>
+        ''' <param name="TargetLogicalOffset">Logical offset at which the cloned data is inserted.</param>
+        ''' <param name="AnchorActionAtLogicalOffset">
+        ''' Controls how an existing anchor at <paramref name="TargetLogicalOffset" /> is handled.
+        ''' </param>
         Public Sub CloneInsert(SourceLogicalOffset As Long,
                                CloneLength As Long,
                                TargetLogicalOffset As Long,
@@ -1902,6 +2115,12 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Removes a logical range from the stream, shortening the logical length. Anchors
+        ''' whose logical starts fall inside the removed range are destroyed.
+        ''' </summary>
+        ''' <param name="LogicalOffset">Logical offset at which removal begins.</param>
+        ''' <param name="Length">Number of logical bytes to remove.</param>
         Public Overloads Sub Remove(LogicalOffset As Long,
                           Length As Long)
 
@@ -1934,6 +2153,15 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Inserts data at the specified logical offset, shifting subsequent data forward.
+        ''' </summary>
+        ''' <param name="LogicalOffset">Logical offset at which the data is inserted.</param>
+        ''' <param name="Data">Data to insert.</param>
+        ''' <param name="AnchorActionAtLogicalOffset">
+        ''' Controls whether an anchor at <paramref name="LogicalOffset" /> stays with the
+        ''' existing data or moves to the inserted data.
+        ''' </param>
         Public Overloads Sub Insert(LogicalOffset As Long,
                                     Data As Byte(),
                                     Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway)
@@ -1948,6 +2176,18 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Inserts a region of the supplied buffer at the specified logical offset, shifting
+        ''' subsequent data forward.
+        ''' </summary>
+        ''' <param name="LogicalOffset">Logical offset at which the data is inserted.</param>
+        ''' <param name="Data">Buffer containing the data to insert.</param>
+        ''' <param name="DataOffset">Offset within <paramref name="Data" /> of the first byte to insert.</param>
+        ''' <param name="Count">Number of bytes to insert from <paramref name="Data" />.</param>
+        ''' <param name="AnchorActionAtLogicalOffset">
+        ''' Controls whether an anchor at <paramref name="LogicalOffset" /> stays with the
+        ''' existing data or moves to the inserted data.
+        ''' </param>
         Public Overloads Sub Insert(LogicalOffset As Long,
                                     Data As Byte(),
                                     DataOffset As Integer,
@@ -2000,6 +2240,14 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Copies a logical range and inserts the copy at another logical offset using the
+        ''' default anchor handling. Bytes and physical-record references are cloned; anchor
+        ''' identities are not.
+        ''' </summary>
+        ''' <param name="SourceLogicalOffset">Logical offset of the data to clone.</param>
+        ''' <param name="CloneLength">Number of logical bytes to clone.</param>
+        ''' <param name="TargetLogicalOffset">Logical offset at which the cloned data is inserted.</param>
         Public Sub Clone(SourceLogicalOffset As Long,
                          CloneLength As Long,
                          TargetLogicalOffset As Long)

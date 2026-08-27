@@ -28,15 +28,35 @@ Namespace Streams
 
     Partial Class ChunkedStream
 
+        ''' <summary>
+        ''' Identifies a protected operation that was in progress and may require recovery
+        ''' when the stream is next opened.
+        ''' </summary>
         Public Enum RecoveryStates As Integer
 
+            ''' <summary>
+            ''' No recovery is pending.
+            ''' </summary>
             None = 0
 
+            ''' <summary>
+            ''' A physical-record copy had started but was not confirmed complete.
+            ''' </summary>
             CopyingPhysicalRecord = 1
+
+            ''' <summary>
+            ''' A physical-record copy had completed but the metadata update was not confirmed.
+            ''' </summary>
             PhysicalRecordCopied = 2
 
+            ''' <summary>
+            ''' A data-only checkpoint was active. The checkpoint baseline is restored on open.
+            ''' </summary>
             CheckpointActive = 100
 
+            ''' <summary>
+            ''' A chunk-size rebuild was in progress. An incomplete rebuild is rolled back on open.
+            ''' </summary>
             ChunkSizeRebuildActive = 200
 
         End Enum
@@ -124,6 +144,9 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Returns the recovery state currently recorded in the active header.
+        ''' </summary>
         Public Function GetRecoveryState() As RecoveryStates
 
             Return CType(BitConverter.ToInt32(_Header, RecoveryStateOffset), RecoveryStates)

@@ -8,21 +8,12 @@ Namespace Streams
 
             Private ReadOnly _SpacesByOffset As New SortedDictionary(Of Long, Long)()
 
-            ''' <summary>
-            ''' Returns an independent copy of the current free-space state, suitable for
-            ''' storing alongside a checkpoint baseline and restoring later without re-running
-            ''' merge logic that a valid, already-merged snapshot doesn't need.
-            ''' </summary>
             Public Function CloneSpaces() As SortedDictionary(Of Long, Long)
 
                 Return New SortedDictionary(Of Long, Long)(_SpacesByOffset)
 
             End Function
 
-            ''' <summary>
-            ''' Replaces the current free-space state with a previously cloned one verbatim -
-            ''' no merge-scanning, since a cloned snapshot is already valid and already merged.
-            ''' </summary>
             Public Sub RestoreSpaces(Spaces As SortedDictionary(Of Long, Long))
 
                 If Spaces Is Nothing Then
@@ -355,7 +346,7 @@ Namespace Streams
                     End If
 
                     If Policy = ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan Then
-                        BuildFreeSpaceMap()
+                        BuildFreeSpaceMapCore()
                         If TryAllocateSafeSpace(Length, IsMetadata, True, Offset) Then
                             Return Offset
                         End If
@@ -392,7 +383,43 @@ Namespace Streams
 
         End Function
 
-        Private Sub BuildFreeSpaceMap()
+        ''' <summary>
+        ''' Discards the in-memory free-space map and rebuilds it from scratch by scanning
+        ''' the current physical layout, so that later writes can immediately reuse every
+        ''' hole that currently exists in the data area.
+        ''' </summary>
+        ''' <remarks>
+        ''' The free-space map is the index that the <c>BestFit</c> and <c>FirstFitScan</c>
+        ''' write-location policies consult when choosing where to place a new physical
+        ''' record or metadata page. Any span between the data-start offset and the furthest
+        ''' of the backing-stream length, the index offset and the live data end that is not
+        ''' covered by a live physical record or an active metadata page is treated as free.
+        '''
+        ''' Calling this is normally unnecessary. The map is maintained incrementally as
+        ''' records are written and freed, is loaded from the persisted hole directory when
+        ''' the stream is opened, is rebuilt automatically after <see cref="Defragment"/> and
+        ''' after a cancelled or failed <see cref="ApplyOptions"/> chunk-size rewrite, and is
+        ''' rebuilt on demand by <c>FirstFitScan</c> when a write cannot be satisfied from
+        ''' the holes already known. It is worth calling explicitly when using <c>BestFit</c>
+        ''' (which never rebuilds the map on its own) and you want hole reuse to pick up
+        ''' holes that have appeared since the map was last built - for example after a batch
+        ''' of edits - without closing and reopening the stream.
+        '''
+        ''' This only refreshes an in-memory index: it does not move data, change logical
+        ''' content or write anything. The refreshed map reaches the persisted hole
+        ''' directory on the next metadata write, subject to the configured hole-directory
+        ''' mode.
+        ''' </remarks>
+        Public Sub BuildFreeSpaceMap()
+
+            Using EnterStateLock()
+                ThrowIfDisposed()
+                BuildFreeSpaceMapCore()
+            End Using
+
+        End Sub
+
+        Private Sub BuildFreeSpaceMapCore()
 
             _FreeSpaces.Clear()
 

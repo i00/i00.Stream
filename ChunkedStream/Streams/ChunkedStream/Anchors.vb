@@ -107,11 +107,34 @@ Imports System.IO
 Namespace Streams
     Partial Class ChunkedStream
 
+        ''' <summary>
+        ''' Controls how an anchor located at the target logical offset is treated when data
+        ''' is inserted there.
+        ''' </summary>
         Public Enum AnchorActionsAtLogicalOffset
+
+            ''' <summary>
+            ''' The anchor stays with the existing data and moves after the inserted data.
+            ''' The inserted data does not inherit the anchor.
+            ''' </summary>
             TransformAway = 0
+
+            ''' <summary>
+            ''' The inserted data inherits the anchor, which remains at the insertion offset.
+            ''' </summary>
             Use = 1
+
         End Enum
 
+        ''' <summary>
+        ''' A stable, immutable reference to the start of a logical data range within a
+        ''' specific ChunkedStream instance.
+        ''' </summary>
+        ''' <remarks>
+        ''' Anchor identities survive logical movement, copy-on-write, compression and
+        ''' encryption changes, defragmentation and rebuilds. An anchor belongs to the
+        ''' ChunkedStream that created it and cannot be used with another instance.
+        ''' </remarks>
         Public NotInheritable Class Anchor
 
             Private ReadOnly _Owner As ChunkedStream
@@ -131,24 +154,41 @@ Namespace Streams
 
             End Sub
 
+            ''' <summary>
+            ''' Gets the immutable identifier of this anchor. Anchor identifiers are never reused.
+            ''' </summary>
             Public ReadOnly Property AnchorId As Long
 
+            ''' <summary>
+            ''' Gets a value indicating whether the anchored logical data still exists.
+            ''' Returns False once the anchored data or the anchor itself has been removed.
+            ''' </summary>
             Public ReadOnly Property IsValid As Boolean
                 Get
                     Return _Owner.ContainsAnchor(AnchorId)
                 End Get
             End Property
 
+            ''' <summary>
+            ''' Gets the current logical offset of the anchored data.
+            ''' </summary>
+            ''' <exception cref="Collections.Generic.KeyNotFoundException">The anchor is no longer valid.</exception>
             Public ReadOnly Property Offset As Long
                 Get
                     Return _Owner.GetAnchorOffset(AnchorId)
                 End Get
             End Property
 
+            ''' <summary>
+            ''' Removes this anchor. The underlying logical data is not affected.
+            ''' </summary>
             Public Sub Remove()
                 _Owner.RemoveAnchor(Me)
             End Sub
 
+            ''' <summary>
+            ''' Returns a diagnostic description of the anchor and its current logical offset.
+            ''' </summary>
             Public Overrides Function ToString() As String
 
                 If IsValid = False Then
@@ -183,6 +223,13 @@ Namespace Streams
         Private ReadOnly _ExtentIndexesByAnchorId As New Dictionary(Of Long, Integer)()
         Private _NextAnchorId As Long = 1
 
+        ''' <summary>
+        ''' Creates an anchor identifying the start of existing logical data at the specified
+        ''' offset. The target extent is split if required.
+        ''' </summary>
+        ''' <param name="LogicalOffset">Logical offset to anchor. Must fall within existing logical data.</param>
+        ''' <returns>The new anchor.</returns>
+        ''' <exception cref="InvalidOperationException">An anchor already exists at <paramref name="LogicalOffset" />.</exception>
         Public Function CreateAnchor(LogicalOffset As Long) As Anchor
 
             Using EnterStateLock()
@@ -245,6 +292,12 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Appends the supplied data to the end of the logical stream and creates an anchor
+        ''' identifying its first byte.
+        ''' </summary>
+        ''' <param name="Data">Data to append. Must not be Nothing or empty.</param>
+        ''' <returns>The new anchor.</returns>
         Public Function CreateAnchor(Data As Byte()) As Anchor
 
             Using EnterStateLock()
@@ -294,6 +347,12 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Resolves an anchor by its identifier.
+        ''' </summary>
+        ''' <param name="AnchorId">Identifier of the anchor to resolve.</param>
+        ''' <returns>The anchor with the specified identifier.</returns>
+        ''' <exception cref="Collections.Generic.KeyNotFoundException">No anchor with the specified identifier exists.</exception>
         Public Function GetAnchor(AnchorId As Long) As Anchor
 
             Using EnterStateLock()
@@ -321,6 +380,14 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Attempts to resolve an anchor by its identifier.
+        ''' </summary>
+        ''' <param name="AnchorId">Identifier of the anchor to resolve.</param>
+        ''' <param name="Anchor">
+        ''' When this method returns True, receives the resolved anchor; otherwise Nothing.
+        ''' </param>
+        ''' <returns>True when the anchor was found; otherwise False.</returns>
         Public Function TryGetAnchor(AnchorId As Long,
                                      ByRef Anchor As Anchor) As Boolean
 
@@ -350,6 +417,9 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Returns all anchors currently defined on the stream, ordered by anchor identifier.
+        ''' </summary>
         Public Function GetAnchors() As IReadOnlyList(Of Anchor)
 
             Using EnterStateLock()
@@ -374,6 +444,11 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Determines whether an anchor with the specified identifier currently exists.
+        ''' </summary>
+        ''' <param name="AnchorId">Identifier to test.</param>
+        ''' <returns>True when the anchor exists; otherwise False.</returns>
         Public Function ContainsAnchor(AnchorId As Long) As Boolean
 
             Using EnterStateLock()
@@ -393,6 +468,12 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Returns the current logical offset of the data identified by the specified anchor.
+        ''' </summary>
+        ''' <param name="AnchorId">Identifier of the anchor to locate.</param>
+        ''' <returns>The logical offset of the anchored data.</returns>
+        ''' <exception cref="Collections.Generic.KeyNotFoundException">No anchor with the specified identifier exists.</exception>
         Public Function GetAnchorOffset(AnchorId As Long) As Long
 
             Using EnterStateLock()
@@ -480,6 +561,14 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Writes data at the current logical offset of the specified anchor.
+        ''' </summary>
+        ''' <param name="Anchor">Anchor identifying where the write begins.</param>
+        ''' <param name="Input">Source buffer.</param>
+        ''' <param name="DataOffset">Offset within <paramref name="Input" /> of the first byte to write.</param>
+        ''' <param name="Count">Number of bytes to write, or Nothing to write to the end of <paramref name="Input" />.</param>
+        ''' <returns>The number of bytes written.</returns>
         Public Overloads Function Write(Anchor As Anchor,
                                         Input As Byte(),
                                         Optional DataOffset As Integer = 0,
@@ -496,6 +585,14 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Reads data starting at the current logical offset of the specified anchor.
+        ''' </summary>
+        ''' <param name="Anchor">Anchor identifying where the read begins.</param>
+        ''' <param name="Output">Destination buffer.</param>
+        ''' <param name="OutputOffset">Offset within <paramref name="Output" /> at which to begin storing data.</param>
+        ''' <param name="Count">Maximum number of bytes to read, or Nothing to fill <paramref name="Output" /> from <paramref name="OutputOffset" />.</param>
+        ''' <returns>The number of bytes read.</returns>
         Public Overloads Function Read(Anchor As Anchor,
                                        Output As Byte(),
                                        Optional OutputOffset As Integer = 0,
@@ -512,6 +609,12 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Replaces <paramref name="Count" /> logical bytes with zero bytes, starting at the
+        ''' current logical offset of the specified anchor.
+        ''' </summary>
+        ''' <param name="Anchor">Anchor identifying where the cleared range begins.</param>
+        ''' <param name="Count">Number of logical bytes to clear.</param>
         Public Overloads Sub Clear(Anchor As Anchor,
                                    Count As Long)
 
@@ -524,6 +627,12 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Inserts <paramref name="Count" /> zero bytes at the current logical offset of the
+        ''' specified anchor. The anchor is retained at the start of the inserted bytes.
+        ''' </summary>
+        ''' <param name="Anchor">Anchor identifying the insertion offset.</param>
+        ''' <param name="Count">Number of zero bytes to insert.</param>
         Public Overloads Sub InsertNullBytes(Anchor As Anchor,
                                              Count As Long)
 
@@ -539,6 +648,12 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Removes <paramref name="Length" /> logical bytes starting at the current logical
+        ''' offset of the specified anchor. Removing anchored data destroys the anchor.
+        ''' </summary>
+        ''' <param name="Anchor">Anchor identifying where removal begins.</param>
+        ''' <param name="Length">Number of logical bytes to remove.</param>
         Public Overloads Sub Remove(Anchor As Anchor,
                                     Length As Long)
 
@@ -549,6 +664,12 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Inserts data at the current logical offset of the specified anchor. The inserted
+        ''' data inherits the anchor.
+        ''' </summary>
+        ''' <param name="Anchor">Anchor identifying the insertion offset.</param>
+        ''' <param name="Data">Data to insert.</param>
         Public Overloads Sub Insert(Anchor As Anchor,
                                     Data As Byte())
 
@@ -565,6 +686,14 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Inserts a region of the supplied buffer at the current logical offset of the
+        ''' specified anchor. The inserted data inherits the anchor.
+        ''' </summary>
+        ''' <param name="Anchor">Anchor identifying the insertion offset.</param>
+        ''' <param name="Data">Buffer containing the data to insert.</param>
+        ''' <param name="DataOffset">Offset within <paramref name="Data" /> of the first byte to insert.</param>
+        ''' <param name="Count">Number of bytes to insert from <paramref name="Data" />.</param>
         Public Overloads Sub Insert(Anchor As Anchor,
                                     Data As Byte(),
                                     DataOffset As Integer,
@@ -580,6 +709,14 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Replaces <paramref name="Length" /> logical bytes, starting at the current logical
+        ''' offset of the specified anchor, with the supplied data. The anchor is preserved
+        ''' whenever replacement data remains.
+        ''' </summary>
+        ''' <param name="Anchor">Anchor identifying where the replaced range begins.</param>
+        ''' <param name="Length">Number of existing logical bytes to replace.</param>
+        ''' <param name="Data">Replacement data.</param>
         Public Sub Replace(Anchor As Anchor,
                            Length As Long,
                            Data As Byte())
@@ -598,6 +735,13 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Copies a logical range and inserts the copy at the current logical offset of the
+        ''' specified target anchor. Source anchor identities are never cloned.
+        ''' </summary>
+        ''' <param name="SourceLogicalOffset">Logical offset of the data to clone.</param>
+        ''' <param name="CloneLength">Number of logical bytes to clone.</param>
+        ''' <param name="TargetAnchor">Anchor identifying where the cloned data is inserted.</param>
         Public Sub CloneInsert(SourceLogicalOffset As Long,
                                CloneLength As Long,
                                TargetAnchor As Anchor)

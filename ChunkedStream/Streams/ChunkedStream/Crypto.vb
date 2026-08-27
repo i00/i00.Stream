@@ -79,6 +79,10 @@ Namespace Streams
         ''' </summary>
         Public NotInheritable Class EncryptionInfo
 
+            ''' <summary>
+            ''' Default PBKDF2 iteration count used by the passphrase-based key derivation
+            ''' when no explicit iteration count is supplied.
+            ''' </summary>
             Public Shared Property DefaultPBKDF2Iterations As Integer = 600000
 
             ''' <summary>
@@ -187,10 +191,10 @@ Namespace Streams
         ''' <summary>
         ''' Thrown when supplied encryption options do not match the stream encryption state.
         ''' </summary>
-        Public Class EncryptionMismatchException
+        Public NotInheritable Class EncryptionMismatchException
             Inherits InvalidOperationException
 
-            Public Sub New(Message As String)
+            Friend Sub New(Message As String)
                 MyBase.New(Message)
             End Sub
 

@@ -1,10 +1,19 @@
 ﻿Imports System.Runtime.CompilerServices
 
 Namespace Streams
-    Public Module Extensions
 
+    Partial Module Extensions
+
+        ''' <summary>
+        ''' Controls how <see cref="DrawFragmentation" /> and the
+        ''' <see cref="GenerateFragmentationBitmap(ChunkedStreamStructure, Size, FragmentationDrawOptions)" />
+        ''' overloads render a stream structure.
+        ''' </summary>
         Public Class FragmentationDrawOptions
 
+            ''' <summary>
+            ''' Selects which physical stream length is mapped across the rendered area.
+            ''' </summary>
             Public Enum RenderLengthModes
 
                 ''' <summary>
@@ -29,14 +38,30 @@ Namespace Streams
 
             End Enum
 
+            ''' <summary>
+            ''' Paints a single rendered block onto the target surface.
+            ''' </summary>
+            ''' <param name="Surface">Target graphics surface.</param>
+            ''' <param name="Bounds">Pixel bounds of the block.</param>
+            ''' <param name="SuggestedColor">Colour calculated for the block.</param>
+            ''' <param name="Regions">All physical regions overlapping the block.</param>
             Public Delegate Sub RegionPainterDelegate(Surface As Graphics,
                                                       Bounds As Rectangle,
                                                       SuggestedColor As Color,
                                                       Regions As Streams.ChunkedStreamStructure.Region())
 
+            ''' <summary>
+            ''' Selects the final colour for a rendered block.
+            ''' </summary>
+            ''' <param name="Regions">All physical regions overlapping the block.</param>
+            ''' <param name="SuggestedColor">The default dominant-region colour.</param>
+            ''' <returns>The colour to paint the block.</returns>
             Public Delegate Function RegionColorSelectorDelegate(Regions As Streams.ChunkedStreamStructure.Region(),
                                                                  SuggestedColor As Color) As Color
 
+            ''' <summary>
+            ''' The default block painter. Fills the block bounds with the suggested colour.
+            ''' </summary>
             Public Shared ReadOnly DefaultRegionPainter As RegionPainterDelegate =
                 Sub(Surface, Bounds, SuggestedColor, Regions)
 
@@ -50,6 +75,9 @@ Namespace Streams
 
                 End Sub
 
+            ''' <summary>
+            ''' The default colour selector. Returns the suggested colour unchanged.
+            ''' </summary>
             Public Shared ReadOnly DefaultRegionColorSelector As RegionColorSelectorDelegate =
                 Function(Regions, SuggestedColor)
                     Return SuggestedColor
@@ -175,6 +203,13 @@ Namespace Streams
 
         End Class
 
+        ''' <summary>
+        ''' Draws a fragmentation visualisation of the stream structure onto a graphics surface.
+        ''' </summary>
+        ''' <param name="ChunkedStreamStructure">Structure snapshot to render.</param>
+        ''' <param name="Graphics">Target graphics surface.</param>
+        ''' <param name="Rect">Pixel rectangle to render into.</param>
+        ''' <param name="Options">Rendering options, or Nothing to use the defaults.</param>
         <Extension>
         Public Sub DrawFragmentation(ChunkedStreamStructure As Streams.ChunkedStreamStructure,
                                      Graphics As Graphics,
@@ -199,6 +234,15 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Renders a fragmentation visualisation of the stream structure to a new bitmap of
+        ''' the specified pixel dimensions.
+        ''' </summary>
+        ''' <param name="ChunkedStreamStructure">Structure snapshot to render.</param>
+        ''' <param name="Width">Bitmap width in pixels.</param>
+        ''' <param name="Height">Bitmap height in pixels.</param>
+        ''' <param name="Options">Rendering options, or Nothing to use the defaults.</param>
+        ''' <returns>A new bitmap containing the visualisation.</returns>
         <Extension>
         Public Function GenerateFragmentationBitmap(ChunkedStreamStructure As Streams.ChunkedStreamStructure,
                                                     Width As Integer,
@@ -209,6 +253,14 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Renders a fragmentation visualisation of the stream structure to a new bitmap of
+        ''' the specified size.
+        ''' </summary>
+        ''' <param name="ChunkedStreamStructure">Structure snapshot to render.</param>
+        ''' <param name="Size">Bitmap size in pixels.</param>
+        ''' <param name="Options">Rendering options, or Nothing to use the defaults.</param>
+        ''' <returns>A new bitmap containing the visualisation.</returns>
         <Extension>
         Public Function GenerateFragmentationBitmap(ChunkedStreamStructure As Streams.ChunkedStreamStructure,
                                                     Size As Size,

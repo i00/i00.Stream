@@ -130,6 +130,12 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Asynchronously creates an immutable snapshot of the logical and physical stream
+        ''' structure.
+        ''' </summary>
+        ''' <param name="CancellationToken">Token used to cancel the operation.</param>
+        ''' <returns>A task producing the structure snapshot.</returns>
         Public Async Function GetStructureAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of ChunkedStreamStructure)
             Return Await Task.Run(
                 Function()
@@ -1641,9 +1647,6 @@ Namespace Streams
             End Get
         End Property
 
-        ''' <summary>
-        ''' Returns a concise diagnostic summary of the stream structure.
-        ''' </summary>
         Private ReadOnly _MetadataPages As ReadOnlyCollection(Of MetadataPage)
 
         ''' <summary>
@@ -1655,6 +1658,9 @@ Namespace Streams
             End Get
         End Property
 
+        ''' <summary>
+        ''' Returns a concise diagnostic summary of the stream structure.
+        ''' </summary>
         Public Overrides Function ToString() As String
 
             Return $"ChunkedStream [{LogicalLength.FormatFileSizeFromBytes()} logical, " &

@@ -77,24 +77,24 @@
     <Import Include="System.Threading.Tasks" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="ChunkedStream\Anchors.vb" />
-    <Compile Include="ChunkedStream\Checkpoints.vb" />
-    <Compile Include="ChunkedStream\Compression.vb" />
-    <Compile Include="ChunkedStream\Diagnostics.vb" />
-    <Compile Include="ChunkedStream\Extents.vb" />
-    <Compile Include="ChunkedStream\Options.vb" />
-    <Compile Include="ChunkedStream\Positioned Storage Interface.vb" />
-    <Compile Include="ChunkedStream\Recovery.vb" />
-    <Compile Include="ChunkedStream\Defrag.vb" />
-    <Compile Include="ChunkedStream\Crypto.vb" />
-    <Compile Include="ChunkedStream\Storage.vb" />
-    <Compile Include="ChunkedStream\Structure.vb" />
-    <Compile Include="ChunkedStream\Unit Test Helpers.vb" />
+    <Compile Include="Streams\ChunkedStream\Anchors.vb" />
+    <Compile Include="Streams\ChunkedStream\Checkpoints.vb" />
+    <Compile Include="Streams\ChunkedStream\Compression.vb" />
+    <Compile Include="Streams\ChunkedStream\Diagnostics.vb" />
+    <Compile Include="Streams\ChunkedStream\Extents.vb" />
+    <Compile Include="Streams\ChunkedStream\Options.vb" />
+    <Compile Include="Streams\ChunkedStream\Positioned Storage Interface.vb" />
+    <Compile Include="Streams\ChunkedStream\Recovery.vb" />
+    <Compile Include="Streams\ChunkedStream\Defrag.vb" />
+    <Compile Include="Streams\ChunkedStream\Crypto.vb" />
+    <Compile Include="Streams\ChunkedStream\Storage.vb" />
+    <Compile Include="Streams\ChunkedStream\Structure.vb" />
+    <Compile Include="Streams\ChunkedStream\Unit Test Helpers.vb" />
     <Compile Include="Compression\Snappy.vb" />
     <Compile Include="EmbeddedFileSystem.vb" />
     <Compile Include="Extensions.vb" />
     <Compile Include="Compression\Lz4Block.vb" />
-    <Compile Include="ChunkedStream\_ChunkedStream.vb" />
+    <Compile Include="Streams\ChunkedStream\_ChunkedStream.vb" />
     <Compile Include="Form1.vb">
       <SubType>Form</SubType>
     </Compile>
@@ -118,7 +118,8 @@
       <DependentUpon>Settings.settings</DependentUpon>
       <DesignTimeSharedInput>True</DesignTimeSharedInput>
     </Compile>
-    <Compile Include="ChunkedStream\Structure.Extensions.vb" />
+    <Compile Include="Streams\ChunkedStream\Structure.Extensions.vb" />
+    <Compile Include="Streams\Extensions.vb" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="Form1.resx">
@@ -132,7 +133,7 @@
     </EmbeddedResource>
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="ChunkedStream\Metadata.vb" />
+    <Compile Include="Streams\ChunkedStream\Metadata.vb" />
     <None Include="My Project\Application.myapp">
       <Generator>MyApplicationCodeGenerator</Generator>
       <LastGenOutput>Application.Designer.vb</LastGenOutput>
