@@ -79,9 +79,9 @@ Public Class Form1
         'End Using
 
         'Test("C:\Games\Vampire The Masquerade - Bloodlines.zip")
-        'Test("C:\Windows\System32\mrt.exe")
+        Test("C:\Windows\System32\mrt.exe", True)
         'Test("C:\Games\mrt.zip", True)
-        Test("C:\Games\mrt.exe", True)
+        'Test("C:\Games\mrt.exe", True)
         'Test("C:\Games\Vampire The Masquerade - Bloodlines.zip", False)
         'Test("C:\Windows\explorer.exe", True)
 

@@ -831,30 +831,44 @@ Namespace Streams
                                     PhysicalRecordDirectoryDescriptors,
                                     HoleDirectoryDescriptors)
 
-            Dim OldRootOffset = _MetadataRootOffset
-            Dim OldRootLength = _MetadataRootLength
-            Dim CompactRootOffset As Long
+            Dim NewRootMac(MacSize - 1) As Byte
+            Buffer.BlockCopy(Root, Root.Length - MacSize, NewRootMac, 0, MacSize)
 
-            If TryGetCompactMetadataWriteOffset(Root.Length,
-                                                CompactRootOffset) Then
+            '
+            ' Only republish the root when it actually changed. When every metadata page
+            ' descriptor, count, and next-id is unchanged the rebuilt root is byte-for-byte
+            ' identical to the one already persisted, so rewriting it would only churn free
+            ' space (the old copy deferred, an identical copy appended) on every persist.
+            '
+            Dim RootChanged =
+                _MetadataRootOffset <= 0 OrElse
+                _MetadataRootLength <> Root.Length OrElse
+                _MetadataRootMac Is Nothing OrElse
+                _MetadataRootOffset + CLng(_MetadataRootLength) > BaseStream.Length OrElse
+                FixedTimeEquals(_MetadataRootMac, 0, NewRootMac, 0, MacSize) = False
 
-                _MetadataRootOffset = CompactRootOffset
+            If RootChanged Then
 
-            Else
+                Dim OldRootOffset = _MetadataRootOffset
+                Dim OldRootLength = _MetadataRootLength
+                Dim CompactRootOffset As Long
 
-                _MetadataRootOffset =
-                    Math.Max(BaseStream.Length,
-                                GetDataEndFromIndex())
+                If TryGetCompactMetadataWriteOffset(Root.Length, CompactRootOffset) Then
+                    _MetadataRootOffset = CompactRootOffset
+                Else
+                    _MetadataRootOffset = Math.Max(BaseStream.Length, GetDataEndFromIndex())
+                End If
 
-            End If
+                _MetadataRootLength = Root.Length
 
-            _MetadataRootLength = Root.Length
+                WriteAt(_MetadataRootOffset, Root, 0, Root.Length)
 
-            WriteAt(_MetadataRootOffset, Root, 0, Root.Length)
+                If OldRootOffset > 0 AndAlso OldRootLength > 0 Then
+                    DeferFreeSpace(OldRootOffset, OldRootLength)
+                End If
 
-            If OldRootOffset > 0 AndAlso OldRootLength > 0 Then
-                DeferFreeSpace(OldRootOffset,
-                                                OldRootLength)
+                _MetadataRootMac = NewRootMac
+
             End If
 
             If Durable Then FlushDurable()

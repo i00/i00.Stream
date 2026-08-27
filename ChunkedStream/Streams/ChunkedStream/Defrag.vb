@@ -603,6 +603,7 @@ Namespace Streams
 
             _MetadataRootOffset = 0
             _MetadataRootLength = 0
+            _MetadataRootMac = Nothing
 
             MarkAllMetadataPagesDirty()
 

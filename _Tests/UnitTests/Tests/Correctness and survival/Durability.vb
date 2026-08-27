@@ -908,6 +908,59 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Verifies that a metadata persist which leaves the root unchanged does not
+            ''' rewrite it. A no-op checkpoint commit still runs a full persist; with no
+            ''' extent, physical-record, count, or next-id change the rebuilt root is
+            ''' byte-for-byte identical to the persisted one, so it must stay where it is
+            ''' rather than being appended afresh and growing the backing store.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub UnchangedMetadataRootIsNotRewrittenOnPersist()
+
+                Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                    .HoleDirectoryMode = ChunkedStream.ChunkedStreamOptions.HoleDirectoryModes.Never
+                }
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(
+                            0,
+                            GenerateRandomData(
+                                ChunkedStream.DefaultChunkSize * 4,
+                                7401))
+
+                        Dim RootOffsetBeforeCommit = Cs.GetStructure().MetadataRootOffset
+                        Dim PhysicalLengthBeforeCommit = Ms.Length
+
+                        Using Checkpoint = Cs.CreateCheckpoint()
+                            Checkpoint.Commit()
+                        End Using
+
+                        AssertEqual(
+                            RootOffsetBeforeCommit,
+                            Cs.GetStructure().MetadataRootOffset,
+                            "A no-op persist rewrote the unchanged metadata root to a new location.")
+
+                        AssertEqual(
+                            PhysicalLengthBeforeCommit,
+                            Ms.Length,
+                            "A no-op persist grew the backing store by rewriting the unchanged metadata root.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
             ' ================================================================================
             ' Checkpoint durability
             ' ================================================================================

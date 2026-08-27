@@ -939,6 +939,14 @@ Namespace Streams
         Private _IndexDirectoryEntryCount As Integer
         Private _MetadataRootOffset As Long
         Private _MetadataRootLength As Integer
+
+        ''' <summary>
+        ''' MAC of the metadata root currently persisted at <see cref="_MetadataRootOffset"/>,
+        ''' or Nothing when no root has been written. Lets a persist skip rewriting the root
+        ''' when the rebuilt root is byte-for-byte identical to the one already on disk.
+        ''' </summary>
+        Private _MetadataRootMac As Byte()
+
         Private _CompactMetadataWriteOffset As Long?
         Private _CompactMetadataWriteLimit As Long?
 
@@ -1307,6 +1315,10 @@ Namespace Streams
                                            EffectiveOptions.IndexDirectoryEntryCount)
 
             Result._FlushDurableAction = AdaptedFlushDurableAction
+
+            If MetadataRootLength > 0 Then
+                Result._MetadataRootMac = RootMac
+            End If
 
             For Each pair In Metadata.ExtentPageDescriptors
                 Result._ExtentPageDescriptors(pair.Key) = pair.Value
