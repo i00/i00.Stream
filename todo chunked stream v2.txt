@@ -3,4 +3,101 @@
 - Shrink file header?
 - Directory type tag (DirectoryTypes) only has 4 types???
 - Chunk cache is one chunk only... Options.ReadCacheChunkCount = 1
-- Have a deep option for Validate() that decompresses/decrypts data - currently does this all of the time
+- Validate(Optional Deep As Boolean = False): only when Deep=True, unwrap each payload itself
+  (decrypt / decompress) and check it round-trips. Shallow Validate stays MAC-only.
+  (The old "currently does this all of the time" note is stale - it only MACs now.)
+
+
+================================================================================
+From whole-project review 2026-08-28
+Full report: https://claude.ai/code/artifact/ef463392-b2a3-429b-b8b9-66c81bb9ce8d
+================================================================================
+
+CORRECTNESS
+- C1  Anchor IDs are reused after a checkpoint rollback. Checkpoints.vb RestoreCheckpointState
+      does `_NextAnchorId = State.NextAnchorId` (resets the counter downward). Make it monotonic:
+      `_NextAnchorId = Math.Max(_NextAnchorId, State.NextAnchorId)` (same for _NextPhysicalRecordId
+      for consistency - lower risk since it is internal). Add a test: create anchor inside a
+      checkpoint -> rollback -> create another -> assert the ids differ.
+
+- C2  Core edits (WriteCore / ReplaceCore / InsertCore / RemoveCore / ClearCore / Clone* /
+      InsertNullBytes* / anchor ops) are not atomic against a mid-operation exception. Partial
+      in-memory state can be made durable by the next successful op or by Dispose.
+      Recommendation: add a `_Faulted` flag set in a Catch around each core mutation body (after
+      the arg-validation guards); a ThrowIfFaulted check at the top of every op; and DisposeCore
+      must NOT call PersistIndexAndHeader when faulted. ~15-20 lines, makes failure safe (never
+      persists corruption), composes with checkpoints. Optional later: full per-op snapshot/
+      restore (implicit single-op checkpoint) if transactional single-op semantics are wanted.
+
+- C3  BuildExtentsFromBuffer / BuildCloneExtents write + refcount physical records BEFORE the
+      guards that could reject the resulting extents (ReplaceRangeCore's
+      InsertLength <> ActualLength, RebaseExtentLogicalOffsets' duplicate-anchor / length checks).
+      A firing guard would orphan those records. Fix: move the reachable checks ahead of any
+      WritePhysicalRecord call (InsertLength is knowable from the input without materialising
+      records). Let C2's fault flag be the backstop for the "shouldn't happen" ones.
+
+- C4  Lz4Block.vb ReadExtendedLength: `Length += Value` has no cap -> OverflowException (VB
+      checked arithmetic) on a long run of 0xFF bytes. Cap it and throw InvalidDataException,
+      the way Snappy already does (explicit caps + ULong accumulation).
+
+- C5  ExtentReclaimType.Scan (WIP): ReclaimUnreferencedPhysicalRecordsByScan bails on
+      HasOpenCheckpoint and is never re-run on commit/close, so a record that became
+      unreferenced via a drifted count during a checkpoint leaks until the next non-checkpoint
+      edit triggers a scan. Fix: call ReclaimUnreferencedPhysicalRecordsByScan() after
+      ReclaimPendingPhysicalRecords() in CommitCheckpointCore (outermost branch) and in
+      CloseCheckpointCore (when the stack reaches 0).
+
+DESIGN / ROBUSTNESS
+- D3  EmbeddedFileSystem.DeleteCore recurses, opening one full-snapshot checkpoint per directory
+      level (RecoverPending recurses too). Use a single outer checkpoint for the whole recursive
+      delete.
+
+- D4a EmbeddedFileSystem.Dispose XML summary claims it "optionally disposes the backing
+      ChunkedStream" - it never does. Fix the doc comment.
+
+- D4b ApplyOptions(All): when ChunkSize is among the flags it returns early and skips
+      Compression / Encryption / Sparseness in that call. Change it to process every selected
+      enum flag after the ChunkSize rewrite, not stop.
+
+- D5  Defragment(Move / Sequence): RelocatePhysicalRecord does ~4-5 fsyncs + a metadata-root
+      rewrite PER moved record, and DefragmentMove's outer loop is O(n^2) (rebuilds the live
+      record list + hole list + GetFragmentation on every iteration, moves one record per
+      iteration). Fine for small streams. For large / heavily fragmented streams: batch K
+      non-overlapping moves under one journal + one metadata publish + one fsync, or at minimum
+      document the cost and point users at Rebuild. GetFragmentation() per move is only for the
+      progress bar - compute it every N moves instead.
+
+- D6  Add a DEBUG-only assertion (or fold into Validate) that `_PhysicalDataEnd` equals
+      RecalculatePhysicalDataEnd() after mutating ops. Catches drift in the conditional-recompute
+      branch in UpdatePhysicalRecordLocationIndexes (stale-high value -> free tail space skipped,
+      wasted space not corruption). Cheap: O(record count), no I/O. Same pattern for other
+      incrementally-cached derived state vs its Rebuild* recompute.
+
+HOUSEKEEPING
+- Delete __Tests/ (double underscore) - stale obj/ build output, not referenced by the solution.
+- Consolidate the ~8 tests Hardening.vb duplicates near-verbatim from Recovery.vb (header-copy
+  recovery, physical-record move recovery). Keep the genuinely unique Hardening tests:
+  ModelBasedRandomOperationsMatchByteArrayModel + the two MetadataPaging* stress tests.
+- Remove the commented-out old implementation at the end of Structure.Extensions.vb (~lines 648-851).
+- README.md is empty - fill in once the API settles.
+- Rename the confusable header-recovery constants (_ChunkedStream.vb ~lines 100-165):
+    * suffix convention: `...Pos` = a byte position in the header, `...Size` = a byte count.
+      Kills `XxxOffsetOffset` / `IndexOffsetOffset`.
+    * split the one Journal*/Recovery* union (same 64 bytes, 3 meanings by RecoveryState) into
+      three prefixed views: Move* (physical-record move), Checkpoint* (checkpoint recovery),
+      Rebuild* (chunk-size rebuild).
+    * drop the JournalStates compat enum; update the Defrag call sites to RecoveryStates.
+  Also revisit the legacy _IndexOffset / IndexOffsetOffset / IndexCountOffset / IndexMacOffset /
+  IndexPageEntryCountOffset names - the field behaves as the data-area / metadata boundary now,
+  not a flat index (this is the old todo item 18).
+
+TESTS (revisit later - full gap list is in the review)
+- The 400-op ModelBasedRandomOperationsMatchByteArrayModel fuzzer needs cases added to its
+  Select Case as features land. Currently: no encryption, no compression, no anchors, no
+  Replace / Clear / InsertNullBytes / CloneInsert, and it reopens only once at the very end.
+- No test that an out-of-order (non-LIFO) checkpoint Commit / Rollback / Dispose throws
+  InvalidOperationException. EnsureTopCheckpoint and the "checkpoint is no longer active" guard
+  are both untested.
+- EmbeddedFileSystem has zero unit tests.
+- No IPositionedStream / read-only-backing-stream / real-FileStream / concurrency tests
+  (everything uses MemoryStream).

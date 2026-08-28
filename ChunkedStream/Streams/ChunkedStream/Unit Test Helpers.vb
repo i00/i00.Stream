@@ -1,6 +1,4 @@
-﻿#If DEBUG Then ' < This is only for unit tests
-
-Namespace Streams
+﻿Namespace Streams
 
     Partial Class ChunkedStream
 
@@ -19,5 +17,3 @@ Namespace Streams
     End Class
 
 End Namespace
-
-#End If

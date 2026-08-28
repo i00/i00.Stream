@@ -437,28 +437,28 @@ Namespace Streams
         ''' <summary>
         ''' Size, in bytes, of the initialisation vector stored in each physical chunk record.
         ''' </summary>
-        Public Const IvSize As Integer = 16
+        Friend Const IvSize As Integer = 16
 
         ''' <summary>
         ''' Size, in bytes, of the HMAC-SHA256 authentication tag used throughout the format.
         ''' </summary>
-        Public Const MacSize As Integer = 32
+        Friend Const MacSize As Integer = 32
 
         ''' <summary>
         ''' Size, in bytes, of a single stream header copy.
         ''' </summary>
-        Public Const HeaderSize As Integer = 512
+        Friend Const HeaderSize As Integer = 512
 
         ''' <summary>
         ''' Number of alternating header copies written at the start of the backing stream.
         ''' </summary>
-        Public Const HeaderCopyCount As Integer = 2
+        Friend Const HeaderCopyCount As Integer = 2
 
         ''' <summary>
         ''' Physical offset at which chunk records and metadata may begin, immediately after
         ''' the header copies.
         ''' </summary>
-        Public Const DataStartOffset As Integer = HeaderSize * HeaderCopyCount
+        Friend Const DataStartOffset As Integer = HeaderSize * HeaderCopyCount
 
         Private Const MagicOffset As Integer = 0
         Private Const MagicSize As Integer = 8
