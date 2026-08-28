@@ -20,15 +20,6 @@ CORRECTNESS
       for consistency - lower risk since it is internal). Add a test: create anchor inside a
       checkpoint -> rollback -> create another -> assert the ids differ.
 
-- C2  Core edits (WriteCore / ReplaceCore / InsertCore / RemoveCore / ClearCore / Clone* /
-      InsertNullBytes* / anchor ops) are not atomic against a mid-operation exception. Partial
-      in-memory state can be made durable by the next successful op or by Dispose.
-      Recommendation: add a `_Faulted` flag set in a Catch around each core mutation body (after
-      the arg-validation guards); a ThrowIfFaulted check at the top of every op; and DisposeCore
-      must NOT call PersistIndexAndHeader when faulted. ~15-20 lines, makes failure safe (never
-      persists corruption), composes with checkpoints. Optional later: full per-op snapshot/
-      restore (implicit single-op checkpoint) if transactional single-op semantics are wanted.
-
 - C3  BuildExtentsFromBuffer / BuildCloneExtents write + refcount physical records BEFORE the
       guards that could reject the resulting extents (ReplaceRangeCore's
       InsertLength <> ActualLength, RebaseExtentLogicalOffsets' duplicate-anchor / length checks).

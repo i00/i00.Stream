@@ -268,6 +268,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             Dim Checkpoint = New ChunkedStreamCheckpoint(Me, _CheckpointStack.Count + 1)
 
@@ -297,6 +298,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
             EnsureTopCheckpoint(Checkpoint)
 
             If _CheckpointStack.Count > 1 Then
@@ -420,6 +422,13 @@ Namespace Streams
             If BaseStream.Length > State.PhysicalLength Then
                 BaseStream.SetLength(State.PhysicalLength)
             End If
+
+            '
+            ' In-memory state has been fully rebuilt from the checkpoint snapshot, so any
+            ' partial-mutation fault recorded since the snapshot is cleared and the stream
+            ' is usable again. Reached only from Rollback and checkpoint close/dispose.
+            '
+            _Faulted = False
 
         End Sub
 

@@ -935,6 +935,15 @@ Namespace Streams
         Private _ChunkSize As Integer
         Private _Disposed As Boolean
 
+        '
+        ' Set when a core mutation throws after passing its argument guards, meaning its
+        ' in-memory extent, physical-record and anchor state may be half-applied. Every
+        ' mutating operation is refused from that point on and Dispose must not persist,
+        ' so a caught-and-continued failure can never make partial state durable.
+        ' Restoring a checkpoint baseline rebuilds a consistent state and clears it.
+        '
+        Private _Faulted As Boolean
+
         Private _IndexPageEntryCount As Integer
         Private _IndexDirectoryEntryCount As Integer
         Private _MetadataRootOffset As Long
@@ -1744,6 +1753,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             If Output Is Nothing Then Throw New ArgumentNullException(NameOf(Output))
             If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
@@ -1881,6 +1891,7 @@ Namespace Streams
                                              Optional Count As Integer? = Nothing) As Integer
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             If Input Is Nothing Then Throw New ArgumentNullException(NameOf(Input))
             If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
@@ -1900,42 +1911,51 @@ Namespace Streams
                 Throw New ArgumentOutOfRangeException(NameOf(Count), "The write would exceed the maximum supported logical offset.")
             End If
 
-            InvalidateChunkCache()
+            Try
 
-            If LogicalOffset > _Length Then
-                InsertSparseRange(_Length, LogicalOffset - _Length)
-            End If
+                InvalidateChunkCache()
 
-            Dim ExistingLength =
-                If(LogicalOffset < _Length,
-                   Math.Min(CLng(EffectiveCount), _Length - LogicalOffset),
-                   0L)
+                If LogicalOffset > _Length Then
+                    InsertSparseRange(_Length, LogicalOffset - _Length)
+                End If
 
-            If ExistingLength > 0 Then
+                Dim ExistingLength =
+                    If(LogicalOffset < _Length,
+                       Math.Min(CLng(EffectiveCount), _Length - LogicalOffset),
+                       0L)
 
-                Dim ExistingCount = CInt(ExistingLength)
-                Dim ReplacementExtents = BuildExtentsFromBuffer(Input, DataOffset, ExistingCount)
+                If ExistingLength > 0 Then
 
-                ReplaceRangeCore(LogicalOffset, ExistingLength, ReplacementExtents)
+                    Dim ExistingCount = CInt(ExistingLength)
+                    Dim ReplacementExtents = BuildExtentsFromBuffer(Input, DataOffset, ExistingCount)
 
-            End If
+                    ReplaceRangeCore(LogicalOffset, ExistingLength, ReplacementExtents)
 
-            If ExistingLength < EffectiveCount Then
+                End If
 
-                Dim AppendOffset = LogicalOffset + ExistingLength
-                Dim AppendDataOffset = DataOffset + CInt(ExistingLength)
-                Dim AppendCount = EffectiveCount - CInt(ExistingLength)
-                Dim AppendExtents = BuildExtentsFromBuffer(Input, AppendDataOffset, AppendCount)
+                If ExistingLength < EffectiveCount Then
 
-                InsertExtentsCore(AppendOffset, AppendExtents)
+                    Dim AppendOffset = LogicalOffset + ExistingLength
+                    Dim AppendDataOffset = DataOffset + CInt(ExistingLength)
+                    Dim AppendCount = EffectiveCount - CInt(ExistingLength)
+                    Dim AppendExtents = BuildExtentsFromBuffer(Input, AppendDataOffset, AppendCount)
 
-            End If
+                    InsertExtentsCore(AppendOffset, AppendExtents)
 
-            If HasOpenCheckpoint = False Then
-                PersistIndexAndHeader(_IndexOffset)
-            End If
+                End If
 
-            Return EffectiveCount
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+                Return EffectiveCount
+
+            Catch
+
+                _Faulted = True
+                Throw
+
+            End Try
 
 
         End Function
@@ -1955,6 +1975,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
 
@@ -1962,19 +1983,28 @@ Namespace Streams
 
             If Length = _Length Then Return
 
-            If Length < _Length Then
+            Try
 
-                RemoveRangeCore(Length, _Length - Length, False)
+                If Length < _Length Then
 
-            Else
+                    RemoveRangeCore(Length, _Length - Length, False)
 
-                InsertSparseRange(_Length, Length - _Length)
+                Else
 
-            End If
+                    InsertSparseRange(_Length, Length - _Length)
 
-            If HasOpenCheckpoint = False Then
-                PersistIndexAndHeader(_IndexOffset)
-            End If
+                End If
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+            Catch
+
+                _Faulted = True
+                Throw
+
+            End Try
 
 
         End Sub
@@ -2044,6 +2074,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             If LogicalOffset < 0 OrElse LogicalOffset > _Length Then
                 Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
@@ -2073,66 +2104,75 @@ Namespace Streams
                 Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
             End If
 
-            InvalidateChunkCache()
+            Try
 
-            Dim ActualLength =
-                If(LogicalOffset < _Length,
-                   Math.Min(Length, _Length - LogicalOffset),
-                   0L)
+                InvalidateChunkCache()
 
-            '
-            ' Capture the anchor at the original replacement start before removing
-            ' the old range. Anchors strictly inside the removed range are destroyed
-            ' by RemoveRangeCore. An anchor at the removal end survives.
-            '
-            Dim StartAnchorId =
-                FindAnchorIdAtLogicalOffset(LogicalOffset)
+                Dim ActualLength =
+                    If(LogicalOffset < _Length,
+                       Math.Min(Length, _Length - LogicalOffset),
+                       0L)
 
-            If ActualLength > 0 Then
-                RemoveRangeCore(LogicalOffset,
-                                ActualLength,
-                                False)
-            End If
+                '
+                ' Capture the anchor at the original replacement start before removing
+                ' the old range. Anchors strictly inside the removed range are destroyed
+                ' by RemoveRangeCore. An anchor at the removal end survives.
+                '
+                Dim StartAnchorId =
+                    FindAnchorIdAtLogicalOffset(LogicalOffset)
 
-            If Count > 0 Then
+                If ActualLength > 0 Then
+                    RemoveRangeCore(LogicalOffset,
+                                    ActualLength,
+                                    False)
+                End If
 
-                Dim NewExtents =
-                    BuildExtentsFromBuffer(Data,
-                                           DataOffset,
-                                           Count)
+                If Count > 0 Then
 
-                If StartAnchorId > 0 AndAlso
-                   AnchorActionAtLogicalOffset = AnchorActionsAtLogicalOffset.Use Then
+                    Dim NewExtents =
+                        BuildExtentsFromBuffer(Data,
+                                               DataOffset,
+                                               Count)
 
-                    Dim FirstExtent = NewExtents(0)
+                    If StartAnchorId > 0 AndAlso
+                       AnchorActionAtLogicalOffset = AnchorActionsAtLogicalOffset.Use Then
 
-                    FirstExtent.AnchorId = StartAnchorId
-                    NewExtents(0) = FirstExtent
+                        Dim FirstExtent = NewExtents(0)
+
+                        FirstExtent.AnchorId = StartAnchorId
+                        NewExtents(0) = FirstExtent
+
+                    End If
+
+                    '
+                    ' Always use TransformAway for this insertion.
+                    '
+                    ' The original start anchor, when retained, has already been assigned
+                    ' explicitly to the first replacement extent above.
+                    '
+                    ' An anchor at the original removal end temporarily occupies
+                    ' LogicalOffset after removal. TransformAway keeps that anchor attached
+                    ' to the surviving data and pushes it after the replacement data.
+                    '
+                    InsertExtentsCore(
+                        LogicalOffset,
+                        NewExtents,
+                        AnchorActionsAtLogicalOffset.TransformAway)
 
                 End If
 
-                '
-                ' Always use TransformAway for this insertion.
-                '
-                ' The original start anchor, when retained, has already been assigned
-                ' explicitly to the first replacement extent above.
-                '
-                ' An anchor at the original removal end temporarily occupies
-                ' LogicalOffset after removal. TransformAway keeps that anchor attached
-                ' to the surviving data and pushes it after the replacement data.
-                '
-                InsertExtentsCore(
-                    LogicalOffset,
-                    NewExtents,
-                    AnchorActionsAtLogicalOffset.TransformAway)
+                RebuildAnchorIndex()
 
-            End If
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
 
-            RebuildAnchorIndex()
+            Catch
 
-            If HasOpenCheckpoint = False Then
-                PersistIndexAndHeader(_IndexOffset)
-            End If
+                _Faulted = True
+                Throw
+
+            End Try
 
 
         End Sub
@@ -2167,6 +2207,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             If SourceLogicalOffset < 0 Then
                 Throw New ArgumentOutOfRangeException(NameOf(SourceLogicalOffset))
@@ -2182,35 +2223,44 @@ Namespace Streams
 
             If CloneLength = 0 OrElse SourceLogicalOffset >= _Length Then Return
 
-            InvalidateChunkCache()
+            Try
 
-            Dim ActualLength =
-                Math.Min(CloneLength,
-                         _Length - SourceLogicalOffset)
+                InvalidateChunkCache()
 
-            Dim CloneExtents =
-                BuildCloneExtents(SourceLogicalOffset,
-                                  ActualLength)
+                Dim ActualLength =
+                    Math.Min(CloneLength,
+                             _Length - SourceLogicalOffset)
 
-            '
-            ' Source anchor identities are never cloned.
-            '
-            For Index = 0 To CloneExtents.Count - 1
+                Dim CloneExtents =
+                    BuildCloneExtents(SourceLogicalOffset,
+                                      ActualLength)
 
-                Dim Extent = CloneExtents(Index)
-                Extent.AnchorId = 0
+                '
+                ' Source anchor identities are never cloned.
+                '
+                For Index = 0 To CloneExtents.Count - 1
 
-                CloneExtents(Index) = Extent
+                    Dim Extent = CloneExtents(Index)
+                    Extent.AnchorId = 0
 
-            Next
+                    CloneExtents(Index) = Extent
 
-            InsertExtentsCore(TargetLogicalOffset,
-                              CloneExtents,
-                              AnchorActionAtLogicalOffset)
+                Next
 
-            If HasOpenCheckpoint = False Then
-                PersistIndexAndHeader(_IndexOffset)
-            End If
+                InsertExtentsCore(TargetLogicalOffset,
+                                  CloneExtents,
+                                  AnchorActionAtLogicalOffset)
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+            Catch
+
+                _Faulted = True
+                Throw
+
+            End Try
 
 
         End Sub
@@ -2235,20 +2285,30 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
             If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
             If Length = 0 OrElse LogicalOffset >= _Length Then Return
 
-            InvalidateChunkCache()
+            Try
 
-            Dim ActualLength = Math.Min(Length, _Length - LogicalOffset)
+                InvalidateChunkCache()
 
-            RemoveRangeCore(LogicalOffset, ActualLength, True)
+                Dim ActualLength = Math.Min(Length, _Length - LogicalOffset)
 
-            If HasOpenCheckpoint = False Then
-                PersistIndexAndHeader(_IndexOffset)
-            End If
+                RemoveRangeCore(LogicalOffset, ActualLength, True)
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+            Catch
+
+                _Faulted = True
+                Throw
+
+            End Try
 
 
         End Sub
@@ -2308,6 +2368,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             If LogicalOffset < 0 OrElse LogicalOffset > _Length Then
                 Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
@@ -2323,19 +2384,28 @@ Namespace Streams
 
             If Count = 0 Then Return
 
-            InvalidateChunkCache()
+            Try
 
-            Dim NewExtents = BuildExtentsFromBuffer(Data,
-                                                    DataOffset,
-                                                    Count)
+                InvalidateChunkCache()
 
-            InsertExtentsCore(LogicalOffset,
-                              NewExtents,
-                              AnchorActionAtLogicalOffset)
+                Dim NewExtents = BuildExtentsFromBuffer(Data,
+                                                        DataOffset,
+                                                        Count)
 
-            If HasOpenCheckpoint = False Then
-                PersistIndexAndHeader(_IndexOffset)
-            End If
+                InsertExtentsCore(LogicalOffset,
+                                  NewExtents,
+                                  AnchorActionAtLogicalOffset)
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+            Catch
+
+                _Faulted = True
+                Throw
+
+            End Try
 
 
         End Sub
@@ -2364,6 +2434,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             If SourceLogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(SourceLogicalOffset))
             If CloneLength < 0 Then Throw New ArgumentOutOfRangeException(NameOf(CloneLength))
@@ -2371,16 +2442,25 @@ Namespace Streams
             If CloneLength = 0 Then Return
             If SourceLogicalOffset >= _Length Then Return
 
-            InvalidateChunkCache()
+            Try
 
-            Dim ActualLength = Math.Min(CloneLength, _Length - SourceLogicalOffset)
-            Dim CloneExtents = BuildCloneExtents(SourceLogicalOffset, ActualLength)
+                InvalidateChunkCache()
 
-            InsertExtentsCore(TargetLogicalOffset, CloneExtents)
+                Dim ActualLength = Math.Min(CloneLength, _Length - SourceLogicalOffset)
+                Dim CloneExtents = BuildCloneExtents(SourceLogicalOffset, ActualLength)
 
-            If HasOpenCheckpoint = False Then
-                PersistIndexAndHeader(_IndexOffset)
-            End If
+                InsertExtentsCore(TargetLogicalOffset, CloneExtents)
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+            Catch
+
+                _Faulted = True
+                Throw
+
+            End Try
 
 
         End Sub
@@ -2402,6 +2482,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             If LogicalOffset < 0 OrElse LogicalOffset > _Length Then
                 Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
@@ -2427,63 +2508,72 @@ Namespace Streams
                     "The clear range extends beyond the logical stream length.")
             End If
 
-            InvalidateChunkCache()
+            Try
 
-            If Options.StoreSparseChunks = False Then
+                InvalidateChunkCache()
 
-                Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
+                If Options.StoreSparseChunks = False Then
 
-                Dim Remaining = Count
-                Dim CurrentOffset = LogicalOffset
+                    Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
 
-                While Remaining > 0
+                    Dim Remaining = Count
+                    Dim CurrentOffset = LogicalOffset
 
-                    Dim ThisWrite =
-                        CInt(Math.Min(CLng(ZeroBuffer.Length),
-                                      Remaining))
+                    While Remaining > 0
 
-                    WriteCore(CurrentOffset,
-                          ZeroBuffer,
-                          0,
-                          ThisWrite)
+                        Dim ThisWrite =
+                            CInt(Math.Min(CLng(ZeroBuffer.Length),
+                                          Remaining))
 
-                    CurrentOffset += ThisWrite
-                    Remaining -= ThisWrite
+                        WriteCore(CurrentOffset,
+                              ZeroBuffer,
+                              0,
+                              ThisWrite)
 
-                End While
+                        CurrentOffset += ThisWrite
+                        Remaining -= ThisWrite
 
-            Else
+                    End While
 
-                Dim ReplacementExtents As New List(Of ExtentIndexEntry)()
+                Else
 
-                Dim Remaining = Count
+                    Dim ReplacementExtents As New List(Of ExtentIndexEntry)()
 
-                While Remaining > 0
+                    Dim Remaining = Count
 
-                    Dim SegmentLength =
-                        CInt(Math.Min(CLng(Options.ChunkSize),
-                                      Remaining))
+                    While Remaining > 0
 
-                    ReplacementExtents.Add(
-                        New ExtentIndexEntry With {
-                            .LogicalLength = SegmentLength,
-                            .PhysicalRecordId = SparsePhysicalRecordId,
-                            .PhysicalRecordOffset = 0
-                        })
+                        Dim SegmentLength =
+                            CInt(Math.Min(CLng(Options.ChunkSize),
+                                          Remaining))
 
-                    Remaining -= SegmentLength
+                        ReplacementExtents.Add(
+                            New ExtentIndexEntry With {
+                                .LogicalLength = SegmentLength,
+                                .PhysicalRecordId = SparsePhysicalRecordId,
+                                .PhysicalRecordOffset = 0
+                            })
 
-                End While
+                        Remaining -= SegmentLength
 
-                ReplaceRangeCore(LogicalOffset,
-                                 Count,
-                                 ReplacementExtents)
+                    End While
 
-            End If
+                    ReplaceRangeCore(LogicalOffset,
+                                     Count,
+                                     ReplacementExtents)
 
-            If HasOpenCheckpoint = False Then
-                PersistIndexAndHeader(_IndexOffset)
-            End If
+                End If
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+            Catch
+
+                _Faulted = True
+                Throw
+
+            End Try
 
 
         End Sub
@@ -2507,6 +2597,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             If LogicalOffset < 0 OrElse
                LogicalOffset > _Length Then
@@ -2528,46 +2619,55 @@ Namespace Streams
                     "The insert would exceed the maximum supported logical length.")
             End If
 
-            InvalidateChunkCache()
+            Try
 
-            If Options.StoreSparseChunks = False Then
+                InvalidateChunkCache()
 
-                Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
-                Dim Remaining = Count
-                Dim InsertOffset = LogicalOffset
-                Dim FirstInsert = True
+                If Options.StoreSparseChunks = False Then
 
-                While Remaining > 0
+                    Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
+                    Dim Remaining = Count
+                    Dim InsertOffset = LogicalOffset
+                    Dim FirstInsert = True
 
-                    Dim ThisInsert =
-                        CInt(Math.Min(CLng(ZeroBuffer.Length),
-                                      Remaining))
+                    While Remaining > 0
 
-                    InsertCore(InsertOffset,
-                           ZeroBuffer,
-                           0,
-                           ThisInsert,
-                           If(FirstInsert,
-                              AnchorActionAtLogicalOffset,
-                              AnchorActionsAtLogicalOffset.TransformAway))
+                        Dim ThisInsert =
+                            CInt(Math.Min(CLng(ZeroBuffer.Length),
+                                          Remaining))
 
-                    InsertOffset += ThisInsert
-                    Remaining -= ThisInsert
-                    FirstInsert = False
+                        InsertCore(InsertOffset,
+                               ZeroBuffer,
+                               0,
+                               ThisInsert,
+                               If(FirstInsert,
+                                  AnchorActionAtLogicalOffset,
+                                  AnchorActionsAtLogicalOffset.TransformAway))
 
-                End While
+                        InsertOffset += ThisInsert
+                        Remaining -= ThisInsert
+                        FirstInsert = False
 
-            Else
+                    End While
 
-                InsertSparseRange(LogicalOffset,
-                                  Count,
-                                  AnchorActionAtLogicalOffset)
+                Else
 
-                If HasOpenCheckpoint = False Then
-                    PersistIndexAndHeader(_IndexOffset)
+                    InsertSparseRange(LogicalOffset,
+                                      Count,
+                                      AnchorActionAtLogicalOffset)
+
+                    If HasOpenCheckpoint = False Then
+                        PersistIndexAndHeader(_IndexOffset)
+                    End If
+
                 End If
 
-            End If
+            Catch
+
+                _Faulted = True
+                Throw
+
+            End Try
 
 
         End Sub
@@ -2618,7 +2718,13 @@ Namespace Streams
                     CloseCheckpointCore(_CheckpointStack(_CheckpointStack.Count - 1))
                 End While
 
-                If Disposing AndAlso BaseStream IsNot Nothing AndAlso BaseStream.CanWrite Then
+                '
+                ' A faulted stream may hold half-applied in-memory state and must not
+                ' publish it; the last durably persisted generation stays authoritative.
+                ' Closing any open checkpoint above restores a consistent baseline and
+                ' clears the fault, so a checkpointed stream still persists its rollback.
+                '
+                If Disposing AndAlso BaseStream IsNot Nothing AndAlso BaseStream.CanWrite AndAlso _Faulted = False Then
                     PersistIndexAndHeader(_IndexOffset, True)
                     BaseStream.Flush()
                 End If
@@ -2744,6 +2850,17 @@ Namespace Streams
         Private Sub ThrowIfDisposed()
 
             If _Disposed Then Throw New ObjectDisposedException(GetType(ChunkedStream).FullName)
+
+        End Sub
+
+        Private Sub ThrowIfFaulted()
+
+            If _Faulted Then
+                Throw New InvalidOperationException(
+                    "The ChunkedStream faulted when an earlier operation threw partway through, so " &
+                    "its in-memory state may be inconsistent and no further changes will be persisted. " &
+                    "Dispose and reopen the stream, or roll back to a checkpoint created before the failure.")
+            End If
 
         End Sub
 

@@ -242,6 +242,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             If LogicalOffset < 0 OrElse LogicalOffset >= _Length Then
                 Throw New ArgumentOutOfRangeException(
@@ -254,40 +255,49 @@ Namespace Streams
                     $"An anchor already exists at logical offset {LogicalOffset}.")
             End If
 
-            SplitExtentAt(LogicalOffset)
+            Try
 
-            Dim ExtentIndex = FindExtentInsertIndex(LogicalOffset)
+                SplitExtentAt(LogicalOffset)
 
-            If ExtentIndex < 0 OrElse ExtentIndex >= _Extents.Count Then
-                Throw New InvalidDataException(
-                    $"No extent begins at logical offset {LogicalOffset}.")
-            End If
+                Dim ExtentIndex = FindExtentInsertIndex(LogicalOffset)
 
-            Dim Extent = _Extents(ExtentIndex)
+                If ExtentIndex < 0 OrElse ExtentIndex >= _Extents.Count Then
+                    Throw New InvalidDataException(
+                        $"No extent begins at logical offset {LogicalOffset}.")
+                End If
 
-            If Extent.LogicalOffset <> LogicalOffset Then
-                Throw New InvalidDataException(
-                    $"No extent begins at logical offset {LogicalOffset}.")
-            End If
+                Dim Extent = _Extents(ExtentIndex)
 
-            If Extent.AnchorId > 0 Then
-                Throw New InvalidOperationException(
-                    $"An anchor already exists at logical offset {LogicalOffset}.")
-            End If
+                If Extent.LogicalOffset <> LogicalOffset Then
+                    Throw New InvalidDataException(
+                        $"No extent begins at logical offset {LogicalOffset}.")
+                End If
 
-            Dim AnchorId = AllocateAnchorId()
+                If Extent.AnchorId > 0 Then
+                    Throw New InvalidOperationException(
+                        $"An anchor already exists at logical offset {LogicalOffset}.")
+                End If
 
-            Extent.AnchorId = AnchorId
-            _Extents(ExtentIndex) = Extent
+                Dim AnchorId = AllocateAnchorId()
 
-            RebuildAnchorIndex()
-            MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex)
+                Extent.AnchorId = AnchorId
+                _Extents(ExtentIndex) = Extent
 
-            If HasOpenCheckpoint = False Then
-                PersistIndexAndHeader(_IndexOffset)
-            End If
+                RebuildAnchorIndex()
+                MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex)
 
-            Return New Anchor(Me, AnchorId)
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+                Return New Anchor(Me, AnchorId)
+
+            Catch
+
+                _Faulted = True
+                Throw
+
+            End Try
 
 
         End Function
@@ -318,31 +328,41 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
-            Dim AnchorOffset = _Length
-            Dim AnchorId = AllocateAnchorId()
-            Dim NewExtents = BuildExtentsFromBuffer(Data, 0, Data.Length)
+            Try
 
-            If NewExtents.Count = 0 Then
-                Throw New InvalidOperationException(
-                    "No extents were created for the anchored data.")
-            End If
+                Dim AnchorOffset = _Length
+                Dim AnchorId = AllocateAnchorId()
+                Dim NewExtents = BuildExtentsFromBuffer(Data, 0, Data.Length)
 
-            Dim FirstExtent = NewExtents(0)
-            FirstExtent.AnchorId = AnchorId
-            NewExtents(0) = FirstExtent
+                If NewExtents.Count = 0 Then
+                    Throw New InvalidOperationException(
+                        "No extents were created for the anchored data.")
+                End If
 
-            InvalidateChunkCache()
+                Dim FirstExtent = NewExtents(0)
+                FirstExtent.AnchorId = AnchorId
+                NewExtents(0) = FirstExtent
 
-            InsertExtentsCore(AnchorOffset,
-                              NewExtents,
-                              AnchorActionsAtLogicalOffset.Use)
+                InvalidateChunkCache()
 
-            If HasOpenCheckpoint = False Then
-                PersistIndexAndHeader(_IndexOffset)
-            End If
+                InsertExtentsCore(AnchorOffset,
+                                  NewExtents,
+                                  AnchorActionsAtLogicalOffset.Use)
 
-            Return New Anchor(Me, AnchorId)
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+                Return New Anchor(Me, AnchorId)
+
+            Catch
+
+                _Faulted = True
+                Throw
+
+            End Try
 
 
         End Function
@@ -530,6 +550,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             Dim ExtentIndex As Integer
 
@@ -548,15 +569,24 @@ Namespace Streams
                     $"Anchor index mismatch for anchor {Anchor.AnchorId}.")
             End If
 
-            Extent.AnchorId = 0
-            _Extents(ExtentIndex) = Extent
+            Try
 
-            RebuildAnchorIndex()
-            MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex)
+                Extent.AnchorId = 0
+                _Extents(ExtentIndex) = Extent
 
-            If HasOpenCheckpoint = False Then
-                PersistIndexAndHeader(_IndexOffset)
-            End If
+                RebuildAnchorIndex()
+                MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex)
+
+                If HasOpenCheckpoint = False Then
+                    PersistIndexAndHeader(_IndexOffset)
+                End If
+
+            Catch
+
+                _Faulted = True
+                Throw
+
+            End Try
 
 
         End Sub
