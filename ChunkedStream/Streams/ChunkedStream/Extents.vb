@@ -502,7 +502,21 @@ Namespace Streams
 
             If Options.ExtentReclaimType <> ChunkedStreamOptions.ExtentReclaimTypes.Scan Then Return
             If HasOpenCheckpoint Then Return
-            If _PhysicalRecords.Count = 0 Then Return
+
+            ReclaimUnreferencedPhysicalRecords()
+
+        End Sub
+
+        '
+        ' Rebuilds the set of physical-record ids still pointed at by a live extent and
+        ' reclaims every physical record that no surviving extent references, returning the
+        ' number reclaimed. The extent table is treated as authoritative: a stored
+        ' reference count that disagrees with the scan is forced to zero before the record
+        ' is dropped. The caller is responsible for ensuring no checkpoint is open.
+        '
+        Private Function ReclaimUnreferencedPhysicalRecords() As Integer
+
+            If _PhysicalRecords.Count = 0 Then Return 0
 
             Dim ReferencedRecordIds As New HashSet(Of Long)()
 
@@ -535,7 +549,9 @@ Namespace Streams
 
             Next
 
-        End Sub
+            Return UnreferencedRecordIds.Count
+
+        End Function
 
         Private Sub SplitExtentAt(LogicalOffset As Long)
 

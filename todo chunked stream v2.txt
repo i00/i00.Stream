@@ -31,6 +31,19 @@ CORRECTNESS
       checked arithmetic) on a long run of 0xFF bytes. Cap it and throw InvalidDataException,
       the way Snappy already does (explicit caps + ULong accumulation).
 
+- C6  Orphaned physical-record leak (found 2026-08-28 via _Samples .../bin/Debug/Test.efs -
+      "Test - Cant be defragged.efs" is the preserved repro). That 370 MB stream held 4,389
+      physical-record entries with RefCount = 0 that NO extent references, scattered up to
+      offset ~387 M. Refcounts were all self-consistent and Validate() passed, so these were
+      not drift - the RefCount reclaim path (or a checkpoint commit/rollback around it) is
+      dropping records from the extent table without reclaiming the record entry. They pinned
+      _PhysicalDataEnd near EOF -> GetFragmentation reported 98% and Move/Sequence could not
+      shrink the file. Worked around by having Defragment (all modes) call the new
+      ReclaimUnreferencedPhysicalRecords() sweep first (Defrag.vb / Extents.vb), but the
+      accumulation path itself is still unfixed - reproduce it (checkpoint + overwrite +
+      commit/rollback workload) and fix at source. Consider folding the same
+      extent-table-authoritative sweep into Validate() or a repair entry point.
+
 - C5  ExtentReclaimType.Scan (WIP): ReclaimUnreferencedPhysicalRecordsByScan bails on
       HasOpenCheckpoint and is never re-run on commit/close, so a record that became
       unreferenced via a drifted count during a checkpoint leaks until the next non-checkpoint

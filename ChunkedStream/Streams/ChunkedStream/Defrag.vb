@@ -19,6 +19,7 @@
 '       physical records.
 '
 ' Design
+'   - Every mode first reclaims physical records that no live extent references.
 '   - Defragmentation operates directly on live physical records.
 '   - Physical record moves are journalled for crash recovery.
 '   - Rebuild uses rebuild recovery and publishes the rebuilt metadata before
@@ -95,6 +96,17 @@ Namespace Streams
             If HasActiveCheckpoint Then
                 Throw New InvalidOperationException("Defragmentation cannot be performed while a checkpoint is active.")
             End If
+
+            '
+            ' Drop any physical record that no live extent points at before compacting.
+            ' Move and Sequence only ever relocate referenced records, and the live
+            ' data end (which drives both the fragmentation figure and the trailing-space
+            ' trim) is derived from every entry in _PhysicalRecords, so orphaned records
+            ' left behind by an earlier edit would otherwise keep the stream fragmented
+            ' and its tail un-trimmed. Rebuild reconstructs the record set anyway; running
+            ' the sweep here first keeps every mode consistent.
+            '
+            ReclaimUnreferencedPhysicalRecords()
 
             InvalidateChunkCache()
             ClearFreeSpaceMap()

@@ -411,6 +411,116 @@ Namespace Tests
             End Sub
 
             ' ================================================================================
+            ' Storage reclamation
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Verifies that every defragmentation mode reclaims physical records that no
+            ''' live extent references, compacts the survivors and trims the freed tail.
+            ''' Regression test for Move and Sequence leaving a stream reported as almost
+            ''' fully fragmented, and its backing store un-trimmed, because the orphaned
+            ''' records kept the live-data end pinned near the end of the file.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DefragmentationReclaimsUnreferencedPhysicalRecords()
+
+                Const ChunkSize As Integer = 1024
+                Const ChunkCount As Integer = 24
+
+                For Each DefragType As ChunkedStream.DefragTypes In
+                    [Enum].GetValues(GetType(ChunkedStream.DefragTypes))
+
+                    Using Ms As New MemoryStream()
+
+                        Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                            .ChunkSize = ChunkSize
+                        }
+
+                        Dim Expected =
+                            GenerateRandomData(ChunkSize * ChunkCount, 15000 + CInt(DefragType))
+
+                        Using Cs = ChunkedStream.Open(Ms, Options)
+
+                            Cs.Write(0, Expected)
+
+                            '
+                            ' Drift every backing record's reference count upward so the
+                            ' following overwrite cannot reclaim it, then rewrite every
+                            ' chunk. The original records are now unreferenced but still
+                            ' occupy storage, and the replacement records are appended
+                            ' beyond them, so the live-data end - and the fragmentation
+                            ' figure - stay pinned near the end of the backing store.
+                            '
+                            For Each RecordId In Cs.GetStructure().Chunks.
+                                                    Where(Function(chunk) chunk.PhysicalRecordId.HasValue).
+                                                    Select(Function(chunk) chunk.PhysicalRecordId.Value).
+                                                    Distinct().
+                                                    ToList()
+
+                                Cs.Debug_CorruptPhysicalRecordMetadataRefCount(RecordId, 4096)
+
+                            Next
+
+                            For ChunkIndex = 0 To ChunkCount - 1
+
+                                Dim Replacement =
+                                    GenerateRandomData(ChunkSize, 15500 + ChunkIndex + CInt(DefragType))
+
+                                Cs.Write(ChunkIndex * ChunkSize, Replacement)
+                                Overlay(Expected, Replacement, ChunkIndex * ChunkSize)
+
+                            Next
+
+                            Dim BeforeFragmentation = Cs.GetFragmentation()
+
+                            AssertTrue(
+                                BeforeFragmentation > 0.25R,
+                                $"Test setup did not produce a fragmented stream. DefragType={DefragType}, Fragmentation={BeforeFragmentation}")
+
+                            Cs.Defragment(DefragType)
+
+                            Dim AfterFragmentation = Cs.GetFragmentation()
+
+                            AssertTrue(
+                                AfterFragmentation < 0.05R,
+                                $"Defragmentation did not reclaim the unreferenced records. DefragType={DefragType}, Before={BeforeFragmentation}, After={AfterFragmentation}")
+
+                            AssertBytesEqual(
+                                Expected,
+                                Cs.ToArray(),
+                                $"Defragmentation changed logical data. DefragType={DefragType}")
+
+                            Cs.Validate()
+
+                        End Using
+
+                        AssertTrue(
+                            Ms.Length < CLng(ChunkSize) * ChunkCount * 3L,
+                            $"Defragmentation did not trim the freed tail. DefragType={DefragType}, PhysicalLength={Ms.Length}")
+
+                        Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                            AssertEqual(
+                                ChunkedStream.RecoveryStates.None,
+                                Reopened.RecoveryStateAtOpen,
+                                $"Reopening a defragmented stream should not trigger recovery. DefragType={DefragType}")
+
+                            AssertBytesEqual(
+                                Expected,
+                                Reopened.ToArray(),
+                                $"Reopened stream lost data after defragmentation. DefragType={DefragType}")
+
+                            Reopened.Validate()
+
+                        End Using
+
+                    End Using
+
+                Next
+
+            End Sub
+
+            ' ================================================================================
             ' Checkpoint behaviour
             ' ================================================================================
 

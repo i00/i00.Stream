@@ -206,6 +206,7 @@ Partial Class EmbeddedFileSystemBrowserForm
         'tsiSearch
         '
         Me.tsiSearch.Alignment = System.Windows.Forms.ToolStripItemAlignment.Right
+        Me.tsiSearch.Font = New System.Drawing.Font("Segoe UI", 9.0!)
         Me.tsiSearch.Name = "tsiSearch"
         Me.tsiSearch.Size = New System.Drawing.Size(100, 25)
         '
@@ -231,19 +232,19 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.MenuTextSeparator2.BackColor = System.Drawing.SystemColors.Control
         Me.MenuTextSeparator2.ForeColor = System.Drawing.SystemColors.ControlText
         Me.MenuTextSeparator2.Name = "MenuTextSeparator2"
-        Me.MenuTextSeparator2.Size = New System.Drawing.Size(1707, 18)
+        Me.MenuTextSeparator2.Size = New System.Drawing.Size(3840, 18)
         Me.MenuTextSeparator2.Text = "Tools"
         '
         'tsiScan
         '
         Me.tsiScan.Name = "tsiScan"
-        Me.tsiScan.Size = New System.Drawing.Size(116, 22)
+        Me.tsiScan.Size = New System.Drawing.Size(180, 22)
         Me.tsiScan.Text = "&Scan"
         '
         'tsiDefrag
         '
         Me.tsiDefrag.Name = "tsiDefrag"
-        Me.tsiDefrag.Size = New System.Drawing.Size(116, 22)
+        Me.tsiDefrag.Size = New System.Drawing.Size(180, 22)
         Me.tsiDefrag.Text = "&Defrag"
         '
         'MenuTextSeparator1
@@ -252,24 +253,24 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.MenuTextSeparator1.BackColor = System.Drawing.SystemColors.Control
         Me.MenuTextSeparator1.ForeColor = System.Drawing.SystemColors.ControlText
         Me.MenuTextSeparator1.Name = "MenuTextSeparator1"
-        Me.MenuTextSeparator1.Size = New System.Drawing.Size(1707, 18)
+        Me.MenuTextSeparator1.Size = New System.Drawing.Size(3840, 18)
         Me.MenuTextSeparator1.Text = "Options"
         '
         'EncryptToolStripMenuItem1
         '
         Me.EncryptToolStripMenuItem1.Name = "EncryptToolStripMenuItem1"
-        Me.EncryptToolStripMenuItem1.Size = New System.Drawing.Size(116, 22)
+        Me.EncryptToolStripMenuItem1.Size = New System.Drawing.Size(180, 22)
         Me.EncryptToolStripMenuItem1.Text = "&Encrypt"
         '
         'ToolStripMenuItem1
         '
         Me.ToolStripMenuItem1.Name = "ToolStripMenuItem1"
-        Me.ToolStripMenuItem1.Size = New System.Drawing.Size(113, 6)
+        Me.ToolStripMenuItem1.Size = New System.Drawing.Size(177, 6)
         '
         'tsiExit
         '
         Me.tsiExit.Name = "tsiExit"
-        Me.tsiExit.Size = New System.Drawing.Size(116, 22)
+        Me.tsiExit.Size = New System.Drawing.Size(180, 22)
         Me.tsiExit.Text = "E&xit"
         '
         'EmbeddedFileSystemBrowserForm
