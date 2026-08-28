@@ -496,6 +496,11 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+
+            If _DeferPublishDepth > 0 Then
+                Throw New InvalidOperationException("ApplyOptions cannot be performed while metadata publishing is deferred.")
+            End If
+
             InvalidateChunkCache()
 
             Dim Result As New ApplyOptionsResult With {

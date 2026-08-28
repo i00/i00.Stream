@@ -95,6 +95,7 @@
     </Compile>
     <Compile Include="Tests\Core stream semantics\Foundation.vb" />
     <Compile Include="Tests\Core stream semantics\SparseStorage.vb" />
+    <Compile Include="Tests\Correctness and survival\DeferredPublish.vb" />
     <Compile Include="Tests\Correctness and survival\Durability.vb" />
     <Compile Include="Tests\Correctness and survival\Recovery.vb" />
     <Compile Include="Tests\Correctness and survival\Validation.vb" />

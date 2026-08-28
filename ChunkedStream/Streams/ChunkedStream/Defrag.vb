@@ -97,6 +97,10 @@ Namespace Streams
                 Throw New InvalidOperationException("Defragmentation cannot be performed while a checkpoint is active.")
             End If
 
+            If _DeferPublishDepth > 0 Then
+                Throw New InvalidOperationException("Defragmentation cannot be performed while metadata publishing is deferred.")
+            End If
+
             '
             ' Drop any physical record that no live extent points at before compacting.
             ' Move and Sequence only ever relocate referenced records, and the live

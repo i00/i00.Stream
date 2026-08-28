@@ -1944,7 +1944,7 @@ Namespace Streams
 
                 End If
 
-                If HasOpenCheckpoint = False Then
+                If MetadataPublishSuspended = False Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
 
@@ -1995,7 +1995,7 @@ Namespace Streams
 
                 End If
 
-                If HasOpenCheckpoint = False Then
+                If MetadataPublishSuspended = False Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
 
@@ -2163,7 +2163,7 @@ Namespace Streams
 
                 RebuildAnchorIndex()
 
-                If HasOpenCheckpoint = False Then
+                If MetadataPublishSuspended = False Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
 
@@ -2251,7 +2251,7 @@ Namespace Streams
                                   CloneExtents,
                                   AnchorActionAtLogicalOffset)
 
-                If HasOpenCheckpoint = False Then
+                If MetadataPublishSuspended = False Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
 
@@ -2299,7 +2299,7 @@ Namespace Streams
 
                 RemoveRangeCore(LogicalOffset, ActualLength, True)
 
-                If HasOpenCheckpoint = False Then
+                If MetadataPublishSuspended = False Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
 
@@ -2396,7 +2396,7 @@ Namespace Streams
                                   NewExtents,
                                   AnchorActionAtLogicalOffset)
 
-                If HasOpenCheckpoint = False Then
+                If MetadataPublishSuspended = False Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
 
@@ -2451,7 +2451,7 @@ Namespace Streams
 
                 InsertExtentsCore(TargetLogicalOffset, CloneExtents)
 
-                If HasOpenCheckpoint = False Then
+                If MetadataPublishSuspended = False Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
 
@@ -2564,7 +2564,7 @@ Namespace Streams
 
                 End If
 
-                If HasOpenCheckpoint = False Then
+                If MetadataPublishSuspended = False Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
 
@@ -2656,7 +2656,7 @@ Namespace Streams
                                       Count,
                                       AnchorActionAtLogicalOffset)
 
-                    If HasOpenCheckpoint = False Then
+                    If MetadataPublishSuspended = False Then
                         PersistIndexAndHeader(_IndexOffset)
                     End If
 
@@ -2688,6 +2688,20 @@ Namespace Streams
 
             ThrowIfDisposed()
 
+            '
+            ' Publish metadata a DeferPublish scope is holding back, so Flush is a real
+            ' durability point even mid-batch. A checkpoint's pending metadata stays with
+            ' the checkpoint - Flush must not partially commit it.
+            '
+            If _DeferPublishDepth > 0 AndAlso
+               HasOpenCheckpoint = False AndAlso
+               _Faulted = False AndAlso
+               BaseStream.CanWrite Then
+
+                PersistIndexAndHeader(_IndexOffset, True)
+
+            End If
+
             If BaseStream.CanWrite Then
                 BaseStream.Flush()
             End If
@@ -2717,6 +2731,12 @@ Namespace Streams
                 While _CheckpointStack.Count > 0
                     CloseCheckpointCore(_CheckpointStack(_CheckpointStack.Count - 1))
                 End While
+
+                '
+                ' Any DeferPublish scope still open is abandoned here; the publish below
+                ' flushes the metadata it was holding back.
+                '
+                _DeferPublishDepth = 0
 
                 '
                 ' A faulted stream may hold half-applied in-memory state and must not

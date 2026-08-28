@@ -86,6 +86,20 @@ CORRECTNESS
       Also saw _PhysicalDataEnd stale-high drift in the EFS run (PDE stuck ~2 MB after
       records deleted) - that's D6, pre-existing, made visible by the churn.
 
+- C8  [PRIMITIVE DONE 2026-08-28] ChunkedStream.DeferPublish() - a reference-counted
+      IDisposable that suspends the per-op PersistIndexAndHeader until the last scope
+      closes (no snapshot, no recovery journal; crash = reopen at last published gen +
+      orphan records that Defragment reclaims). This is the lever for the EFS write churn:
+      OpenFile takes a scope, Dispose releases it -> one publish per file instead of one
+      checkpoint commit per Write(). New file DeferredPublish.vb + 7 tests. Defragment /
+      ApplyOptions reject while a scope is open. Flush() publishes without ending the scope.
+      TODO - the EFS side is NOT done: FileStreamView needs a write buffer (~1 MB) so it's
+      one Insert per flush not per Write; WriteFile drops its checkpoint; a pending file's
+      length is derived from anchor geometry (nextAnchor.Offset - fileAnchor.Offset -
+      FileHeaderSize) in FinalizeFile and RecoverPending instead of an atomic SetEntryLength.
+      Then EFS holds a DeferPublish scope for the whole OpenFile..Dispose. See the "Tier 2"
+      discussion. D3's recursive-delete churn is the same fix (one scope around DeleteCore).
+
 - C5  ExtentReclaimType.Scan (WIP): ReclaimUnreferencedPhysicalRecordsByScan bails on
       HasOpenCheckpoint and is never re-run on commit/close, so a record that became
       unreferenced via a drifted count during a checkpoint leaks until the next non-checkpoint

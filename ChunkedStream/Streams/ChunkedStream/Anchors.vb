@@ -286,7 +286,7 @@ Namespace Streams
                 RebuildAnchorIndex()
                 MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex)
 
-                If HasOpenCheckpoint = False Then
+                If MetadataPublishSuspended = False Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
 
@@ -351,7 +351,7 @@ Namespace Streams
                                   NewExtents,
                                   AnchorActionsAtLogicalOffset.Use)
 
-                If HasOpenCheckpoint = False Then
+                If MetadataPublishSuspended = False Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
 
@@ -577,7 +577,7 @@ Namespace Streams
                 RebuildAnchorIndex()
                 MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex)
 
-                If HasOpenCheckpoint = False Then
+                If MetadataPublishSuspended = False Then
                     PersistIndexAndHeader(_IndexOffset)
                 End If
 
