@@ -31,18 +31,36 @@ CORRECTNESS
       checked arithmetic) on a long run of 0xFF bytes. Cap it and throw InvalidDataException,
       the way Snappy already does (explicit caps + ULong accumulation).
 
-- C6  Orphaned physical-record leak (found 2026-08-28 via _Samples .../bin/Debug/Test.efs -
-      "Test - Cant be defragged.efs" is the preserved repro). That 370 MB stream held 4,389
-      physical-record entries with RefCount = 0 that NO extent references, scattered up to
-      offset ~387 M. Refcounts were all self-consistent and Validate() passed, so these were
-      not drift - the RefCount reclaim path (or a checkpoint commit/rollback around it) is
-      dropping records from the extent table without reclaiming the record entry. They pinned
-      _PhysicalDataEnd near EOF -> GetFragmentation reported 98% and Move/Sequence could not
-      shrink the file. Worked around by having Defragment (all modes) call the new
-      ReclaimUnreferencedPhysicalRecords() sweep first (Defrag.vb / Extents.vb), but the
-      accumulation path itself is still unfixed - reproduce it (checkpoint + overwrite +
-      commit/rollback workload) and fix at source. Consider folding the same
-      extent-table-authoritative sweep into Validate() or a repair entry point.
+- C6  [FIXED 2026-08-28] Orphaned physical-record leak (found via _Samples .../bin/Debug/Test.efs;
+      "Test - Cant be defragged.efs" preserved as the repro). A 370 MB stream held 4,389
+      physical-record entries with RefCount = 0 that no extent referenced. Root cause: when a
+      record's refcount hit 0 during a checkpoint, DecrementPhysicalRecordRefCount parked it in
+      _PendingReclaimedPhysicalRecords; but (a) ReclaimPendingPhysicalRecords bailed on
+      `If HasOpenCheckpoint Then Return` and CommitCheckpointCore does not pop the checkpoint on
+      commit, so it NEVER ran, and (b) RestoreCheckpointState (called on every rollback AND on
+      dispose-of-a-committed-checkpoint) then DiscardPendingPhysicalRecordReclaims()'d the list.
+      So every CreateCheckpoint -> overwrite/delete -> Commit -> Dispose leaked every record the
+      edit freed. EmbeddedFileSystem wraps ~every mutation in a checkpoint, hence thousands.
+      Fix: guard is now `_CheckpointStack.Count > 1`; CommitCheckpointCore reclaims BEFORE the
+      durable publish + baseline capture; RestoreCheckpointState now REBUILDS the pending set
+      from the restored records (RefCount <= 0) instead of discarding it, so inner-checkpoint
+      frees survive to the outermost finalise. Tests: CheckpointCommitReclaimsFreedPhysicalRecords,
+      NestedCheckpointCommitsReclaimFreedPhysicalRecords,
+      OuterRollbackRestoresRecordsFreedByCommittedInnerCheckpoint (Transactions.vb). Defrag also
+      still sweeps unreferenced records first (Defrag.vb) as a backstop / to clean pre-existing
+      bad files.
+
+- C7  Backing file grows without bound under a pure-checkpoint workload (e.g. EmbeddedFileSystem
+      create/delete cycles: ~270 KB/cycle, frag -> 100%, never self-heals until Defragment).
+      GetNextWriteOffset force-appends every non-metadata write while HasOpenCheckpoint (so a
+      rollback = plain truncate; see AllocationInsideCheckpointDoesNotReuseCommittedHole), and
+      nothing compacts afterwards. Options: (a) give EmbeddedFileSystem a Compact() and/or call
+      Defragment(Move) every N mutations or on Dispose; (b) let in-checkpoint writes reuse holes
+      that were already free in the checkpoint's baseline snapshot AND matured past
+      HeaderCopyCount rotations - needs the AllocationInsideCheckpoint... invariant revisited to
+      confirm why it forbids this; (c) compact the trailing free run on outermost commit. This
+      is the larger remaining half of the Test.efs bloat (leak was ~123 MB of 388 MB; the rest
+      is holes).
 
 - C5  ExtentReclaimType.Scan (WIP): ReclaimUnreferencedPhysicalRecordsByScan bails on
       HasOpenCheckpoint and is never re-run on commit/close, so a record that became

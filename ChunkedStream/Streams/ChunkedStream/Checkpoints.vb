@@ -307,13 +307,21 @@ Namespace Streams
                 Return
             End If
 
+            '
+            ' Committing the outermost checkpoint makes every extent change made since it
+            ' opened permanent, so the physical records those changes left unreferenced can
+            ' finally be reclaimed. Do this before the durable publish and the baseline
+            ' capture so neither the on-disk metadata nor the restore point records the
+            ' dead entries.
+            '
+            ReclaimPendingPhysicalRecords()
+
             Dim CommitIndexOffset = Math.Max(BaseStream.Length, GetDataEndFromIndex())
 
             PersistIndexAndHeader(CommitIndexOffset, Durable)
 
             Checkpoint.State.Capture(Me)
 
-            ReclaimPendingPhysicalRecords()
             WriteCheckpointRecoveryState()
 
             Checkpoint.MarkCommitted()
@@ -391,7 +399,6 @@ Namespace Streams
             _FreeSpaces.RestoreSpaces(State.FreeSpaceSnapshot)
             _DeferredFreeRanges.Clear()
             If State.DeferredFreeRanges IsNot Nothing Then _DeferredFreeRanges.AddRange(State.DeferredFreeRanges)
-            DiscardPendingPhysicalRecordReclaims()
 
             _Length = State.LogicalLength
             _IndexOffset = State.IndexOffset
@@ -407,6 +414,14 @@ Namespace Streams
             For Each pair In State.PhysicalRecords
                 _PhysicalRecords(pair.Key) = pair.Value
             Next
+
+            '
+            ' Rebuild the deferred-reclaim set from the restored records rather than
+            ' discarding it: records an inner checkpoint left unreferenced before
+            ' committing into this one are still owed a reclaim once this checkpoint
+            ' finalises, and the restore must not resurrect them as leaked storage.
+            '
+            RebuildPendingPhysicalRecordReclaims()
 
             RebuildPhysicalRecordOrdinals()
             RebuildAnchorIndex()

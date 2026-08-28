@@ -463,7 +463,13 @@ Namespace Streams
 
         Private Sub ReclaimPendingPhysicalRecords()
 
-            If HasOpenCheckpoint Then Return
+            '
+            ' Reclaims are deferred while an outer checkpoint could still roll the freeing
+            ' edit back. This runs only when the outermost checkpoint is being finalised -
+            ' committed (stack depth 1) or closed (stack depth 0) - so a lingering inner
+            ' checkpoint is the only case that must still wait.
+            '
+            If _CheckpointStack.Count > 1 Then Return
 
             Dim Pending = _PendingReclaimedPhysicalRecords.ToArray()
 
@@ -486,6 +492,25 @@ Namespace Streams
         Private Sub DiscardPendingPhysicalRecordReclaims()
 
             _PendingReclaimedPhysicalRecords.Clear()
+
+        End Sub
+
+        '
+        ' Rebuilds the deferred-reclaim set from the physical-record table after a
+        ' checkpoint snapshot has been restored. A record an inner checkpoint left
+        ' unreferenced (RefCount 0) before committing into its parent is still pending
+        ' reclamation once the parent finalises; a record the restore brought back to a
+        ' positive reference count must not stay pending.
+        '
+        Private Sub RebuildPendingPhysicalRecordReclaims()
+
+            _PendingReclaimedPhysicalRecords.Clear()
+
+            For Each pair In _PhysicalRecords
+                If pair.Value.RefCount <= 0 Then
+                    _PendingReclaimedPhysicalRecords.Add(pair.Key)
+                End If
+            Next
 
         End Sub
 
