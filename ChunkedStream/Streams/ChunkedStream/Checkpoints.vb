@@ -274,9 +274,14 @@ Namespace Streams
 
             _CheckpointStack.Add(Checkpoint)
 
-            ' Only the outermost checkpoint owns the recovery state.
+            ' Only the outermost checkpoint owns the recovery state. Re-capture the rollback
+            ' baseline after that header write: its rotation can release a deferred freed
+            ' span into the free-space map, and the baseline - which RestoreCheckpointState
+            ' reloads when the checkpoint later closes - must include the release rather than
+            ' reverting it back into the deferred list.
             If _CheckpointStack.Count = 1 Then
                 WriteCheckpointRecoveryState()
+                Checkpoint.State.Capture(Me)
             End If
 
             Return Checkpoint
@@ -320,9 +325,17 @@ Namespace Streams
 
             PersistIndexAndHeader(CommitIndexOffset, Durable)
 
-            Checkpoint.State.Capture(Me)
-
             WriteCheckpointRecoveryState()
+
+            '
+            ' Capture the rollback baseline after the recovery-state header write so a
+            ' deferred span its rotation releases into the free-space map is part of the
+            ' snapshot, not reverted by the RestoreCheckpointState that runs when the
+            ' checkpoint closes. In a checkpoint-only workload nothing else rotates the
+            ' header between operations, so without this the space a commit frees never
+            ' becomes reusable until a Defragment.
+            '
+            Checkpoint.State.Capture(Me)
 
             Checkpoint.MarkCommitted()
 
@@ -347,6 +360,12 @@ Namespace Streams
 
             If _CheckpointStack.Count = 1 Then
                 WriteCheckpointRecoveryState()
+                '
+                ' Re-capture for the same reason as the commit and create paths: the
+                ' recovery-state rotation may release a deferred span, and the baseline must
+                ' carry it so a later close does not revert it.
+                '
+                Checkpoint.State.Capture(Me)
             End If
 
             Checkpoint.MarkRolledBack()

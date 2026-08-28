@@ -4,8 +4,6 @@ Chunk cache is one chunk only... Options.ReadCacheChunkCount = 1
 
 Test opening read only underlying streams ... both normally and with recovery pending (AllowOpeningWhenRecoveryFails)
 
-Does the hole allocator combine holes to free up space next to each other? ... e.g if I write data A and data B ... then delete data A and then B ... does the hole combine into one so the entire space can be allocated?
-
 Have a deep option for Validate() that decompresses/decrypts data
 
 Not sure about this:

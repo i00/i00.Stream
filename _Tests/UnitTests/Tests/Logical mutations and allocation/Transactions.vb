@@ -587,6 +587,164 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Verifies that a chunk record written inside a checkpoint reuses a matured
+            ''' free hole instead of always appending, so a large committed write into
+            ''' previously freed space does not grow the backing store.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CheckpointChunkWriteReusesFreeHole()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        ' Twelve chunks, then free the middle six, leaving a large hole.
+                        Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * 12, 1901))
+                        Cs.Remove(Cs.Options.ChunkSize * 3L, Cs.Options.ChunkSize * 6L)
+
+                        ' Rotate the header enough times to mature the freed span into the
+                        ' allocatable free-space map.
+                        For MatureIndex = 1 To 4
+                            Cs.Write(Cs.Length, GenerateRandomData(32, 1910 + MatureIndex))
+                        Next
+
+                        Dim Baseline = Cs.ToArray()
+                        Dim PhysicalBefore = Ms.Length
+                        Dim NewData = GenerateRandomData(Cs.Options.ChunkSize * 6, 1950)
+
+                        Using Checkpoint = Cs.CreateCheckpoint()
+                            Cs.Write(Cs.Length, NewData)
+                            Checkpoint.Commit()
+                        End Using
+
+                        AssertBytesEqual(
+                            Baseline.Concat(NewData).ToArray(),
+                            Cs.ToArray(),
+                            "In-checkpoint hole-filling write corrupted logical data.")
+
+                        AssertTrue(
+                            Ms.Length < PhysicalBefore + (NewData.Length \ 4),
+                            $"In-checkpoint write did not reuse the free hole: backing store grew from {PhysicalBefore:N0} to {Ms.Length:N0} for a {NewData.Length:N0}-byte write.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that rolling back a checkpoint whose chunk writes filled a free
+            ''' hole restores the pre-checkpoint data and returns the hole to the free map.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CheckpointHoleFillingWriteRolledBackRestoresState()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * 10, 2001))
+                        Cs.Remove(Cs.Options.ChunkSize * 3L, Cs.Options.ChunkSize * 4L)
+
+                        For MatureIndex = 1 To 4
+                            Cs.Write(Cs.Length, GenerateRandomData(32, 2010 + MatureIndex))
+                        Next
+
+                        Dim Baseline = Cs.ToArray()
+                        Dim NewData = GenerateRandomData(Cs.Options.ChunkSize * 4, 2050)
+
+                        Using Checkpoint = Cs.CreateCheckpoint()
+
+                            Cs.Write(Cs.Length, NewData)
+                            Checkpoint.Rollback()
+
+                            AssertBytesEqual(
+                                Baseline,
+                                Cs.ToArray(),
+                                "Rollback after an in-checkpoint hole-filling write did not restore data.")
+
+                        End Using
+
+                        AssertBytesEqual(
+                            Baseline,
+                            Cs.ToArray(),
+                            "Data changed after disposing the rolled-back checkpoint.")
+
+                        ' The hole is free again: a normal write reuses it and stays intact.
+                        Dim PhysicalBefore = Ms.Length
+                        Cs.Write(Cs.Length, NewData)
+
+                        AssertBytesEqual(
+                            Baseline.Concat(NewData).ToArray(),
+                            Cs.ToArray(),
+                            "Write into the hole freed by the rollback corrupted data.")
+
+                        AssertTrue(
+                            Ms.Length < PhysicalBefore + (NewData.Length \ 4),
+                            "Post-rollback write did not reuse the hole the rollback freed.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that abandoning (crashing) a checkpoint whose chunk writes filled a
+            ''' free hole recovers to the pre-checkpoint state on the next open, leaving the
+            ''' hole's overwritten bytes as harmless free space.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CheckpointHoleFillingWriteAbandonedRecoversToBaseline()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Cs = ChunkedStream.Open(Ms)
+
+                    Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * 10, 2101))
+                    Cs.Remove(Cs.Options.ChunkSize * 3L, Cs.Options.ChunkSize * 4L)
+
+                    For MatureIndex = 1 To 4
+                        Cs.Write(Cs.Length, GenerateRandomData(32, 2110 + MatureIndex))
+                    Next
+
+                    Dim Baseline = Cs.ToArray()
+
+                    Dim AbandonedCheckpoint = Cs.CreateCheckpoint()
+                    Cs.Write(Cs.Length, GenerateRandomData(Cs.Options.ChunkSize * 4, 2150))
+
+                    GC.KeepAlive(AbandonedCheckpoint)
+                    Cs = Nothing
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+
+                        AssertEqual(
+                            ChunkedStream.RecoveryStates.CheckpointActive,
+                            Reopened.RecoveryStateAtOpen,
+                            "Expected checkpoint recovery state at open.")
+
+                        AssertBytesEqual(
+                            Baseline,
+                            Reopened.ToArray(),
+                            "Checkpoint recovery did not roll back the in-checkpoint hole-filling write.")
+
+                        Reopened.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
             ' ================================================================================
             ' Clone / insert / remove transactional behaviour
             ' ================================================================================

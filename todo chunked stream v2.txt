@@ -50,17 +50,41 @@ CORRECTNESS
       still sweeps unreferenced records first (Defrag.vb) as a backstop / to clean pre-existing
       bad files.
 
-- C7  Backing file grows without bound under a pure-checkpoint workload (e.g. EmbeddedFileSystem
-      create/delete cycles: ~270 KB/cycle, frag -> 100%, never self-heals until Defragment).
-      GetNextWriteOffset force-appends every non-metadata write while HasOpenCheckpoint (so a
-      rollback = plain truncate; see AllocationInsideCheckpointDoesNotReuseCommittedHole), and
-      nothing compacts afterwards. Options: (a) give EmbeddedFileSystem a Compact() and/or call
-      Defragment(Move) every N mutations or on Dispose; (b) let in-checkpoint writes reuse holes
-      that were already free in the checkpoint's baseline snapshot AND matured past
-      HeaderCopyCount rotations - needs the AllocationInsideCheckpoint... invariant revisited to
-      confirm why it forbids this; (c) compact the trailing free run on outermost commit. This
-      is the larger remaining half of the Test.efs bloat (leak was ~123 MB of 388 MB; the rest
-      is holes).
+- C7  [PARTLY ADDRESSED 2026-08-28] In-checkpoint chunk writes now reuse free holes.
+      Shipped: (1) GetNextWriteOffset no longer force-appends chunk records while a
+      checkpoint is open - they run the normal BestFit/FirstFit hole search (the *Scan
+      rebuild stays disabled mid-checkpoint: it would count a checkpoint-deleted record as
+      free). Safe: a rollback/crash reloads the pre-checkpoint durable generation, which
+      does not reference the hole, so the bytes are harmless free space; a commit publishes
+      metadata that makes them live. (2) FreeSpaceAllocator.TryAllocate gains a MinOffset;
+      in-checkpoint metadata is confined to holes >= the outermost checkpoint mark so small
+      metadata pages don't fragment the big pre-checkpoint holes. (3) Checkpoint.State is
+      captured AFTER WriteCheckpointRecoveryState in create/commit/rollback so the deferred
+      span that header rotation releases survives the close-time RestoreCheckpointState -
+      previously, in a checkpoint-only workload nothing else rotated the header so freed
+      space never re-entered _FreeSpaces until a Defragment. Tests: Transactions.vb
+      CheckpointChunkWriteReusesFreeHole / CheckpointHoleFillingWriteRolledBackRestoresState
+      / ...AbandonedRecoversToBaseline; Allocation.vb
+      CheckpointChunkAllocationPreservesDataUnderEveryPolicy (replaces the obsolete
+      AllocationInsideCheckpointDoesNotReuseCommittedHole). Verified: 2 MB write into a
+      freed 2 MB hole inside a checkpoint grows the file ~23 KB (metadata) instead of 2 MB.
+      205/205 + fuzzer green.
+
+      STILL NOT FIXED - the EFS create/delete cycle (~280 KB/cycle): that workload's growth
+      is METADATA PAGE CHURN, not chunk placement. Every EFS op is its own checkpoint commit
+      and each relocates ~2-4 dirty ~8 KB paged-metadata pages (COW; adding a record shifts
+      ordinals and dirties every later page). With the new policy the file records DO reuse
+      the deleted-file holes, but the relocated metadata now pure-appends (it can't fill a
+      hole below the mark) and _IndexOffset (commit sets it to Math.Max(BaseStream.Length,
+      dataEnd)) ratchets up to swallow it - net growth unchanged for THAT workload. Kris is
+      removing checkpoints from EmbeddedFileSystem entirely (PendingFile state + crash
+      cleanup detection instead), which sidesteps it. Remaining levers if EFS growth still
+      bites: (a) cut the number of metadata relocations - write an unchanged-size dirty page
+      in place once aged past HeaderCopyCount rotations; narrow the dirty-page set; (b) batch
+      EFS sub-ops under one checkpoint (D3); (c) EFS Compact() / auto-Defragment.
+
+      Also saw _PhysicalDataEnd stale-high drift in the EFS run (PDE stuck ~2 MB after
+      records deleted) - that's D6, pre-existing, made visible by the churn.
 
 - C5  ExtentReclaimType.Scan (WIP): ReclaimUnreferencedPhysicalRecordsByScan bails on
       HasOpenCheckpoint and is never re-run on commit/close, so a record that became

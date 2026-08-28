@@ -334,11 +334,12 @@ Namespace Tests
             ' ================================================================================
 
             ''' <summary>
-            ''' Verifies that allocation inside a checkpoint does not reuse committed holes,
-            ''' even when a hole-filling allocation policy is selected.
+            ''' Verifies that chunk allocation inside a checkpoint preserves logical data
+            ''' under every placement policy, whether the checkpoint reuses a free hole or
+            ''' appends, and whether it is committed or rolled back.
             ''' </summary>
             <UnitTester.SimpleTest()>
-            Public Shared Sub AllocationInsideCheckpointDoesNotReuseCommittedHole()
+            Public Shared Sub CheckpointChunkAllocationPreservesDataUnderEveryPolicy()
 
                 For Each Policy As ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies In
                     [Enum].GetValues(GetType(ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies))
@@ -351,54 +352,47 @@ Namespace Tests
 
                         Using Cs = ChunkedStream.Open(Ms, Options)
 
-                            For ChunkIndex = 0 To 3
+                            ' Eight chunks, then free the middle two and mature the hole.
+                            Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * 8, 6000 + CInt(Policy)))
+                            Cs.Remove(Cs.Options.ChunkSize * 3L, Cs.Options.ChunkSize * 2L)
 
-                                Cs.Write(
-                                    CLng(ChunkIndex) * CLng(Cs.Options.ChunkSize),
-                                    GeneratePatternData(
-                                        Cs.Options.ChunkSize,
-                                        6000 + ChunkIndex))
-
+                            For MatureIndex = 1 To 4
+                                Cs.Write(Cs.Length, GenerateRandomData(32, 6100 + MatureIndex))
                             Next
 
-                            Dim OriginalChunk1Offset =
-                                Cs.
-                                GetStructure().
-                                Chunks.
-                                Single(Function(chunk) chunk.Index = 1).
-                                PhysicalOffset.
-                                Value
+                            Dim Baseline = Cs.ToArray()
+                            Dim NewData = GenerateRandomData(Cs.Options.ChunkSize * 2, 6200 + CInt(Policy))
 
-                            Cs.Write(
-                                Cs.Options.ChunkSize,
-                                GeneratePatternData(
-                                    Cs.Options.ChunkSize,
-                                    7001))
-
+                            ' Rollback: the in-checkpoint write is fully undone.
                             Using Checkpoint = Cs.CreateCheckpoint()
-
-                                Cs.Write(
-                                    Cs.Options.ChunkSize * 4L,
-                                    GeneratePatternData(
-                                        Cs.Options.ChunkSize,
-                                        7004))
-
-                                Dim DuringCheckpoint =
-                                    Cs.GetStructure()
-
-                                Dim Chunk4 =
-                                    DuringCheckpoint.
-                                    Chunks.
-                                    Single(Function(chunk) chunk.Index = 4)
-
-                                AssertTrue(
-                                    Chunk4.PhysicalOffset.Value <> OriginalChunk1Offset,
-                                    $"Checkpoint allocation should not reuse committed chunk hole. Policy={Policy}")
-
+                                Cs.Write(Cs.Length, NewData)
+                                Checkpoint.Rollback()
                             End Using
+
+                            AssertBytesEqual(
+                                Baseline,
+                                Cs.ToArray(),
+                                $"Rollback of an in-checkpoint chunk write changed data. Policy={Policy}")
 
                             Cs.Validate()
 
+                            ' Commit: the in-checkpoint write is kept, data intact.
+                            Using Checkpoint = Cs.CreateCheckpoint()
+                                Cs.Write(Cs.Length, NewData)
+                                Checkpoint.Commit()
+                            End Using
+
+                            AssertBytesEqual(
+                                Baseline.Concat(NewData).ToArray(),
+                                Cs.ToArray(),
+                                $"Commit of an in-checkpoint chunk write changed data. Policy={Policy}")
+
+                            Cs.Validate()
+
+                        End Using
+
+                        Using Reopened = ChunkedStream.Open(Ms, Options)
+                            Reopened.Validate()
                         End Using
 
                     End Using

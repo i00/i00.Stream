@@ -166,8 +166,13 @@ Namespace Streams
             ''' reorganised by changing this value. Use Defragment to actively compact or reorder
             ''' existing records.
             '''
-            ''' When a checkpoint is active, ChunkedStream always uses append behaviour to preserve
-            ''' checkpoint rollback and crash-recovery semantics.
+            ''' While a checkpoint is active a chunk record may still be written into a known free
+            ''' hole: a rollback or crash reloads the pre-checkpoint durable state, which does not
+            ''' reference that hole, so the write becomes harmless unreferenced bytes there. The
+            ''' scan policies do not rebuild the free-space map while a checkpoint is open (that
+            ''' would count a record the checkpoint deleted as free), and new metadata pages are
+            ''' kept in the scratch region above the checkpoint mark. Set
+            ''' <see cref="NewWriteLocationPolicies.Append"/> for pure append behaviour.
             ''' </remarks>
             Public Property NewChunkWriteLocationPolicy As NewWriteLocationPolicies = NewWriteLocationPolicies.BestFit
 

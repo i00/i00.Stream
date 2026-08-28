@@ -63,6 +63,17 @@ Namespace Streams
 
             Public Function TryAllocate(RequiredLength As Long, FromStart As Boolean, ByRef Offset As Long) As Boolean
 
+                Return TryAllocate(RequiredLength, FromStart, 0, Offset)
+
+            End Function
+
+            '
+            ' MinOffset restricts the search to holes that begin at or after it, so an
+            ' in-checkpoint metadata write can be confined to the scratch region above the
+            ' checkpoint mark.
+            '
+            Public Function TryAllocate(RequiredLength As Long, FromStart As Boolean, MinOffset As Long, ByRef Offset As Long) As Boolean
+
                 If RequiredLength <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(RequiredLength))
 
                 Dim SelectedOffset As Long = -1
@@ -70,6 +81,7 @@ Namespace Streams
 
                 For Each pair In _SpacesByOffset
 
+                    If pair.Key < MinOffset Then Continue For
                     If pair.Value < RequiredLength Then Continue For
 
                     If FromStart Then
@@ -419,9 +431,7 @@ Namespace Streams
                 Return Offset
             End If
 
-            If IsMetadata = False AndAlso HasOpenCheckpoint Then
-                Return Math.Max(Math.Max(BaseStream.Length, GetDataEndFromIndex()), _IndexOffset)
-            End If
+            Dim InCheckpoint = HasOpenCheckpoint
 
             Select Case Policy
 
@@ -437,8 +447,17 @@ Namespace Streams
                         Return Offset
                     End If
 
-                    If Policy = ChunkedStreamOptions.NewWriteLocationPolicies.BestFitScan OrElse
-                       Policy = ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan Then
+                    '
+                    ' The scan variants rebuild the free-space map from the live layout when
+                    ' the known holes cannot satisfy the request. That rebuild is unsafe
+                    ' while a checkpoint is open - BuildFreeSpaceMapCore counts a record the
+                    ' checkpoint just deleted (reference count zero, reclaim deferred to
+                    ' commit) as free, and a rollback still needs its bytes - so a
+                    ' checkpointed write considers only the holes already known.
+                    '
+                    If InCheckpoint = False AndAlso
+                       (Policy = ChunkedStreamOptions.NewWriteLocationPolicies.BestFitScan OrElse
+                        Policy = ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan) Then
                         BuildFreeSpaceMapCore()
                         If TryAllocateSafeSpace(Length, IsMetadata, True, Offset) Then
                             Return Offset
@@ -458,7 +477,23 @@ Namespace Streams
 
             Dim CandidateOffset As Long
 
-            While _FreeSpaces.TryAllocate(Length, FromStart, CandidateOffset)
+            '
+            ' While a checkpoint is open, new metadata is kept in the scratch region at or
+            ' above the outermost checkpoint mark. A rollback or crash reloads the
+            ' pre-checkpoint durable state and truncates there, so a metadata page written
+            ' below the mark could overwrite one that state still needs; staying above the
+            ' mark also leaves the larger pre-checkpoint holes intact for chunk records.
+            ' Chunk records themselves may fill any safe hole - a rollback simply leaves
+            ' their bytes as unreferenced free space, and a crash reloads a generation that
+            ' never pointed into the hole.
+            '
+            Dim MinOffset As Long = 0
+
+            If IsMetadata AndAlso HasOpenCheckpoint Then
+                MinOffset = _CheckpointStack(0).State.PhysicalLength
+            End If
+
+            While _FreeSpaces.TryAllocate(Length, FromStart, MinOffset, CandidateOffset)
 
                 Dim IsSafe = If(IsMetadata,
                                 IsRangeSafeForMetadata(CandidateOffset, Length),
