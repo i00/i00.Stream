@@ -93,24 +93,31 @@
       <DependentUpon>Settings.settings</DependentUpon>
       <DesignTimeSharedInput>True</DesignTimeSharedInput>
     </Compile>
-    <Compile Include="Tests\Core stream semantics\Foundation.vb" />
-    <Compile Include="Tests\Core stream semantics\SparseStorage.vb" />
-    <Compile Include="Tests\Correctness and survival\DeferredPublish.vb" />
-    <Compile Include="Tests\Correctness and survival\Durability.vb" />
-    <Compile Include="Tests\Correctness and survival\Recovery.vb" />
-    <Compile Include="Tests\Correctness and survival\Validation.vb" />
-    <Compile Include="Tests\Developer confidence\Diagnostics.vb" />
-    <Compile Include="Tests\Developer confidence\Hardening.vb" />
-    <Compile Include="Tests\Developer confidence\Visualization.vb" />
-    <Compile Include="Tests\Logical mutations and allocation\Allocation.vb" />
-    <Compile Include="Tests\Logical mutations and allocation\Anchors.vb" />
-    <Compile Include="Tests\Logical mutations and allocation\CopyOnWrite.vb" />
-    <Compile Include="Tests\Logical mutations and allocation\ExtentOperations.vb" />
-    <Compile Include="Tests\Logical mutations and allocation\Transactions.vb" />
-    <Compile Include="Tests\Physical layout operations\Defragmentation.vb" />
-    <Compile Include="Tests\Storage representation policies\Compression.vb" />
-    <Compile Include="Tests\Storage representation policies\Encryption.vb" />
-    <Compile Include="Tests\Storage representation policies\PolicyMigration.vb" />
+    <Compile Include="Tests\Chunked Stream\Core stream semantics\Foundation.vb" />
+    <Compile Include="Tests\Chunked Stream\Core stream semantics\PositionedStream.vb" />
+    <Compile Include="Tests\Chunked Stream\Core stream semantics\SparseStorage.vb" />
+    <Compile Include="Tests\Chunked Stream\Correctness and survival\CrashSafety.vb" />
+    <Compile Include="Tests\Chunked Stream\Correctness and survival\DeferredPublish.vb" />
+    <Compile Include="Tests\Chunked Stream\Correctness and survival\Durability.vb" />
+    <Compile Include="Tests\Chunked Stream\Correctness and survival\Recovery.vb" />
+    <Compile Include="Tests\Chunked Stream\Correctness and survival\Validation.vb" />
+    <Compile Include="Tests\Chunked Stream\Developer confidence\Concurrency.vb" />
+    <Compile Include="Tests\Chunked Stream\Developer confidence\Diagnostics.vb" />
+    <Compile Include="Tests\Chunked Stream\Developer confidence\Hardening.vb" />
+    <Compile Include="Tests\Chunked Stream\Developer confidence\Visualization.vb" />
+    <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\Allocation.vb" />
+    <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\Anchors.vb" />
+    <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\CopyOnWrite.vb" />
+    <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\ExtentOperations.vb" />
+    <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\Transactions.vb" />
+    <Compile Include="Tests\Chunked Stream\Physical layout operations\Defragmentation.vb" />
+    <Compile Include="Tests\Chunked Stream\Storage representation policies\Compression.vb" />
+    <Compile Include="Tests\Chunked Stream\Storage representation policies\CompressionCodecs.vb" />
+    <Compile Include="Tests\Chunked Stream\Storage representation policies\Encryption.vb" />
+    <Compile Include="Tests\Chunked Stream\Storage representation policies\PolicyMigration.vb" />
+    <Compile Include="Tests\Embedded File System\EmbeddedFileSystemBasics.vb" />
+    <Compile Include="Tests\Embedded File System\EmbeddedFileSystemFileStreams.vb" />
+    <Compile Include="Tests\Embedded File System\EmbeddedFileSystemRecovery.vb" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="My Project\Resources.resx">

@@ -516,6 +516,79 @@ Namespace Tests
 
             End Sub
 
+            ' ================================================================================
+            ' In-window hole reuse
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Verifies that when a DeferPublish scope overwrites data - freeing one physical
+            ''' record and reusing a pre-existing hole for the replacement - abandoning the
+            ''' scope restores the pre-scope data, returns the hole to the free map, and leaves
+            ''' no live physical record overlapping a reused span. This is the path where the
+            ''' free-space snapshot is load-bearing for correctness.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DeferPublishHoleFillingWriteAbandonedDoesNotOverlapLiveRecords()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        ' Ten chunks, free the middle four, then mature the freed span into
+                        ' the allocatable free-space map with a few header rotations.
+                        Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * 10, 8001))
+                        Cs.Remove(Cs.Options.ChunkSize * 3L, Cs.Options.ChunkSize * 4L)
+
+                        For MatureIndex = 1 To 4
+                            Cs.Write(Cs.Length, GenerateRandomData(32, 8010 + MatureIndex))
+                        Next
+
+                        Dim Baseline = Cs.ToArray()
+
+                        Using Scope = Cs.DeferPublish()
+
+                            ' Overwrite an existing chunk (frees its record) and append more
+                            ' data - both allocations may draw on the matured hole.
+                            Cs.Write(Cs.Options.ChunkSize * 1L,
+                                     GenerateRandomData(Cs.Options.ChunkSize, 8050))
+                            Cs.Write(Cs.Length,
+                                     GenerateRandomData(Cs.Options.ChunkSize * 4, 8060))
+
+                            ' No Scope.Publish() - dispose rolls the batch back.
+
+                        End Using
+
+                        AssertBytesEqual(
+                            Baseline,
+                            Cs.ToArray(),
+                            "Abandoning the DeferPublish scope did not restore the pre-scope data.")
+
+                        ' Validate walks every live record and fails on any overlap, so this
+                        ' catches a reused span that was not returned to the free map.
+                        Cs.Validate()
+
+                        ' The hole is usable again: a normal write reuses it and stays intact.
+                        Dim PhysicalBefore = Ms.Length
+                        Dim NewData = GenerateRandomData(Cs.Options.ChunkSize * 4, 8090)
+                        Cs.Write(Cs.Length, NewData)
+
+                        AssertBytesEqual(
+                            Baseline.Concat(NewData).ToArray(),
+                            Cs.ToArray(),
+                            "Write into the hole freed by the rollback corrupted data.")
+
+                        AssertTrue(
+                            Ms.Length < PhysicalBefore + (NewData.Length \ 4),
+                            "Post-rollback write did not reuse the hole the rollback freed.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

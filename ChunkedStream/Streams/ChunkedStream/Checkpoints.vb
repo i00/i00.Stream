@@ -433,8 +433,15 @@ Namespace Streams
             _Length = State.LogicalLength
             _IndexOffset = State.IndexOffset
             _HeaderFlags = State.HeaderFlags
-            _NextPhysicalRecordId = State.NextPhysicalRecordId
-            _NextAnchorId = State.NextAnchorId
+
+            '
+            ' The next-id allocators only ever move forward. A checkpoint that issued ids
+            ' and then rolled back must not hand those same ids out again - an anchor id in
+            ' particular is a stable external handle - so take the higher of the current
+            ' and captured values rather than the captured one.
+            '
+            _NextPhysicalRecordId = Math.Max(_NextPhysicalRecordId, State.NextPhysicalRecordId)
+            _NextAnchorId = Math.Max(_NextAnchorId, State.NextAnchorId)
 
             _Extents.Clear()
             _Extents.AddRange(State.Extents)

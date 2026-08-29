@@ -400,6 +400,58 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Verifies that a healthy stream on a read-only backing store opens for reading,
+            ''' reports itself as not writable, serves reads / diagnostics / validation, and
+            ''' rejects a write attempt.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ReadOnlyBackingStreamOpensForReadingOnly()
+
+                Dim Bytes As Byte()
+                Dim Expected As Byte()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+                        Expected = GenerateRandomData(Cs.Options.ChunkSize * 5, 1801)
+                        Cs.Write(0, Expected)
+                        Cs.Validate()
+                    End Using
+
+                    Bytes = Ms.ToArray()
+
+                End Using
+
+                Using ReadOnlyStream As New MemoryStream(Bytes, False)
+
+                    Using Cs = ChunkedStream.Open(ReadOnlyStream)
+
+                        AssertFalse(Cs.CanWrite, "A stream on a read-only backing store must report CanWrite = False.")
+                        AssertTrue(Cs.CanRead, "The stream should still be readable.")
+
+                        AssertEqual(
+                            ChunkedStream.RecoveryStates.None,
+                            Cs.RecoveryStateAtOpen,
+                            "A healthy stream should not be pending recovery.")
+
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Read-only stream returned the wrong data.")
+
+                        Dim Snapshot = Cs.GetStructure()
+                        AssertTrue(Snapshot.AllocatedChunkCount > 0, "Expected allocated chunks in the diagnostic snapshot.")
+
+                        Cs.Validate()
+
+                        AssertThrows(Of NotSupportedException)(
+                            Sub() Cs.Write(0, New Byte(15) {}),
+                            "Writing to a read-only backing store should throw.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

@@ -230,7 +230,16 @@ Namespace Compression
         Private Shared Function ReadExtendedLength(Input As Byte(),
                                                    ByRef InputIndex As Integer) As Integer
 
-            Dim Length = 0
+            '
+            ' Accumulate in a Long. A match length can legitimately exceed the compressed
+            ' block size (an RLE run copies from already-decompressed output), so the only
+            ' safe upper bound here is Integer.MaxValue - anything larger cannot be a valid
+            ' literal or match length. Accumulating in a Long keeps a corrupt run of 0xFF
+            ' continuation bytes from overflowing an Integer, which would otherwise surface
+            ' as an OverflowException rather than the InvalidDataException every other
+            ' malformed-block path throws.
+            '
+            Dim Length As Long = 0
 
             While True
                 If InputIndex >= Input.Length Then Throw New InvalidDataException("Invalid LZ4 extended length.")
@@ -240,10 +249,12 @@ Namespace Compression
 
                 Length += Value
 
+                If Length > Integer.MaxValue Then Throw New InvalidDataException("Invalid LZ4 extended length.")
+
                 If Value <> 255 Then Exit While
             End While
 
-            Return Length
+            Return CInt(Length)
 
         End Function
 

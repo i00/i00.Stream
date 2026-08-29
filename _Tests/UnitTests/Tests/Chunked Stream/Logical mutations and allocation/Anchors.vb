@@ -814,6 +814,102 @@ Namespace Tests
 
 #End Region
 
+#Region "Anchor id allocator"
+
+            ''' <summary>
+            ''' Verifies that an anchor id issued inside a checkpoint is not handed out again
+            ''' after the checkpoint is rolled back. The allocator must stay monotonic across
+            ''' rollback so a stale Anchor handle can never resolve to unrelated data.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub AnchorIdIsNotReusedAfterCheckpointRollback()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(
+                            0,
+                            GeneratePatternData(4096, 1))
+
+                        Dim RolledBackId As Long
+
+                        Using Checkpoint = Cs.CreateCheckpoint()
+
+                            Dim InnerAnchor = Cs.CreateAnchor(1000)
+                            RolledBackId = InnerAnchor.AnchorId
+
+                            Checkpoint.Rollback()
+
+                            AssertFalse(
+                                InnerAnchor.IsValid,
+                                "The anchor created inside the checkpoint should be invalid after rollback.")
+
+                        End Using
+
+                        Dim AfterAnchor = Cs.CreateAnchor(2000)
+
+                        AssertNotEqual(
+                            RolledBackId,
+                            AfterAnchor.AnchorId,
+                            "An anchor id issued inside a rolled-back checkpoint was reused.")
+
+                        AssertTrue(
+                            AfterAnchor.AnchorId > RolledBackId,
+                            "Anchor ids must keep increasing across a checkpoint rollback.")
+
+                        Dim StaleHandle As ChunkedStream.Anchor = Nothing
+
+                        AssertFalse(
+                            Cs.TryGetAnchor(RolledBackId, StaleHandle),
+                            "The rolled-back anchor id must not resolve to the newly created anchor.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies the same monotonic-allocator guarantee for a DeferPublish scope that
+            ''' issues an anchor id and is then abandoned without publishing.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub AnchorIdIsNotReusedAfterDeferPublishRollback()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(
+                            0,
+                            GeneratePatternData(4096, 2))
+
+                        Dim RolledBackId As Long
+
+                        Using Scope = Cs.DeferPublish()
+                            RolledBackId = Cs.CreateAnchor(1500).AnchorId
+                            ' No Scope.Publish() - the scope rolls back on dispose.
+                        End Using
+
+                        Dim AfterAnchor = Cs.CreateAnchor(2500)
+
+                        AssertTrue(
+                            AfterAnchor.AnchorId > RolledBackId,
+                            "An anchor id issued inside an abandoned DeferPublish scope was reused.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+#End Region
+
         End Class
 
     End Class

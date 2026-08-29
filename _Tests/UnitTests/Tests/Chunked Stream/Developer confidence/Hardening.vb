@@ -41,7 +41,7 @@ Namespace Tests
                             Dim Operation =
                                 Rng.Next(
                                     0,
-                                    If(Checkpoints.Count = 0, 10, 8))
+                                    If(Checkpoints.Count = 0, 14, 11))
 
                             Select Case Operation
 
@@ -61,30 +61,42 @@ Namespace Tests
                                     FuzzClone(Cs, Model, Rng)
 
                                 Case 5
+                                    FuzzReplace(Cs, Model, Rng)
+
+                                Case 6
+                                    FuzzClear(Cs, Model, Rng)
+
+                                Case 7
+                                    FuzzInsertNullBytes(Cs, Model, Rng)
+
+                                Case 8
                                     Checkpoints.Push(
                                         New FuzzCheckpoint With {
                                             .Checkpoint = Cs.CreateCheckpoint(),
                                             .ModelSnapshot = Model.ToArray()
                                         })
 
-                                Case 6
+                                Case 9
                                     If Checkpoints.Count > 0 Then
                                         Dim Top = Checkpoints.Pop()
                                         Top.Checkpoint.Commit()
                                         Top.Checkpoint.Dispose()
                                     End If
 
-                                Case 7
+                                Case 10
                                     If Checkpoints.Count > 0 Then
                                         Dim Top = Checkpoints.Pop()
                                         Top.Checkpoint.Dispose()
                                         Model = New List(Of Byte)(Top.ModelSnapshot)
                                     End If
 
-                                Case 8
+                                Case 11
+                                    FuzzDeferPublishBurst(Cs, Model, Rng)
+
+                                Case 12
                                     FuzzApplyOptions(Cs, Rng)
 
-                                Case 9
+                                Case 13
                                     FuzzDefrag(Cs, Rng)
 
                             End Select
@@ -300,6 +312,83 @@ Namespace Tests
                             ChunkedStream.ApplyOptionTypes.Sparseness)
 
                 End Select
+
+            End Sub
+
+            Private Shared Sub FuzzReplace(Cs As ChunkedStream,
+                                           ByRef Model As List(Of Byte),
+                                           Rng As Random)
+
+                If Model.Count = 0 Then Return
+
+                Dim Offset = Rng.Next(0, Model.Count)
+                Dim RemoveLength = Rng.Next(0, Math.Min(1024, Model.Count - Offset) + 1)
+                Dim Data = MakeRandomBytes(Rng, Rng.Next(0, 1025))
+
+                Cs.Replace(Offset, RemoveLength, Data)
+
+                Model.RemoveRange(Offset, RemoveLength)
+                Model.InsertRange(Offset, Data)
+
+            End Sub
+
+            Private Shared Sub FuzzClear(Cs As ChunkedStream,
+                                         ByRef Model As List(Of Byte),
+                                         Rng As Random)
+
+                If Model.Count = 0 Then Return
+
+                Dim Offset = Rng.Next(0, Model.Count)
+                Dim Length = Rng.Next(1, Math.Min(1024, Model.Count - Offset) + 1)
+
+                Cs.Clear(Offset, Length)
+
+                For Index = 0 To Length - 1
+                    Model(Offset + Index) = 0
+                Next
+
+            End Sub
+
+            Private Shared Sub FuzzInsertNullBytes(Cs As ChunkedStream,
+                                                   ByRef Model As List(Of Byte),
+                                                   Rng As Random)
+
+                Dim Offset = Rng.Next(0, Model.Count + 1)
+                Dim Length = Rng.Next(1, 1025)
+
+                Cs.InsertNullBytes(Offset, Length)
+                Model.InsertRange(Offset, New Byte(Length - 1) {})
+
+            End Sub
+
+            Private Shared Sub FuzzDeferPublishBurst(Cs As ChunkedStream,
+                                                    ByRef Model As List(Of Byte),
+                                                    Rng As Random)
+
+                Using Scope = Cs.DeferPublish()
+
+                    Dim BurstLength = Rng.Next(2, 7)
+
+                    For BurstIndex = 1 To BurstLength
+
+                        Select Case Rng.Next(0, 5)
+                            Case 0
+                                FuzzWrite(Cs, Model, Rng)
+                            Case 1
+                                FuzzInsert(Cs, Model, Rng)
+                            Case 2
+                                FuzzRemove(Cs, Model, Rng)
+                            Case 3
+                                FuzzReplace(Cs, Model, Rng)
+                            Case 4
+                                FuzzClear(Cs, Model, Rng)
+                        End Select
+
+                    Next
+
+                    Scope.Publish()
+
+                End Using
 
             End Sub
 

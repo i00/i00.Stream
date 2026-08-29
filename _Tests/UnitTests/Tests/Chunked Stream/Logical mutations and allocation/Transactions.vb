@@ -866,6 +866,92 @@ Namespace Tests
 
             End Sub
 
+            ' ================================================================================
+            ' LIFO ordering and lifetime
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Verifies that committing or rolling back a checkpoint that is not the top of
+            ''' the stack throws rather than corrupting the nesting.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CheckpointOperationsOutOfLifoOrderThrow()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize, 4101))
+
+                        Dim Outer = Cs.CreateCheckpoint()
+                        Dim Inner = Cs.CreateCheckpoint()
+
+                        Try
+
+                            AssertThrows(Of InvalidOperationException)(
+                                Sub() Outer.Commit(),
+                                "Committing the outer checkpoint while an inner one is open should throw.")
+
+                            AssertThrows(Of InvalidOperationException)(
+                                Sub() Outer.Rollback(),
+                                "Rolling back the outer checkpoint while an inner one is open should throw.")
+
+                            AssertThrows(Of InvalidOperationException)(
+                                Sub() Outer.Dispose(),
+                                "Disposing the outer checkpoint while an inner one is open should throw.")
+
+                            AssertTrue(Inner.IsActive, "The inner checkpoint should still be active.")
+                            AssertTrue(Outer.IsActive, "The outer checkpoint should still be active.")
+
+                        Finally
+
+                            Inner.Dispose()
+                            Outer.Dispose()
+
+                        End Try
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that a checkpoint cannot be committed or rolled back after it has
+            ''' been disposed.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DisposedCheckpointCannotBeCommittedOrRolledBack()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize, 4102))
+
+                        Dim Checkpoint = Cs.CreateCheckpoint()
+                        Checkpoint.Dispose()
+
+                        AssertFalse(Checkpoint.IsActive, "A disposed checkpoint must not report as active.")
+
+                        AssertThrows(Of InvalidOperationException)(
+                            Sub() Checkpoint.Commit(),
+                            "Committing a disposed checkpoint should throw.")
+
+                        AssertThrows(Of InvalidOperationException)(
+                            Sub() Checkpoint.Rollback(),
+                            "Rolling back a disposed checkpoint should throw.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

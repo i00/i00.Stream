@@ -155,6 +155,86 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Verifies that once every chunk has been rewritten as unencrypted, the file
+            ''' master key and its header wrapping are actually removed - not just unused -
+            ''' and the stream reopens with no encryption information.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub EncryptionRemovalClearsWrappedMasterKey()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Key = MakeKey(2152)
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(Key)
+                    }
+
+                    Dim Expected As Byte()
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Expected = GenerateRandomData(Cs.Options.ChunkSize * 6, 2151)
+                        Cs.Write(0, Expected)
+
+                        AssertTrue(
+                            Cs.GetStructure().HasWrappedFileMasterKey,
+                            "The encrypted stream should have a wrapped file master key.")
+
+                        Cs.Options.EncryptionInfo = Nothing
+                        Cs.ApplyOptions(ChunkedStream.ApplyOptionTypes.Encryption)
+
+                        Dim After = Cs.GetStructure()
+
+                        AssertFalse(
+                            After.HasFileMasterKey,
+                            "The file master key should be gone after every chunk was rewritten unencrypted.")
+
+                        AssertFalse(
+                            After.HasWrappedFileMasterKey,
+                            "The wrapped file master key should be cleared from the header.")
+
+                        AssertEqual(
+                            0,
+                            After.EncryptedChunkCount,
+                            "No encrypted chunks should remain.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                    ' Reopening with the old key must now fail - the wrapping is gone.
+                    Using WronglyKeyed As New MemoryStream(Ms.ToArray())
+
+                        AssertThrows(Of ChunkedStream.EncryptionMismatchException)(
+                            Sub()
+                                Using Reopened = ChunkedStream.Open(
+                                    WronglyKeyed,
+                                    New ChunkedStream.ChunkedStreamOptions With {
+                                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(Key)
+                                    })
+                                End Using
+                            End Sub,
+                            "Opening the de-encrypted stream with the old key should be rejected.")
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+
+                        AssertBytesEqual(
+                            Expected,
+                            Reopened.ToArray(),
+                            "De-encrypted data did not survive reopen without a key.")
+
+                        Reopened.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
             ' ================================================================================
             ' Sparse migration
             ' ================================================================================
