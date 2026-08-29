@@ -86,19 +86,36 @@ CORRECTNESS
       Also saw _PhysicalDataEnd stale-high drift in the EFS run (PDE stuck ~2 MB after
       records deleted) - that's D6, pre-existing, made visible by the churn.
 
-- C8  [PRIMITIVE DONE 2026-08-28] ChunkedStream.DeferPublish() - a reference-counted
-      IDisposable that suspends the per-op PersistIndexAndHeader until the last scope
-      closes (no snapshot, no recovery journal; crash = reopen at last published gen +
-      orphan records that Defragment reclaims). This is the lever for the EFS write churn:
-      OpenFile takes a scope, Dispose releases it -> one publish per file instead of one
-      checkpoint commit per Write(). New file DeferredPublish.vb + 7 tests. Defragment /
-      ApplyOptions reject while a scope is open. Flush() publishes without ending the scope.
-      TODO - the EFS side is NOT done: FileStreamView needs a write buffer (~1 MB) so it's
-      one Insert per flush not per Write; WriteFile drops its checkpoint; a pending file's
-      length is derived from anchor geometry (nextAnchor.Offset - fileAnchor.Offset -
-      FileHeaderSize) in FinalizeFile and RecoverPending instead of an atomic SetEntryLength.
-      Then EFS holds a DeferPublish scope for the whole OpenFile..Dispose. See the "Tier 2"
-      discussion. D3's recursive-delete churn is the same fix (one scope around DeleteCore).
+- C8  [DONE 2026-08-28] ChunkedStream.DeferPublish() As DeferPublishScope - reference-
+      counted (not stacked); only the outermost scope captures a CheckpointState snapshot
+      and owns the outcome. Scope.Publish() -> PersistIndexAndHeader now + re-baseline the
+      snapshot; a nested Publish() is ignored. Disposing the outermost scope WITHOUT a
+      Publish() -> RestoreCheckpointState(snapshot): tables rolled back, window records
+      truncated, _Faulted cleared, stream stays USABLE (not faulted). Disposing after a
+      clean Publish() with nothing dirtied since does no work - no RestoreCheckpointState,
+      no MarkAllMetadataPagesDirty - which is what keeps a burst of small ops from bloating
+      the file. Difference from a checkpoint: no per-op recovery-state header, and the
+      published-close path is a no-op. Flush() mid-scope publishes durably AND re-baselines
+      the snapshot (can't un-flush). DisposeCore rolls back a leaked unpublished scope.
+      Defragment / ApplyOptions / CreateCheckpoint all reject while a scope is open. A
+      DeferPublish scope opened INSIDE a checkpoint is inert (publish already suspended;
+      no publish, no rollback - the checkpoint owns it). DeferredPublish.vb + 12 tests
+      (Correctness and survival/DeferredPublish.vb). 217/217 + fuzzer.
+
+      EFS side wired (EmbeddedFileSystem.vb, still UNCOMMITTED as of 2026-08-28):
+      CreateDirectory / CreateFile / DeleteCore / SetFileLength / WriteFile(grow) /
+      RecoverPendingFiles each: Using Scope = ChunkedStream.DeferPublish() ...
+      Scope.Publish(). FileStreamView keeps its 4 MB write buffer but holds NO long-lived
+      scope - each buffer drain goes through WriteFile which self-publishes (one durable
+      step per ~4 MB, no cross-operation coupling). No checkpoints left in EFS.
+      Benchmark (425 files / 40 dirs / 51.7 MB): file 55.7 MB / 1.7% frag after populate;
+      delete-half then recreate ~27 MB grows the file only ~1 MB (deleted holes reused),
+      frag 9%. Crash tests (kill mid-batch, no dispose): reopen clean, each CreateFile is
+      its own published unit, Flush is a real durable point, RecoverPendingFiles finalizes
+      to the flushed geometry. NOT done: the Tier 2 anchor-geometry length recovery
+      (nextAnchor.Offset - fileAnchor.Offset - FileHeaderSize) - a crashed pending file
+      still reports its last SetEntryLength value, which now tracks per-drain so it is the
+      last flushed length, not 0.
 
 - C5  ExtentReclaimType.Scan (WIP): ReclaimUnreferencedPhysicalRecordsByScan bails on
       HasOpenCheckpoint and is never re-run on commit/close, so a record that became

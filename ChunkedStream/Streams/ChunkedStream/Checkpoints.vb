@@ -270,6 +270,17 @@ Namespace Streams
             ThrowIfDisposed()
             ThrowIfFaulted()
 
+            '
+            ' A checkpoint inside a DeferPublish scope would have to publish durably on
+            ' commit while the scope still expects to roll back to its opening snapshot,
+            ' so the two do not nest this way. A DeferPublish scope inside a checkpoint is
+            ' allowed - it simply defers to the checkpoint and neither publishes nor rolls
+            ' back on its own.
+            '
+            If _DeferPublishDepth > 0 Then
+                Throw New InvalidOperationException("A checkpoint cannot be created while metadata publishing is deferred.")
+            End If
+
             Dim Checkpoint = New ChunkedStreamCheckpoint(Me, _CheckpointStack.Count + 1)
 
             _CheckpointStack.Add(Checkpoint)

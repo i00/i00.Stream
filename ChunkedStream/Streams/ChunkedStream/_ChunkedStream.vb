@@ -2700,6 +2700,13 @@ Namespace Streams
 
                 PersistIndexAndHeader(_IndexOffset, True)
 
+                '
+                ' The batch is now durable, so it becomes the rollback baseline: a later
+                ' abandon of the scope reverts to this Flush, not to where the scope
+                ' opened. A Flush cannot be undone.
+                '
+                If _DeferPublishState IsNot Nothing Then _DeferPublishState.Capture(Me)
+
             End If
 
             If BaseStream.CanWrite Then
@@ -2733,10 +2740,13 @@ Namespace Streams
                 End While
 
                 '
-                ' Any DeferPublish scope still open is abandoned here; the publish below
-                ' flushes the metadata it was holding back.
+                ' Close any DeferPublish scope still open. A scope that was published
+                ' rolls its post-publish edits, if any, into the publish below; a scope
+                ' that never published is rolled back to its snapshot.
                 '
-                _DeferPublishDepth = 0
+                While _DeferPublishDepth > 0
+                    EndDeferPublish()
+                End While
 
                 '
                 ' A faulted stream may hold half-applied in-memory state and must not

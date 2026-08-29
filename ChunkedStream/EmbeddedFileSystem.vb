@@ -129,11 +129,11 @@ Namespace Streams
                 ValidateName(Name)
                 Dim Parent = GetDirectory(ParentDirectoryAnchorId)
                 EnsureNameAvailable(Parent, Name)
-                Using Checkpoint = ChunkedStream.CreateCheckpoint()
+                Using Scope = ChunkedStream.DeferPublish()
                     Dim Data = BuildDirectory(Parent.AnchorId)
                     Dim Child = ChunkedStream.CreateAnchor(Data)
                     AppendEntry(Parent, New ContentListEntry(EntryTypes.Directory, Child.AnchorId, Data.LongLength, Name))
-                    Checkpoint.Commit()
+                    Scope.Publish()
                     Return Child.AnchorId
                 End Using
             End SyncLock
@@ -146,10 +146,10 @@ Namespace Streams
                 ValidateName(Name)
                 Dim Parent = GetDirectory(ParentDirectoryAnchorId)
                 EnsureNameAvailable(Parent, Name)
-                Using Checkpoint = ChunkedStream.CreateCheckpoint()
+                Using Scope = ChunkedStream.DeferPublish()
                     Dim Child = ChunkedStream.CreateAnchor(BuildFile(Parent.AnchorId))
                     AppendEntry(Parent, New ContentListEntry(If(CreateAsPending, EntryTypes.PendingFile, EntryTypes.File), Child.AnchorId, 0, Name))
-                    Checkpoint.Commit()
+                    Scope.Publish()
                     Return Child.AnchorId
                 End Using
             End SyncLock
@@ -200,7 +200,11 @@ Namespace Streams
         Public Function RecoverPendingFiles(Optional Action As PendingFileRecoveryActions = PendingFileRecoveryActions.Finalize) As Integer
             SyncLock _SyncRoot
                 ThrowIfDisposed()
-                Return RecoverPending(_Root, Action, New HashSet(Of Long)())
+                Using Scope = ChunkedStream.DeferPublish()
+                    Dim Result = RecoverPending(_Root, Action, New HashSet(Of Long)())
+                    Scope.Publish()
+                    Return Result
+                End Using
             End SyncLock
         End Function
 
@@ -290,7 +294,7 @@ Namespace Streams
         Private Sub DeleteCore(Location As EntryLocation)
             If Location.Entry.ChildAnchorId = _Root.AnchorId Then Throw New InvalidOperationException("The root cannot be removed.")
             If _OpenFileIds.Contains(Location.Entry.ChildAnchorId) Then Throw New IOException("The file is open.")
-            Using Checkpoint = ChunkedStream.CreateCheckpoint()
+            Using Scope = ChunkedStream.DeferPublish()
                 Dim Child = GetAnchor(Location.Entry.ChildAnchorId)
                 Dim ChildType = ReadType(Child)
                 If ChildType = DataType.Directory Then
@@ -306,7 +310,7 @@ Namespace Streams
                                       FileHeaderSize + Location.Entry.LengthOfDataAtEntry)
                 RemoveEntry(Location)
                 ChunkedStream.Remove(Child.Offset, StoredLength)
-                Checkpoint.Commit()
+                Scope.Publish()
             End Using
         End Sub
 
@@ -466,7 +470,13 @@ Namespace Streams
                     ChunkedStream.Write(FileAnchor.Offset + FileHeaderSize + Position, Data, Offset, Count)
                     Return
                 End If
-                Using Checkpoint = ChunkedStream.CreateCheckpoint()
+
+                '
+                ' The file grows. The data write and the entry-length update are folded
+                ' into one metadata publish. If anything throws before the publish the
+                ' grow is rolled back and the entry stays PendingFile for recovery.
+                '
+                Using Scope = ChunkedStream.DeferPublish()
                     If Position > OldLength Then ChunkedStream.InsertNullBytes(FileAnchor.Offset + FileHeaderSize + OldLength, Position - OldLength)
                     Dim Existing = CInt(Math.Min(CLng(Count), Math.Max(0L, OldLength - Position)))
                     If Existing > 0 Then ChunkedStream.Write(FileAnchor.Offset + FileHeaderSize + Position, Data, Offset, Existing)
@@ -477,7 +487,7 @@ Namespace Streams
                         ChunkedStream.Insert(FileAnchor.Offset + FileHeaderSize + Math.Max(OldLength, Position), Tail)
                     End If
                     SetEntryLength(Location, NewEnd)
-                    Checkpoint.Commit()
+                    Scope.Publish()
                 End Using
             End SyncLock
         End Sub
@@ -487,14 +497,14 @@ Namespace Streams
                 Dim Location = GetFileLocation(FileAnchor)
                 Dim OldLength = Location.Entry.LengthOfDataAtEntry
                 If Length = OldLength Then Return
-                Using Checkpoint = ChunkedStream.CreateCheckpoint()
+                Using Scope = ChunkedStream.DeferPublish()
                     If Length > OldLength Then
                         ChunkedStream.InsertNullBytes(FileAnchor.Offset + FileHeaderSize + OldLength, Length - OldLength)
                     Else
                         ChunkedStream.Remove(FileAnchor.Offset + FileHeaderSize + Length, OldLength - Length)
                     End If
                     SetEntryLength(Location, Length)
-                    Checkpoint.Commit()
+                    Scope.Publish()
                 End Using
             End SyncLock
         End Sub
@@ -550,14 +560,38 @@ Namespace Streams
         Private NotInheritable Class FileStreamView
             Inherits Stream
 
+            Private Const WriteBufferFlushThreshold As Integer = 4 * 1024 * 1024
+
             Private ReadOnly _Owner As EmbeddedFileSystem
             Private ReadOnly _Anchor As ChunkedStream.Anchor
+            Private ReadOnly _WriteBuffer As New MemoryStream()
             Private _Position As Long
             Private _Disposed As Boolean
 
             Public Sub New(Owner As EmbeddedFileSystem, Anchor As ChunkedStream.Anchor)
                 _Owner = Owner
                 _Anchor = Anchor
+            End Sub
+
+            '
+            ' Sequential appends past the current end are buffered and materialised in one
+            ' Insert per few MB, so each Insert lands full chunk records instead of growing
+            ' the file's tail chunk one small write at a time (the latter frees an
+            ' intermediate record for every write and is the main source of EFS bloat).
+            ' Each drain is published by WriteFile as one durable step. Anything else - a
+            ' random-access write, a read, a seek, a length query - drains the buffer first.
+            '
+            Private ReadOnly Property BufferedEndPosition As Long
+                Get
+                    Return _Owner.GetFileLength(_Anchor) + _WriteBuffer.Length
+                End Get
+            End Property
+
+            Private Sub DrainWriteBuffer()
+                If _WriteBuffer.Length = 0 Then Return
+                Dim Tail = _WriteBuffer.ToArray()
+                _WriteBuffer.SetLength(0)
+                _Owner.WriteFile(_Anchor, _Owner.GetFileLength(_Anchor), Tail, 0, Tail.Length)
             End Sub
 
             Public Overrides ReadOnly Property CanRead As Boolean
@@ -578,7 +612,7 @@ Namespace Streams
             Public Overrides ReadOnly Property Length As Long
                 Get
                     CheckDisposed()
-                    Return _Owner.GetFileLength(_Anchor)
+                    Return BufferedEndPosition
                 End Get
             End Property
             Public Overrides Property Position As Long
@@ -595,11 +629,13 @@ Namespace Streams
 
             Public Overrides Sub Flush()
                 CheckDisposed()
+                DrainWriteBuffer()
                 _Owner.ChunkedStream.Flush()
             End Sub
 
             Public Overrides Function Read(Data As Byte(), Offset As Integer, Count As Integer) As Integer
                 CheckDisposed()
+                DrainWriteBuffer()
                 Dim Result = _Owner.ReadFile(_Anchor, _Position, Data, Offset, Count)
                 _Position += Result
                 Return Result
@@ -607,12 +643,22 @@ Namespace Streams
 
             Public Overrides Sub Write(Data As Byte(), Offset As Integer, Count As Integer)
                 CheckDisposed()
+
+                If _Position = BufferedEndPosition Then
+                    _WriteBuffer.Write(Data, Offset, Count)
+                    _Position += Count
+                    If _WriteBuffer.Length >= WriteBufferFlushThreshold Then DrainWriteBuffer()
+                    Return
+                End If
+
+                DrainWriteBuffer()
                 _Owner.WriteFile(_Anchor, _Position, Data, Offset, Count)
                 _Position += Count
             End Sub
 
             Public Overrides Function Seek(Offset As Long, Origin As SeekOrigin) As Long
                 CheckDisposed()
+                DrainWriteBuffer()
                 Dim Result = If(Origin = SeekOrigin.Begin, Offset,
                                 If(Origin = SeekOrigin.Current, _Position + Offset,
                                    If(Origin = SeekOrigin.End, Length + Offset, Long.MinValue)))
@@ -624,6 +670,7 @@ Namespace Streams
             Public Overrides Sub SetLength(Value As Long)
                 CheckDisposed()
                 If Value < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Value))
+                DrainWriteBuffer()
                 _Owner.SetFileLength(_Anchor, Value)
                 If _Position > Value Then _Position = Value
             End Sub
@@ -634,7 +681,11 @@ Namespace Streams
 
             Protected Overrides Sub Dispose(Disposing As Boolean)
                 If _Disposed Then Return
-                If Disposing Then _Owner.CloseFile(_Anchor.AnchorId)
+                If Disposing Then
+                    DrainWriteBuffer()
+                    _WriteBuffer.Dispose()
+                    _Owner.CloseFile(_Anchor.AnchorId)
+                End If
                 _Disposed = True
                 MyBase.Dispose(Disposing)
             End Sub

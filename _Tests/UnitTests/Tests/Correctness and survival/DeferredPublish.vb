@@ -16,7 +16,7 @@ Namespace Tests
 
             ''' <summary>
             ''' Verifies that operations performed while a DeferPublish scope is open do not
-            ''' publish metadata, and that a single publish happens when the scope closes.
+            ''' publish metadata, and that Publish folds them into a single publish.
             ''' </summary>
             <UnitTester.SimpleTest()>
             Public Shared Sub DeferPublishFoldsWritesIntoOneMetadataPublish()
@@ -41,11 +41,13 @@ Namespace Tests
                                 Cs.GetStructure().HeaderSequence,
                                 "Metadata was published while a DeferPublish scope was open.")
 
-                        End Using
+                            Scope.Publish()
 
-                        AssertTrue(
-                            Cs.GetStructure().HeaderSequence > SequenceBefore,
-                            "Closing the DeferPublish scope did not publish the batched metadata.")
+                            AssertTrue(
+                                Cs.GetStructure().HeaderSequence > SequenceBefore,
+                                "Publish did not publish the batched metadata.")
+
+                        End Using
 
                         Cs.Validate()
 
@@ -60,8 +62,8 @@ Namespace Tests
             End Sub
 
             ''' <summary>
-            ''' Verifies that data written inside a DeferPublish scope survives closing the
-            ''' scope, closing the stream and reopening it.
+            ''' Verifies that data written inside a published DeferPublish scope survives
+            ''' closing the scope, closing the stream and reopening it.
             ''' </summary>
             <UnitTester.SimpleTest()>
             Public Shared Sub DeferPublishedDataSurvivesReopen()
@@ -76,6 +78,7 @@ Namespace Tests
                                 Dim Count = Math.Min(4096, Expected.Length - Offset)
                                 Cs.Write(Offset, Expected, Offset, Count)
                             Next
+                            Scope.Publish()
                         End Using
                         AssertBytesEqual(Expected, Cs.ToArray(), "Deferred-publish data was lost before reopen.")
                         Cs.Validate()
@@ -84,7 +87,7 @@ Namespace Tests
                     Using Reopened = ChunkedStream.Open(Ms)
                         AssertBytesEqual(Expected, Reopened.ToArray(), "Deferred-publish data did not survive reopen.")
                         AssertEqual(ChunkedStream.RecoveryStates.None, Reopened.RecoveryStateAtOpen,
-                                    "A cleanly closed DeferPublish scope should not trigger recovery.")
+                                    "A cleanly published DeferPublish scope should not trigger recovery.")
                         Reopened.Validate()
                     End Using
 
@@ -93,19 +96,23 @@ Namespace Tests
             End Sub
 
             ''' <summary>
-            ''' Verifies that Flush publishes the pending metadata without ending the
-            ''' suspension.
+            ''' Verifies that Flush publishes the pending metadata as a durable point without
+            ''' ending the suspension, and that work after the Flush is still published by a
+            ''' later Publish.
             ''' </summary>
             <UnitTester.SimpleTest()>
-            Public Shared Sub DeferPublishFlushPublishesWithoutEndingScope()
+            Public Shared Sub DeferPublishFlushIsADurablePointMidScope()
 
                 Using Ms As New MemoryStream()
+
+                    Dim First = GenerateRandomData(ChunkedStream.DefaultChunkSize, 301)
+                    Dim Second = GenerateRandomData(ChunkedStream.DefaultChunkSize, 302)
 
                     Using Cs = ChunkedStream.Open(Ms)
 
                         Using Scope = Cs.DeferPublish()
 
-                            Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize, 301))
+                            Cs.Write(0, First)
                             Dim BeforeFlush = Cs.GetStructure().HeaderSequence
 
                             Cs.Flush()
@@ -113,11 +120,62 @@ Namespace Tests
                             Dim AfterFlush = Cs.GetStructure().HeaderSequence
                             AssertTrue(AfterFlush > BeforeFlush, "Flush did not publish the pending metadata.")
 
-                            Cs.Write(Cs.Options.ChunkSize, GenerateRandomData(Cs.Options.ChunkSize, 302))
+                            Cs.Write(CLng(First.Length), Second)
                             AssertEqual(AfterFlush, Cs.GetStructure().HeaderSequence,
                                         "A write after Flush published even though the scope was still open.")
 
+                            Scope.Publish()
+
                         End Using
+
+                        Dim Combined(First.Length + Second.Length - 1) As Byte
+                        Buffer.BlockCopy(First, 0, Combined, 0, First.Length)
+                        Buffer.BlockCopy(Second, 0, Combined, First.Length, Second.Length)
+                        AssertBytesEqual(Combined, Cs.ToArray(), "Work after a mid-scope Flush was lost.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that scopes are reference-counted: a nested Publish is ignored, and
+            ''' the batch is published only when the outermost scope publishes.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DeferPublishNestedScopesPublishAtTheOutermost()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Dim SequenceBefore = Cs.GetStructure().HeaderSequence
+
+                        Dim Outer = Cs.DeferPublish()
+                        Dim Inner = Cs.DeferPublish()
+
+                        Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize, 401))
+
+                        Inner.Publish()
+                        AssertEqual(SequenceBefore, Cs.GetStructure().HeaderSequence,
+                                    "A nested Publish published while the outer scope was still open.")
+
+                        Inner.Dispose()
+                        AssertEqual(SequenceBefore, Cs.GetStructure().HeaderSequence,
+                                    "Disposing the inner scope published before the outer scope closed.")
+
+                        Outer.Publish()
+                        AssertTrue(Cs.GetStructure().HeaderSequence > SequenceBefore,
+                                   "The outermost Publish did not publish the batched metadata.")
+
+                        Outer.Dispose()
 
                         Cs.Validate()
 
@@ -127,33 +185,118 @@ Namespace Tests
 
             End Sub
 
+            ' ================================================================================
+            ' Rollback behaviour
+            ' ================================================================================
+
             ''' <summary>
-            ''' Verifies that scopes are reference-counted: the publish happens only when the
-            ''' last scope closes, regardless of the order they are disposed in.
+            ''' Verifies that disposing a scope without Publish rolls the metadata back to
+            ''' where the scope opened and leaves the stream usable - not faulted.
             ''' </summary>
             <UnitTester.SimpleTest()>
-            Public Shared Sub DeferPublishReferenceCountsAndDisposesInAnyOrder()
+            Public Shared Sub DeferPublishWithoutPublishRollsBackAndLeavesStreamUsable()
 
                 Using Ms As New MemoryStream()
 
+                    Dim Baseline = GenerateRandomData(ChunkedStream.DefaultChunkSize * 3, 501)
+
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Dim SequenceBefore = Cs.GetStructure().HeaderSequence
+                        Cs.Write(0, Baseline)
 
-                        Dim First = Cs.DeferPublish()
-                        Dim Second = Cs.DeferPublish()
+                        Using Scope = Cs.DeferPublish()
+                            Cs.Write(CLng(Baseline.Length), GenerateRandomData(ChunkedStream.DefaultChunkSize * 6, 502))
+                            ' no Publish - the scope is abandoned
+                        End Using
 
-                        Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize, 401))
+                        AssertBytesEqual(Baseline, Cs.ToArray(),
+                                         "An abandoned DeferPublish scope did not roll its writes back.")
 
-                        First.Dispose()
+                        Dim AfterRollback = GenerateRandomData(ChunkedStream.DefaultChunkSize, 503)
+                        Cs.Write(0, AfterRollback)
+                        AssertBytesEqual(AfterRollback, Cs.ToArray(0, AfterRollback.Length),
+                                         "The stream was not usable after a DeferPublish rollback.")
 
-                        AssertEqual(SequenceBefore, Cs.GetStructure().HeaderSequence,
-                                    "Metadata published while an inner DeferPublish scope was still open.")
+                        Cs.Validate()
 
-                        Second.Dispose()
+                    End Using
 
-                        AssertTrue(Cs.GetStructure().HeaderSequence > SequenceBefore,
-                                   "Metadata was not published when the last DeferPublish scope closed.")
+                    Using Reopened = ChunkedStream.Open(Ms)
+                        AssertEqual(ChunkedStream.RecoveryStates.None, Reopened.RecoveryStateAtOpen,
+                                    "A DeferPublish rollback writes no recovery state.")
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that an exception raised inside a DeferPublish scope rolls the whole
+            ''' batch back rather than publishing a partial result.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DeferPublishRollsBackWhenAnOperationThrows()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Baseline = GenerateRandomData(ChunkedStream.DefaultChunkSize * 2, 601)
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, Baseline)
+
+                        Try
+                            Using Scope = Cs.DeferPublish()
+                                Cs.Write(CLng(Baseline.Length), GenerateRandomData(ChunkedStream.DefaultChunkSize * 4, 602))
+                                If Cs.Length > 0 Then Throw New InvalidOperationException("Simulated mid-batch failure.")
+                                Scope.Publish()
+                            End Using
+                        Catch Ex As InvalidOperationException
+                        End Try
+
+                        AssertBytesEqual(Baseline, Cs.ToArray(),
+                                         "A failed DeferPublish batch was not rolled back.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that a nested batch published by an inner Publish is still rolled
+            ''' back when the outermost scope is abandoned.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DeferPublishOutermostAbandonRollsBackNestedPublishedWork()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Baseline = GenerateRandomData(ChunkedStream.DefaultChunkSize * 2, 701)
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, Baseline)
+
+                        Using Outer = Cs.DeferPublish()
+
+                            Using Inner = Cs.DeferPublish()
+                                Cs.Write(CLng(Baseline.Length), GenerateRandomData(ChunkedStream.DefaultChunkSize * 3, 702))
+                                Inner.Publish()
+                            End Using
+
+                            ' Outer is abandoned - no Publish.
+                        End Using
+
+                        AssertBytesEqual(Baseline, Cs.ToArray(),
+                                         "An abandoned outermost scope did not roll back nested published work.")
 
                         Cs.Validate()
 
@@ -168,22 +311,22 @@ Namespace Tests
             ' ================================================================================
 
             ''' <summary>
-            ''' Verifies that a crash before a DeferPublish scope closes reopens the stream
-            ''' at the last published generation, and that the window's orphaned physical
-            ''' records are reclaimable by Defragment.
+            ''' Verifies that a crash before a DeferPublish scope publishes reopens the
+            ''' stream at the last published generation, and that the window's orphaned
+            ''' physical records are reclaimable by Defragment.
             ''' </summary>
             <UnitTester.SimpleTest()>
             Public Shared Sub DeferPublishCrashReopensAtLastPublishedGeneration()
 
                 Using Ms As New MemoryStream()
 
-                    Dim Published = GenerateRandomData(ChunkedStream.DefaultChunkSize * 4, 501)
+                    Dim Published = GenerateRandomData(ChunkedStream.DefaultChunkSize * 4, 801)
 
                     Dim Cs = ChunkedStream.Open(Ms)
                     Cs.Write(0, Published)
 
                     Dim AbandonedScope = Cs.DeferPublish()
-                    Cs.Write(Published.Length, GenerateRandomData(ChunkedStream.DefaultChunkSize * 8, 502))
+                    Cs.Write(Published.Length, GenerateRandomData(ChunkedStream.DefaultChunkSize * 8, 802))
 
                     GC.KeepAlive(AbandonedScope)
                     Cs = Nothing
@@ -214,26 +357,116 @@ Namespace Tests
             End Sub
 
             ''' <summary>
-            ''' Verifies that disposing the stream with a DeferPublish scope still open
-            ''' publishes the pending metadata rather than losing it.
+            ''' Verifies that disposing the stream with an unpublished DeferPublish scope
+            ''' still open rolls the scope back rather than persisting a partial batch.
             ''' </summary>
             <UnitTester.SimpleTest()>
-            Public Shared Sub DeferPublishLeakedScopeStillPublishesOnStreamDispose()
+            Public Shared Sub DeferPublishLeakedScopeRollsBackOnStreamDispose()
 
                 Using Ms As New MemoryStream()
 
-                    Dim Expected = GenerateRandomData(ChunkedStream.DefaultChunkSize * 3, 601)
+                    Dim Baseline = GenerateRandomData(ChunkedStream.DefaultChunkSize * 2, 901)
 
                     Using Cs = ChunkedStream.Open(Ms)
+                        Cs.Write(0, Baseline)
+                        Using Committed = Cs.DeferPublish()
+                            Committed.Publish()
+                        End Using
+
                         Dim LeakedScope = Cs.DeferPublish()
-                        Cs.Write(0, Expected)
+                        Cs.Write(CLng(Baseline.Length), GenerateRandomData(ChunkedStream.DefaultChunkSize * 3, 902))
                         GC.KeepAlive(LeakedScope)
-                        ' scope intentionally not disposed
+                        ' scope intentionally not disposed or published
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms)
-                        AssertBytesEqual(Expected, Reopened.ToArray(),
-                                         "Stream dispose did not publish the metadata a leaked scope was holding back.")
+                        AssertBytesEqual(Baseline, Reopened.ToArray(),
+                                         "Stream dispose persisted a leaked scope's unpublished batch.")
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ' ================================================================================
+            ' Interaction with checkpoints
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Verifies that a checkpoint cannot be created while a DeferPublish scope is
+            ''' open - the two do not nest that way.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CheckpointCannotBeCreatedInsideDeferPublishScope()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize, 1101))
+
+                        Using Scope = Cs.DeferPublish()
+
+                            AssertThrows(Of InvalidOperationException)(
+                                Sub() Cs.CreateCheckpoint(),
+                                "CreateCheckpoint should be rejected while a DeferPublish scope is open.")
+
+                            Scope.Publish()
+
+                        End Using
+
+                        ' The two nest fine in the other order.
+                        Using Checkpoint = Cs.CreateCheckpoint()
+                            Using Scope = Cs.DeferPublish()
+                                Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize, 1102))
+                                Scope.Publish()
+                            End Using
+                            Checkpoint.Commit()
+                        End Using
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that a DeferPublish scope opened inside a checkpoint defers entirely
+            ''' to the checkpoint: its work is rolled back with the checkpoint.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DeferPublishInsideCheckpointRollsBackWithTheCheckpoint()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Baseline = GenerateRandomData(ChunkedStream.DefaultChunkSize * 2, 1201)
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, Baseline)
+
+                        Using Checkpoint = Cs.CreateCheckpoint()
+
+                            Using Scope = Cs.DeferPublish()
+                                Cs.Write(CLng(Baseline.Length), GenerateRandomData(ChunkedStream.DefaultChunkSize * 3, 1202))
+                                Scope.Publish()
+                            End Using
+
+                            Checkpoint.Rollback()
+
+                        End Using
+
+                        AssertBytesEqual(Baseline, Cs.ToArray(),
+                                         "A checkpoint rollback did not undo work published inside a nested DeferPublish scope.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms)
                         Reopened.Validate()
                     End Using
 
@@ -256,7 +489,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
-                        Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * 4, 701))
+                        Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * 4, 1001))
 
                         Using Scope = Cs.DeferPublish()
 
@@ -270,6 +503,8 @@ Namespace Tests
                                     Cs.ApplyOptions(ChunkedStream.ApplyOptionTypes.ChunkSize)
                                 End Sub,
                                 "ApplyOptions should be rejected while a DeferPublish scope is open.")
+
+                            Scope.Publish()
 
                         End Using
 
