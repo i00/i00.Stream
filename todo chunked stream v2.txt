@@ -152,9 +152,15 @@ DESIGN / ROBUSTNESS
 
 HOUSEKEEPING
 - Delete __Tests/ (double underscore) - stale obj/ build output, not referenced by the solution.
-- Consolidate the ~8 tests Hardening.vb duplicates near-verbatim from Recovery.vb (header-copy
-  recovery, physical-record move recovery). Keep the genuinely unique Hardening tests:
-  ModelBasedRandomOperationsMatchByteArrayModel + the two MetadataPaging* stress tests.
+- [DONE 2026-08-28] Test dedup: removed the 8 header-copy / physical-record-move-recovery tests
+  Hardening.vb duplicated verbatim from Recovery.vb (they stay in Recovery.vb - the better home,
+  and it has the superset incl. GetFirstAllocatedChunk helper + ...FailsWhenBothRecordsInvalid).
+  Moved MetadataPagingManyExtentPagesSurviveReopenAndDefrag + MetadataPagingHoleDirectory-
+  SurvivesReopenAndReuse from Hardening.vb -> Durability.vb "Metadata durability" section, and
+  deleted the weaker MetadataPagingSurvivesReopen / HoleDirectorySurvivesReopen they subsume.
+  Hardening.vb now holds only ModelBasedRandomOperationsMatchByteArrayModel + its fuzz helpers.
+  Dead helpers removed (CorruptHeaderCopy/GetHeaderSequence/Get{Older,Newer}HeaderCopyIndex/
+  CopyPhysicalBytes). Net -8 tests; build clean; suite 207/207.
 - Remove the commented-out old implementation at the end of Structure.Extensions.vb (~lines 648-851).
 - README.md is empty - fill in once the API settles.
 - Rename the confusable header-recovery constants (_ChunkedStream.vb ~lines 100-165):

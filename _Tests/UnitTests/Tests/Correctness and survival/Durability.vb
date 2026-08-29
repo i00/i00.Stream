@@ -693,43 +693,97 @@ Namespace Tests
             ' ================================================================================
 
             ''' <summary>
-            ''' Verifies that paged metadata survives reopening and validation.
+            ''' Verifies that many extents and physical records spanning many metadata pages
+            ''' survive reopen, validation and sequence defragmentation.
             ''' </summary>
             <UnitTester.SimpleTest()>
-            Public Shared Sub MetadataPagingSurvivesReopen()
+            Public Shared Sub MetadataPagingManyExtentPagesSurviveReopenAndDefrag()
 
                 Using Ms As New MemoryStream()
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .ChunkSize = 256,
                         .IndexPageEntryCount = 4,
-                        .IndexDirectoryEntryCount = 4
+                        .IndexDirectoryEntryCount = 4,
+                        .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit
                     }
 
-                    Dim Expected As Byte()
+                    Dim Expected As New List(Of Byte)()
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        For ChunkIndex = 0 To 127
+                        For ChunkIndex = 0 To 159
 
-                            Cs.Write(
-                                ChunkIndex * Options.ChunkSize,
+                            Dim Data =
                                 GenerateRandomData(
                                     Options.ChunkSize,
-                                    5000 + ChunkIndex))
+                                    3000 + ChunkIndex)
+
+                            Cs.Write(
+                                CLng(ChunkIndex) * CLng(Options.ChunkSize),
+                                Data)
+
+                            Expected.AddRange(Data)
 
                         Next
 
-                        Expected = Cs.ToArray()
+                        For ChunkIndex = 10 To 40 Step 3
+
+                            Dim Patch =
+                                GenerateRandomData(
+                                    17,
+                                    4000 + ChunkIndex)
+
+                            Dim Offset =
+                                (ChunkIndex * Options.ChunkSize) + 31
+
+                            Cs.Write(Offset, Patch)
+
+                            For Index = 0 To Patch.Length - 1
+                                Expected(Offset + Index) = Patch(Index)
+                            Next
+
+                        Next
+
+                        Dim Before =
+                            Cs.GetStructure()
+
+                        AssertTrue(
+                            Before.ChunkCount > Options.IndexPageEntryCount * Options.IndexDirectoryEntryCount,
+                            "Test setup did not create enough chunks to force paged metadata.")
+
+                        AssertTrue(
+                            Before.Regions.Any(Function(region) region.RegionType = ChunkedStreamStructure.RegionTypes.IndexPage),
+                            "Expected index-page regions in paged metadata stream.")
+
+                        AssertTrue(
+                            Before.Regions.Any(Function(region) region.RegionType = ChunkedStreamStructure.RegionTypes.ChunkIndexDirectoryPage),
+                            "Expected index-directory-page regions in paged metadata stream.")
+
+                        AssertBytesEqual(
+                            Expected.ToArray(),
+                            Cs.ToArray(),
+                            "Paged metadata data mismatch before reopen.")
+
+                        Cs.Validate()
 
                     End Using
 
-                    Using Reopened = ChunkedStream.Open(Ms, Options)
+                    Using Reopened = ChunkedStream.Open(Ms)
 
                         AssertBytesEqual(
-                            Expected,
+                            Expected.ToArray(),
                             Reopened.ToArray(),
-                            "Paged metadata stream did not survive reopen.")
+                            "Paged metadata data mismatch after reopen.")
+
+                        Reopened.Validate()
+
+                        Reopened.Defragment(ChunkedStream.DefragTypes.Sequence)
+
+                        AssertBytesEqual(
+                            Expected.ToArray(),
+                            Reopened.ToArray(),
+                            "Paged metadata data mismatch after sequence defrag.")
 
                         Reopened.Validate()
 
@@ -740,10 +794,11 @@ Namespace Tests
             End Sub
 
             ''' <summary>
-            ''' Verifies that persisted hole-directory metadata survives reopening.
+            ''' Verifies that hole-directory metadata spanning multiple pages survives reopen
+            ''' and does not cause subsequent FillHoles allocation to overlap live records.
             ''' </summary>
             <UnitTester.SimpleTest()>
-            Public Shared Sub HoleDirectorySurvivesReopen()
+            Public Shared Sub MetadataPagingHoleDirectorySurvivesReopenAndReuse()
 
                 Using Ms As New MemoryStream()
 
@@ -751,33 +806,83 @@ Namespace Tests
                         .ChunkSize = 256,
                         .IndexPageEntryCount = 4,
                         .IndexDirectoryEntryCount = 4,
-                        .HoleDirectoryMode = ChunkedStream.ChunkedStreamOptions.HoleDirectoryModes.Always
+                        .HoleDirectoryMode = ChunkedStream.ChunkedStreamOptions.HoleDirectoryModes.Always,
+                        .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit
                     }
 
-                    Dim Expected As Byte()
+                    Dim Expected As New List(Of Byte)()
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        For ChunkIndex = 0 To 63
+                        For ChunkIndex = 0 To 127
 
-                            Cs.Write(
-                                ChunkIndex * Options.ChunkSize,
+                            Dim Data =
                                 GenerateRandomData(
                                     Options.ChunkSize,
-                                    6000 + ChunkIndex))
+                                    5000 + ChunkIndex)
+
+                            Cs.Write(
+                                CLng(ChunkIndex) * CLng(Options.ChunkSize),
+                                Data)
+
+                            Expected.AddRange(Data)
 
                         Next
 
-                        Expected = Cs.ToArray()
+                        For ChunkIndex = 1 To 120 Step 3
+
+                            Dim Data =
+                                GenerateRandomData(
+                                    Options.ChunkSize,
+                                    6000 + ChunkIndex)
+
+                            Cs.Write(
+                                CLng(ChunkIndex) * CLng(Options.ChunkSize),
+                                Data)
+
+                            For Index = 0 To Data.Length - 1
+                                Expected((ChunkIndex * Options.ChunkSize) + Index) = Data(Index)
+                            Next
+
+                        Next
+
+                        Cs.Validate()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms, Options)
 
                         AssertBytesEqual(
-                            Expected,
+                            Expected.ToArray(),
                             Reopened.ToArray(),
-                            "Hole-directory metadata did not survive reopen.")
+                            "Hole-directory stream mismatch after reopen.")
+
+                        Dim Before =
+                            Reopened.GetStructure()
+
+                        AssertTrue(
+                            Before.Regions.Any(Function(region) region.RegionType = ChunkedStreamStructure.RegionTypes.HoleDirectoryPage),
+                            "Expected persisted hole-directory metadata pages.")
+
+                        For ChunkIndex = 128 To 159
+
+                            Dim Data =
+                                GenerateRandomData(
+                                    Options.ChunkSize,
+                                    7000 + ChunkIndex)
+
+                            Reopened.Write(
+                                CLng(ChunkIndex) * CLng(Options.ChunkSize),
+                                Data)
+
+                            Expected.AddRange(Data)
+
+                        Next
+
+                        AssertBytesEqual(
+                            Expected.ToArray(),
+                            Reopened.ToArray(),
+                            "Hole-directory reuse corrupted logical data.")
 
                         Reopened.Validate()
 
