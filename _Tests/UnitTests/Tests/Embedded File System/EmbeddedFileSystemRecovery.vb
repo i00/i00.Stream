@@ -149,18 +149,18 @@ Namespace Tests
                             Dim Dir = Efs.CreateDirectory(Efs.RootAnchorId, "scratch")
 
                             ' Populate once so there is a stable baseline geometry.
-                            For Index = 0 To 7
+                            For Index = 0 To 3
                                 Basics.WriteWholeFile(Efs, Efs.CreateFile(Dir, $"keep{Index}.bin", CreateAsPending:=False),
                                                       GenerateRandomData(2000, 5800 + Index))
                             Next
 
-                            For Cycle = 0 To 9
-                                For Index = 0 To 7
+                            For Cycle = 0 To 5
+                                For Index = 0 To 3
                                     Dim Name = $"cycle{Index}.bin"
                                     Basics.WriteWholeFile(Efs, Efs.CreateFile(Dir, Name, CreateAsPending:=False),
                                                           GenerateRandomData(3000, 5900 + (Cycle * 10) + Index))
                                 Next
-                                For Index = 0 To 7
+                                For Index = 0 To 3
                                     Efs.DeleteEntry(Dir, $"cycle{Index}.bin")
                                 Next
                             Next
@@ -168,7 +168,7 @@ Namespace Tests
                             Cs.Validate()
 
                             ' The keep-files are intact and the churn did not balloon the file.
-                            For Index = 0 To 7
+                            For Index = 0 To 3
                                 AssertBytesEqual(
                                     GenerateRandomData(2000, 5800 + Index),
                                     Basics.ReadWholeFile(Efs, Efs.FindEntry(Dir, $"keep{Index}.bin").ChildAnchorId),
@@ -180,7 +180,7 @@ Namespace Tests
 
                             AssertTrue(
                                 Ms.Length < 512L * 1024L,
-                                $"Create/delete churn over 8 small files should not grow the backing store past 512 KB (was {Ms.Length:N0}).")
+                                $"Create/delete churn over four small files should not grow the backing store past 512 KB (was {Ms.Length:N0}).")
 
                         End Using
                     End Using

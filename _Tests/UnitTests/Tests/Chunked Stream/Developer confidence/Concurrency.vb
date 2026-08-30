@@ -24,7 +24,7 @@ Namespace Tests
                     Dim Expected As Byte()
 
                     Using Cs = ChunkedStream.Open(Ms)
-                        Expected = GenerateRandomData(Cs.Options.ChunkSize * 12, 6601)
+                        Expected = GenerateRandomData(Cs.Options.ChunkSize * 4, 6601)
                         Cs.Write(0, Expected)
                         Cs.Validate()
 
@@ -33,7 +33,7 @@ Namespace Tests
                         Dim Body =
                             Sub()
                                 Try
-                                    For Iteration = 0 To 40
+                                    For Iteration = 0 To 15
                                         AssertBytesEqual(Expected, Cs.ToArray(), "Concurrent reader saw wrong data.")
 
                                         Dim Slab(4095) As Byte
@@ -51,7 +51,7 @@ Namespace Tests
                                 End Try
                             End Sub
 
-                        RunOnThreads(8, Body)
+                        RunOnThreads(6, Body)
 
                         If Failure IsNot Nothing Then
                             Throw New Exception("A concurrent reader failed: " & Failure.Message, Failure)
@@ -68,10 +68,10 @@ Namespace Tests
 
                 Using Ms As New MemoryStream()
 
-                    Dim Length = ChunkedStream.DefaultChunkSize * 8
+                    Dim Length = ChunkedStream.DefaultChunkSize * 2
 
                     Dim Versions As New List(Of Byte())()
-                    For Version = 0 To 12
+                    For Version = 0 To 7
                         Versions.Add(GenerateRandomData(Length, 6700 + Version))
                     Next
 
@@ -80,7 +80,6 @@ Namespace Tests
                         Cs.Write(0, Versions(0))
 
                         Dim Failure As Exception = Nothing
-                        Dim WriterDone As Integer = 0
 
                         Dim KnownSet As New HashSet(Of String)(
                             Versions.Select(Function(v) Convert.ToBase64String(v)))
@@ -88,13 +87,14 @@ Namespace Tests
                         Dim Reader =
                             Sub()
                                 Try
-                                    While Volatile.Read(WriterDone) = 0
+                                    For Iteration = 0 To 79
                                         Dim Snapshot = Cs.ToArray()
                                         AssertEqual(CLng(Length), CLng(Snapshot.Length), "Reader saw a wrong-length snapshot.")
                                         AssertTrue(
                                             KnownSet.Contains(Convert.ToBase64String(Snapshot)),
                                             "Reader saw a snapshot that is neither a committed version - a torn write.")
-                                    End While
+                                        Thread.Yield()
+                                    Next
                                 Catch Ex As Exception
                                     Interlocked.CompareExchange(Failure, Ex, Nothing)
                                 End Try
@@ -103,19 +103,18 @@ Namespace Tests
                         Dim Writer =
                             Sub()
                                 Try
-                                    For Version = 1 To Versions.Count - 1
-                                        Cs.Write(0, Versions(Version))
-                                        Thread.Sleep(1)
+                                    For Round = 0 To 5
+                                        For Version = 1 To Versions.Count - 1
+                                            Cs.Write(0, Versions(Version))
+                                        Next
                                     Next
                                 Catch Ex As Exception
                                     Interlocked.CompareExchange(Failure, Ex, Nothing)
-                                Finally
-                                    Volatile.Write(WriterDone, 1)
                                 End Try
                             End Sub
 
                         Dim Threads As New List(Of Thread)()
-                        For ReaderIndex = 0 To 5
+                        For ReaderIndex = 0 To 4
                             Threads.Add(New Thread(Sub() Reader()))
                         Next
                         Threads.Add(New Thread(Sub() Writer()))

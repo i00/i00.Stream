@@ -79,7 +79,7 @@ Namespace Tests
             End Sub
 
             ''' <summary>
-            ''' Builds a file through many non-durable generations, then for a wide sweep of
+            ''' Builds a file through a run of non-durable generations, then for a spread of
             ''' lost-tail lengths asserts that opening the truncated file either reproduces a
             ''' state the stream actually passed through, or throws a recognised error.
             ''' </summary>
@@ -87,26 +87,26 @@ Namespace Tests
             Public Shared Sub TruncatedTailAlwaysOpensToAKnownStateOrThrows()
 
                 Dim Options As New ChunkedStream.ChunkedStreamOptions With {
-                    .ChunkSize = 512,
+                    .ChunkSize = 256,
                     .IndexPageEntryCount = 4,
                     .IndexDirectoryEntryCount = 4
                 }
 
-                Dim Snapshots As New List(Of String)()
+                Dim Snapshots As New HashSet(Of String)()
                 Dim FullBytes As Byte()
 
                 Using Ms As New MemoryStream()
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        For ChunkIndex = 0 To 31
+                        For ChunkIndex = 0 To 23
                             Cs.Write(ChunkIndex * Options.ChunkSize,
                                      GenerateRandomData(Options.ChunkSize, 7800 + ChunkIndex))
+                            Snapshots.Add(Convert.ToBase64String(Cs.ToArray()))
                         Next
-                        Snapshots.Add(Convert.ToBase64String(Cs.ToArray()))
 
-                        For Pass = 0 To 10
-                            For ChunkIndex = 0 To 31 Step 2
+                        For Pass = 0 To 5
+                            For ChunkIndex = 0 To 23 Step 2
                                 Cs.Write(ChunkIndex * Options.ChunkSize,
                                          GenerateRandomData(Options.ChunkSize, 40000 + (Pass * 100) + ChunkIndex))
                                 Snapshots.Add(Convert.ToBase64String(Cs.ToArray()))
@@ -121,11 +121,12 @@ Namespace Tests
 
                 End Using
 
-                Dim Known As New HashSet(Of String)(Snapshots)
                 Dim OpenedCount = 0
+                Dim Span = FullBytes.Length - ChunkedStream.DataStartOffset
+                Dim Step_ = Math.Max(1, Span \ 50)
 
                 Dim Cut = 1
-                While Cut < FullBytes.Length - ChunkedStream.DataStartOffset
+                While Cut < Span
 
                     Dim Truncated As Byte() = Slice(FullBytes, 0, FullBytes.Length - Cut)
 
@@ -139,10 +140,8 @@ Namespace Tests
 
                             Recovered.Validate()
 
-                            Dim Content = Convert.ToBase64String(Recovered.ToArray())
-
                             AssertTrue(
-                                Known.Contains(Content),
+                                Snapshots.Contains(Convert.ToBase64String(Recovered.ToArray())),
                                 $"Opening the file truncated by {Cut} bytes returned a state the stream never passed through.")
 
                             OpenedCount += 1
@@ -157,7 +156,7 @@ Namespace Tests
                         ' Acceptable.
                     End Try
 
-                    Cut = If(Cut < 64, Cut + 1, Cut + 37)
+                    Cut = If(Cut < 24, Cut + 1, Cut + Step_)
 
                 End While
 

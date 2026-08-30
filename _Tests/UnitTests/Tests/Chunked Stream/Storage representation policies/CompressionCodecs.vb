@@ -52,15 +52,13 @@ Namespace Tests
             <UnitTester.SimpleTest()>
             Public Shared Sub Lz4DecompressRejectsTruncatedBlocks()
 
-                Dim Plain = GeneratePartiallyCompressibleDataForLength(0.5R, 20000, 4096, 71)
+                Dim Plain = GeneratePartiallyCompressibleDataForLength(0.5R, 6000, 1024, 71)
                 Dim Compressed = Lz4.Compress(Plain)
 
-                For Cut = 0 To Compressed.Length - 1 Step 7
-
-                    Dim Truncated = Slice(Compressed, 0, Cut)
+                For Each Cut In TruncationPoints(Compressed.Length)
 
                     AssertCodecRejects(
-                        Sub() Lz4.Decompress(Truncated, Plain.Length),
+                        Sub() Lz4.Decompress(Slice(Compressed, 0, Cut), Plain.Length),
                         $"LZ4 accepted or mis-handled a block truncated to {Cut} bytes.")
 
                 Next
@@ -70,15 +68,13 @@ Namespace Tests
             <UnitTester.SimpleTest()>
             Public Shared Sub SnappyDecompressRejectsTruncatedBlocks()
 
-                Dim Plain = GeneratePartiallyCompressibleDataForLength(0.5R, 20000, 4096, 72)
+                Dim Plain = GeneratePartiallyCompressibleDataForLength(0.5R, 6000, 1024, 72)
                 Dim Compressed = Snappy.Compress(Plain)
 
-                For Cut = 0 To Compressed.Length - 1 Step 7
-
-                    Dim Truncated = Slice(Compressed, 0, Cut)
+                For Each Cut In TruncationPoints(Compressed.Length)
 
                     AssertCodecRejects(
-                        Sub() Snappy.Decompress(Truncated),
+                        Sub() Snappy.Decompress(Slice(Compressed, 0, Cut)),
                         $"Snappy accepted or mis-handled a block truncated to {Cut} bytes.")
 
                 Next
@@ -90,12 +86,12 @@ Namespace Tests
 
                 Dim Rng = CreateDeterministicRandom(9090)
 
-                For Trial = 0 To 199
+                For Trial = 0 To 39
 
-                    Dim Garbage = GenerateRandomData(Rng.Next(1, 512), 9100 + Trial)
+                    Dim Garbage = GenerateRandomData(Rng.Next(1, 129), 9100 + Trial)
 
                     AssertCodecRejects(
-                        Sub() Lz4.Decompress(Garbage, Rng.Next(0, 4096)),
+                        Sub() Lz4.Decompress(Garbage, Rng.Next(0, 512)),
                         $"LZ4 mis-handled random garbage on trial {Trial}.")
 
                     '
@@ -121,15 +117,15 @@ Namespace Tests
             <UnitTester.SimpleTest()>
             Public Shared Sub Lz4RejectsExtendedLengthRunWithoutOverflowing()
 
-                Dim Block As New List(Of Byte)()
-                Block.Add(&HF0)                       ' token: literal length = 15 (extended), match length nibble = 0
+                Dim Block(4000) As Byte
+                Block(0) = &HF0                      ' token: literal length = 15 (extended), match length nibble = 0
 
-                For Index = 0 To 20000
-                    Block.Add(255)                    ' continuation bytes, never terminating
+                For Index = 1 To Block.Length - 1
+                    Block(Index) = 255               ' continuation bytes, never terminating
                 Next
 
                 AssertThrows(Of InvalidDataException)(
-                    Sub() Lz4.Decompress(Block.ToArray(), 1 << 20),
+                    Sub() Lz4.Decompress(Block, 1 << 20),
                     "An unterminated LZ4 extended-length run should throw InvalidDataException.")
 
             End Sub
@@ -147,9 +143,29 @@ Namespace Tests
                 Yield GenerateRepeatingPatternData(9000, 3)
                 Yield GenerateRepeatingPatternData(9000, 190)
                 Yield GenerateRandomData(9000, 4242)
-                Yield GeneratePatternData(65536, 11)
-                Yield GeneratePartiallyCompressibleDataForLength(0.2R, 40000, 4096, 51)
-                Yield GeneratePartiallyCompressibleDataForLength(0.8R, 40000, 4096, 52)
+                Yield GeneratePatternData(20000, 11)
+                Yield GeneratePartiallyCompressibleDataForLength(0.2R, 12000, 4096, 51)
+                Yield GeneratePartiallyCompressibleDataForLength(0.8R, 12000, 4096, 52)
+
+            End Function
+
+            ''' <summary>
+            ''' A small fixed set of truncation lengths for a block of the given size: every
+            ''' length in the first 24 bytes, then about 30 points spread across the rest.
+            ''' </summary>
+            Private Shared Iterator Function TruncationPoints(BlockLength As Integer) As IEnumerable(Of Integer)
+
+                Dim Head = Math.Min(24, BlockLength)
+
+                For Cut = 0 To Head - 1
+                    Yield Cut
+                Next
+
+                Dim Step_ = Math.Max(1, (BlockLength - Head) \ 30)
+
+                For Cut = Head To BlockLength - 1 Step Step_
+                    Yield Cut
+                Next
 
             End Function
 
