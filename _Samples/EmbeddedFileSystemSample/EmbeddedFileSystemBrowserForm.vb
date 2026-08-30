@@ -1,6 +1,7 @@
 Imports i00.Streams
 Imports System.ComponentModel
 Imports System.IO
+Imports System.Threading
 Imports i00CodeLib
 Imports System.Runtime.InteropServices
 
@@ -40,13 +41,104 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Sub
     End Class
 
+    ''' <summary>How a name collision during an upload is resolved.</summary>
+    Private Enum ConflictChoice
+        Skip
+        SkipAll
+        Replace
+        ReplaceAll
+        Cancel
+    End Enum
+
+    ''' <summary>One resolved copy step produced by walking the dropped or picked paths.</summary>
+    Private NotInheritable Class UploadWorkItem
+        Public Sub New(SourcePath As String, RelativeParent As String, Name As String, IsDirectory As Boolean)
+            Me.SourcePath = SourcePath
+            Me.RelativeParent = RelativeParent
+            Me.Name = Name
+            Me.IsDirectory = IsDirectory
+        End Sub
+
+        ''' <summary>The on-disk file to copy, or Nothing for a directory-create step.</summary>
+        Public ReadOnly Property SourcePath As String
+        ''' <summary>'/'-joined parent directories relative to the upload target, or "" for the target itself.</summary>
+        Public ReadOnly Property RelativeParent As String
+        Public ReadOnly Property Name As String
+        Public ReadOnly Property IsDirectory As Boolean
+    End Class
+
+    ''' <summary>
+    ''' Publishes a total byte count computed on a background thread. Reads and writes are
+    ''' interlocked so the copy thread never observes a torn value.
+    ''' </summary>
+    Private NotInheritable Class TotalSizeBox
+        Private _Value As Long
+        Private _HasValue As Integer
+
+        Public Sub Publish(Value As Long)
+            Interlocked.Exchange(_Value, Value)
+            Interlocked.Exchange(_HasValue, 1)
+        End Sub
+
+        Public ReadOnly Property Value As Long?
+            Get
+                If Interlocked.CompareExchange(_HasValue, 0, 0) = 0 Then Return Nothing
+                Return Interlocked.Read(_Value)
+            End Get
+        End Property
+    End Class
+
+    ''' <summary>Sorts the file list with directories always ahead of files.</summary>
+    Private NotInheritable Class EntryListViewComparer
+        Implements IComparer
+
+        Public Property Column As Integer
+        Public Property Order As SortOrder = SortOrder.Ascending
+
+        Public Function Compare(X As Object, Y As Object) As Integer Implements IComparer.Compare
+            Dim Left = DirectCast(X, ListViewItem)
+            Dim Right = DirectCast(Y, ListViewItem)
+            Dim LeftEntry = TryCast(Left.Tag, EmbeddedFileSystem.ContentListEntry)
+            Dim RightEntry = TryCast(Right.Tag, EmbeddedFileSystem.ContentListEntry)
+
+            Dim LeftRank = If(IsDirectoryEntry(LeftEntry), 0, 1)
+            Dim RightRank = If(IsDirectoryEntry(RightEntry), 0, 1)
+            If LeftRank <> RightRank Then Return LeftRank - RightRank
+
+            Dim Result As Integer
+            If Column = 1 Then
+                Result = EntryLength(LeftEntry).CompareTo(EntryLength(RightEntry))
+            ElseIf Column = 2 Then
+                Result = String.Compare(Left.SubItems(2).Text, Right.SubItems(2).Text, StringComparison.OrdinalIgnoreCase)
+            Else
+                Result = String.Compare(Left.Text, Right.Text, StringComparison.OrdinalIgnoreCase)
+            End If
+
+            If Result = 0 Then Result = String.Compare(Left.Text, Right.Text, StringComparison.OrdinalIgnoreCase)
+            If Order = SortOrder.Descending Then Result = -Result
+            Return Result
+        End Function
+
+        Private Shared Function IsDirectoryEntry(Entry As EmbeddedFileSystem.ContentListEntry) As Boolean
+            Return Entry IsNot Nothing AndAlso Entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory
+        End Function
+
+        Private Shared Function EntryLength(Entry As EmbeddedFileSystem.ContentListEntry) As Long
+            Return If(Entry Is Nothing, 0L, Entry.LengthOfDataAtEntry)
+        End Function
+    End Class
+
     Private ReadOnly _FileSystem As EmbeddedFileSystem
+    Private ReadOnly _IconProvider As New FileIconProvider()
+    Private ReadOnly _ListSorter As New EntryListViewComparer()
     Private _CurrentDirectoryAnchorId As Long
     Private _ListDragStart As Point
     Private _TreeDragStart As Point
     Private _ListDragArmed As Boolean
     Private _TreeDragArmed As Boolean
     Private _Disposed As Boolean
+    Private _IconGeneration As Integer
+    Private _ExecutableIconThread As Thread
 
 
     Public Sub New(FileSystem As EmbeddedFileSystem)
@@ -56,6 +148,10 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         _CurrentDirectoryAnchorId = _FileSystem.RootAnchorId
 
         InitializeComponent()
+
+        tvFolders.ImageList = _IconProvider.Images
+        lvFiles.SmallImageList = _IconProvider.Images
+        lvFiles.ListViewItemSorter = _ListSorter
 
         Try
             SetWindowTheme(tvFolders.Handle, "Explorer", Nothing)
@@ -86,7 +182,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Dim RootNode = New TreeNode("Root") With {
                 .Name = _FileSystem.RootAnchorId.ToString(),
                 .Tag = New DirectoryNodeInfo(_FileSystem.RootAnchorId, "Root"),
-                .ToolTipText = $"Anchor {_FileSystem.RootAnchorId}"
+                .ToolTipText = $"Anchor {_FileSystem.RootAnchorId}",
+                .ImageKey = FileIconProvider.FolderKey,
+                .SelectedImageKey = FileIconProvider.FolderKey
             }
             tvFolders.Nodes.Add(RootNode)
             PopulateDirectoryNodes(RootNode, _FileSystem.RootAnchorId, New HashSet(Of Long)())
@@ -149,7 +247,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Dim ChildNode = New TreeNode(entry.Name) With {
                 .Name = entry.ChildAnchorId.ToString(),
                 .Tag = New DirectoryNodeInfo(entry.ChildAnchorId, entry.Name),
-                .ToolTipText = $"Anchor {entry.ChildAnchorId}, {FormatByteLength(entry.LengthOfDataAtEntry)} stored"
+                .ToolTipText = $"Anchor {entry.ChildAnchorId}, {FormatByteLength(entry.LengthOfDataAtEntry)} stored",
+                .ImageKey = FileIconProvider.FolderKey,
+                .SelectedImageKey = FileIconProvider.FolderKey
             }
             ParentNode.Nodes.Add(ChildNode)
             PopulateDirectoryNodes(ChildNode, entry.ChildAnchorId, VisitedDirectories)
@@ -161,33 +261,128 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private Sub RefreshCurrentDirectory()
         If _CurrentDirectoryAnchorId <= 0 Then Return
 
+        ' A new listing invalidates any executable-icon pass still running for the previous one.
+        _IconGeneration += 1
+        Dim Generation = _IconGeneration
+
+        Dim Entries = _FileSystem.GetDirectoryEntries(_CurrentDirectoryAnchorId).
+                                  OrderBy(Function(x) x.Name, StringComparer.OrdinalIgnoreCase).
+                                  ToList()
+
         lvFiles.BeginUpdate()
         Try
+            lvFiles.ListViewItemSorter = Nothing
             lvFiles.Items.Clear()
-            Dim Entries = _FileSystem.GetDirectoryEntries(_CurrentDirectoryAnchorId).
-                                      Where(Function(x) x.EntryType <> EmbeddedFileSystem.EntryTypes.Directory).
-                                      OrderBy(Function(x) x.Name, StringComparer.OrdinalIgnoreCase).
-                                      ToList()
 
             For Each entry In Entries
-                Dim Item = New ListViewItem(entry.Name) With {.Tag = entry}
-                Item.SubItems.Add(FormatByteLength(entry.LengthOfDataAtEntry))
+                Dim IsDirectory = entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory
+                Dim Item = New ListViewItem(entry.Name) With {
+                    .Tag = entry,
+                    .ImageKey = ResolveEntryImageKey(entry, IsDirectory)
+                }
+                Item.SubItems.Add(If(IsDirectory, String.Empty, FormatByteLength(entry.LengthOfDataAtEntry)))
                 Item.SubItems.Add(GetEntryStateText(entry.EntryType))
                 If entry.EntryType = EmbeddedFileSystem.EntryTypes.PendingFile Then Item.ForeColor = i00CodeLib.Drawing.BlendColor(lvFiles.ForeColor, Color.Red)
                 lvFiles.Items.Add(Item)
             Next
+
+            lvFiles.ListViewItemSorter = _ListSorter
+            lvFiles.Sort()
         Finally
             lvFiles.EndUpdate()
         End Try
 
         UpdateStatus()
+
+        ' Before the window is shown the icon pass cannot marshal its results back; BrowserForm_Shown
+        ' runs it for the first listing once the handle exists.
+        If IsHandleCreated Then BeginExecutableIconLoad(Generation, Entries)
+    End Sub
+
+    Private Sub BrowserForm_Shown(Sender As Object, EventArgs As EventArgs) Handles Me.Shown
+        _IconGeneration += 1
+        BeginExecutableIconLoad(_IconGeneration, _FileSystem.GetDirectoryEntries(_CurrentDirectoryAnchorId).ToList())
+    End Sub
+
+    Private Function ResolveEntryImageKey(Entry As EmbeddedFileSystem.ContentListEntry, IsDirectory As Boolean) As String
+        If IsDirectory Then Return FileIconProvider.FolderKey
+
+        Dim ExecutableKey = $"exe:{Entry.ChildAnchorId}"
+        If _IconProvider.ContainsKey(ExecutableKey) Then Return ExecutableKey
+        Return _IconProvider.EnsureExtensionIcon(Entry.Name)
+    End Function
+
+    ''' <summary>
+    ''' Loads each executable's own icon on a background thread and swaps it into the list when ready.
+    ''' Until then the shared <c>.exe</c> icon is shown; if extraction fails it simply stays. Results
+    ''' are keyed by anchor ID so an executable is only read out of the store once per session.
+    ''' </summary>
+    Private Sub BeginExecutableIconLoad(Generation As Integer, Entries As List(Of EmbeddedFileSystem.ContentListEntry))
+        Dim Executables = Entries.Where(Function(x) x.EntryType <> EmbeddedFileSystem.EntryTypes.Directory AndAlso
+                                                    String.Equals(Path.GetExtension(x.Name), ".exe", StringComparison.OrdinalIgnoreCase) AndAlso
+                                                    x.LengthOfDataAtEntry > 0 AndAlso
+                                                    _IconProvider.ContainsKey($"exe:{x.ChildAnchorId}") = False).
+                                  ToList()
+        If Executables.Count = 0 Then Return
+
+        Dim Worker = New Thread(
+            Sub()
+                For Each entry In Executables
+                    If Generation <> _IconGeneration OrElse _Disposed Then Return
+
+                    Dim ExtractedIcon As Icon = Nothing
+                    Try
+                        Using Source = _FileSystem.OpenFile(entry.ChildAnchorId)
+                            ExtractedIcon = FileIconProvider.ExtractExecutableIcon(Source, Source.Length)
+                        End Using
+                    Catch
+                        ExtractedIcon = Nothing
+                    End Try
+
+                    If ExtractedIcon IsNot Nothing Then ApplyExecutableIcon(Generation, entry.ChildAnchorId, ExtractedIcon)
+                Next
+            End Sub) With {.IsBackground = True, .Name = "EFS executable icons"}
+        _ExecutableIconThread = Worker
+        Worker.Start()
+    End Sub
+
+    Private Sub ApplyExecutableIcon(Generation As Integer, AnchorId As Long, ExtractedIcon As Icon)
+        If _Disposed OrElse IsHandleCreated = False Then
+            ExtractedIcon.Dispose()
+            Return
+        End If
+
+        Dim Key = $"exe:{AnchorId}"
+        Try
+            BeginInvoke(
+                Sub()
+                    If Generation <> _IconGeneration OrElse _Disposed Then
+                        ExtractedIcon.Dispose()
+                        Return
+                    End If
+
+                    ' The provider takes ownership of the icon here; it must not be disposed elsewhere.
+                    _IconProvider.AddExecutableIcon(Key, ExtractedIcon)
+
+                    For Each item As ListViewItem In lvFiles.Items
+                        Dim ItemEntry = TryCast(item.Tag, EmbeddedFileSystem.ContentListEntry)
+                        If ItemEntry IsNot Nothing AndAlso ItemEntry.ChildAnchorId = AnchorId Then
+                            item.ImageKey = Key
+                            Exit For
+                        End If
+                    Next
+                End Sub)
+        Catch ex As InvalidOperationException
+            ' The form closed between the guard above and the marshalled call.
+            ExtractedIcon.Dispose()
+        End Try
     End Sub
 
     Private Sub UpdateStatus()
         Dim DirectoryName = If(tvFolders.SelectedNode Is Nothing, "Root", tvFolders.SelectedNode.Text)
         Dim SelectedCount = lvFiles.SelectedItems.Count
         Dim SelectionText = If(SelectedCount = 0, String.Empty, $", {SelectedCount:N0} selected")
-        StatusLabel.Text = $"{DirectoryName}: {lvFiles.Items.Count:N0} files{SelectionText}"
+        StatusLabel.Text = $"{DirectoryName}: {lvFiles.Items.Count:N0} items{SelectionText}"
     End Sub
 
     Private Shared Function GetEntryStateText(EntryType As EmbeddedFileSystem.EntryTypes) As String
@@ -227,13 +422,24 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Return Matches(0)
     End Function
 
-    Private Function GetSelectedFileEntries() As List(Of EmbeddedFileSystem.ContentListEntry)
+    Private Function GetSelectedEntries() As List(Of EmbeddedFileSystem.ContentListEntry)
         Return lvFiles.SelectedItems.
                        Cast(Of ListViewItem)().
                        Select(Function(x) TryCast(x.Tag, EmbeddedFileSystem.ContentListEntry)).
                        Where(Function(x) x IsNot Nothing).
                        ToList()
     End Function
+
+    Private Shared Function IsDirectory(Entry As EmbeddedFileSystem.ContentListEntry) As Boolean
+        Return Entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory
+    End Function
+
+    Private Sub NavigateToDirectory(DirectoryAnchorId As Long)
+        Dim Node = FindDirectoryNode(DirectoryAnchorId)
+        If Node Is Nothing Then Return
+        Node.EnsureVisible()
+        tvFolders.SelectedNode = Node
+    End Sub
 
     Private Sub tvFolders_AfterSelect(Sender As Object, EventArgs As TreeViewEventArgs) Handles tvFolders.AfterSelect
         Dim Info = TryCast(EventArgs.Node.Tag, DirectoryNodeInfo)
@@ -253,7 +459,24 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
     Private Sub lvFiles_MouseDoubleClick(Sender As Object, EventArgs As MouseEventArgs) Handles lvFiles.MouseDoubleClick
         If EventArgs.Button <> MouseButtons.Left OrElse lvFiles.SelectedItems.Count <> 1 Then Return
-        SaveSelectedFiles(Me, EventArgs)
+
+        Dim Entry = TryCast(lvFiles.SelectedItems(0).Tag, EmbeddedFileSystem.ContentListEntry)
+        If Entry IsNot Nothing AndAlso IsDirectory(Entry) Then
+            NavigateToDirectory(Entry.ChildAnchorId)
+            Return
+        End If
+
+        SaveSelectedEntries(Me, EventArgs)
+    End Sub
+
+    Private Sub lvFiles_ColumnClick(Sender As Object, EventArgs As ColumnClickEventArgs) Handles lvFiles.ColumnClick
+        If EventArgs.Column = _ListSorter.Column Then
+            _ListSorter.Order = If(_ListSorter.Order = SortOrder.Ascending, SortOrder.Descending, SortOrder.Ascending)
+        Else
+            _ListSorter.Column = EventArgs.Column
+            _ListSorter.Order = SortOrder.Ascending
+        End If
+        lvFiles.Sort()
     End Sub
 
     Private Sub FolderContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs) Handles _FolderContextMenu.Opening
@@ -283,15 +506,21 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
     Private Sub FileContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs) Handles _FileContextMenu.Opening
         _FileContextMenu.Items.Clear()
-        Dim Entries = GetSelectedFileEntries()
+        Dim Entries = GetSelectedEntries()
         If Entries.Count = 0 Then
             EventArgs.Cancel = True
             Return
         End If
 
-        If Entries.Count = 1 Then AddMenuItem(_FileContextMenu, "Save As...", AddressOf SaveSelectedFiles)
-        If Entries.Count > 1 Then AddMenuItem(_FileContextMenu, "Save Selected To Folder...", AddressOf SaveSelectedFiles)
-        AddMenuItem(_FileContextMenu, "Delete", AddressOf DeleteSelectedFiles)
+        If Entries.Count = 1 AndAlso IsDirectory(Entries(0)) Then
+            AddMenuItem(_FileContextMenu, "Open", Sub() NavigateToDirectory(Entries(0).ChildAnchorId))
+            AddMenuItem(_FileContextMenu, "Save Folder As...", AddressOf SaveSelectedEntries)
+        ElseIf Entries.Count = 1 Then
+            AddMenuItem(_FileContextMenu, "Save As...", AddressOf SaveSelectedEntries)
+        Else
+            AddMenuItem(_FileContextMenu, "Save Selected To Folder...", AddressOf SaveSelectedEntries)
+        End If
+        AddMenuItem(_FileContextMenu, "Delete", AddressOf DeleteSelectedEntries)
         _FileContextMenu.Items.Add(New ToolStripSeparator())
         AddMenuItem(_FileContextMenu, "Upload File(s)...", AddressOf UploadFilesFromDialog)
         AddMenuItem(_FileContextMenu, "New Folder...", AddressOf CreateFolderFromPrompt)
@@ -350,78 +579,246 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub UploadPaths(Paths As IEnumerable(Of String), TargetDirectoryAnchorId As Long)
-        Dim PathList = Paths.Where(Function(x) String.IsNullOrWhiteSpace(x) = False).ToList()
-        If PathList.Count = 0 Then Return
+        Dim RootPaths = Paths.Where(Function(x) String.IsNullOrWhiteSpace(x) = False).ToList()
+        If RootPaths.Count = 0 Then Return
 
         ExecuteLongBlockingActionOnThread(
-            Sub()
-                For Each sourcePath In PathList
-                    If File.Exists(sourcePath) Then
-                        UploadFile(sourcePath, TargetDirectoryAnchorId)
-                    ElseIf Directory.Exists(sourcePath) Then
-                        UploadDirectory(sourcePath, TargetDirectoryAnchorId)
-                    End If
-                Next
+            Sub(Report)
+                Report.SetText("Preparing upload...")
+                Dim WorkItems = BuildUploadWorkList(RootPaths)
+                If WorkItems.Count = 0 Then Return
+
+                ' The copy starts as soon as the paths are walked; the total byte count - the part
+                ' that is slow over a network share or a deep tree - is summed on a second thread and
+                ' published when ready. The copy reports byte progress only once the total is known.
+                Dim TotalSize As New TotalSizeBox()
+                Using Cancellation As New CancellationTokenSource()
+                    Dim Sizer = New Thread(
+                        Sub()
+                            Try
+                                Dim Sum As Long = 0
+                                For Each workItem In WorkItems
+                                    Cancellation.Token.ThrowIfCancellationRequested()
+                                    If workItem.IsDirectory = False Then Sum += New FileInfo(workItem.SourcePath).Length
+                                Next
+                                TotalSize.Publish(Sum)
+                            Catch
+                                ' Cancelled by a copy failure, or a source file vanished mid-scan;
+                                ' the progress bar simply stays indeterminate.
+                            End Try
+                        End Sub) With {.IsBackground = True, .Name = "Upload size scan"}
+                    Sizer.Start()
+
+                    Try
+                        CopyUploadWorkList(WorkItems, TargetDirectoryAnchorId, TotalSize, Report)
+                    Finally
+                        Cancellation.Cancel()
+                        Sizer.Join()
+                    End Try
+                End Using
             End Sub,
             "One or more items could not be uploaded.")
 
         RefreshFileSystemView()
     End Sub
 
-    Private Sub UploadFile(SourceFilePath As String, ParentDirectoryAnchorId As Long)
-        Dim FileName = Path.GetFileName(SourceFilePath)
-        EnsureDestinationNameDoesNotExist(ParentDirectoryAnchorId, FileName)
+    ''' <summary>
+    ''' Walks <paramref name="RootPaths"/> and returns every directory-create and file-copy step,
+    ''' ordered so a directory always precedes its contents.
+    ''' </summary>
+    Private Shared Function BuildUploadWorkList(RootPaths As IEnumerable(Of String)) As List(Of UploadWorkItem)
+        Dim Result As New List(Of UploadWorkItem)()
+        For Each rootPath In RootPaths
+            If File.Exists(rootPath) Then
+                Result.Add(New UploadWorkItem(rootPath, String.Empty, Path.GetFileName(rootPath), False))
+            ElseIf Directory.Exists(rootPath) Then
+                AddDirectoryToWorkList(rootPath, String.Empty, New DirectoryInfo(rootPath).Name, Result)
+            End If
+        Next
+        Return Result
+    End Function
 
-        Dim FileAnchorId = _FileSystem.CreateFile(ParentDirectoryAnchorId, FileName)
-        Try
-            Using SourceStream = New FileStream(SourceFilePath, FileMode.Open, FileAccess.Read, FileShare.Read)
-                Using DestinationStream = _FileSystem.OpenFile(FileAnchorId)
-                    SourceStream.CopyTo(DestinationStream, 1024 * 1024)
-                    DestinationStream.Flush()
+    Private Shared Sub AddDirectoryToWorkList(DiskPath As String, RelativeParent As String, Name As String,
+                                              Result As List(Of UploadWorkItem))
+        Result.Add(New UploadWorkItem(Nothing, RelativeParent, Name, True))
+        Dim ChildRelativeParent = If(RelativeParent.Length = 0, Name, $"{RelativeParent}/{Name}")
+
+        For Each filePath In Directory.EnumerateFiles(DiskPath)
+            Result.Add(New UploadWorkItem(filePath, ChildRelativeParent, Path.GetFileName(filePath), False))
+        Next
+        For Each childPath In Directory.EnumerateDirectories(DiskPath)
+            AddDirectoryToWorkList(childPath, ChildRelativeParent, New DirectoryInfo(childPath).Name, Result)
+        Next
+    End Sub
+
+    Private Sub CopyUploadWorkList(WorkItems As List(Of UploadWorkItem), TargetDirectoryAnchorId As Long,
+                                   TotalSize As TotalSizeBox, Report As i00CodeLib.frmProgress.ProgressReport)
+        Dim FolderAnchors As New Dictionary(Of String, Long)() From {{String.Empty, TargetDirectoryAnchorId}}
+        Dim Resolution As ConflictChoice = ConflictChoice.Cancel
+        Dim Resolved As Boolean = False
+        Dim CopiedBytes As Long = 0
+        Dim FileCount = WorkItems.Where(Function(x) x.IsDirectory = False).Count()
+        Dim CopiedFiles = 0
+        Dim LastReport As Date = Date.MinValue
+
+        For Each workItem In WorkItems
+            If workItem.IsDirectory Then
+                EnsureUploadFolder(workItem.RelativeParent, workItem.Name, TargetDirectoryAnchorId, FolderAnchors)
+                Continue For
+            End If
+
+            Dim ParentAnchor = EnsureUploadFolderPath(workItem.RelativeParent, TargetDirectoryAnchorId, FolderAnchors)
+            Dim Existing = _FileSystem.GetDirectoryEntries(ParentAnchor).
+                                       FirstOrDefault(Function(x) String.Equals(x.Name, workItem.Name, StringComparison.OrdinalIgnoreCase))
+
+            Dim Replace As Boolean
+            If Existing Is Nothing Then
+                Replace = False
+            ElseIf IsDirectory(Existing) Then
+                Throw New IOException($"A folder named '{workItem.Name}' already exists where a file is being uploaded.")
+            ElseIf Existing.EntryType = EmbeddedFileSystem.EntryTypes.PendingFile Then
+                ' A half-written file from an interrupted run is always overwritten.
+                Replace = True
+            Else
+                Dim Choice As ConflictChoice
+                If Resolved Then
+                    Choice = Resolution
+                Else
+                    Choice = PromptForConflictChoice(Report, workItem.Name)
+                    If Choice = ConflictChoice.SkipAll OrElse Choice = ConflictChoice.ReplaceAll Then
+                        Resolution = Choice
+                        Resolved = True
+                    End If
+                End If
+
+                Select Case Choice
+                    Case ConflictChoice.Cancel
+                        Throw New OperationCanceledException()
+                    Case ConflictChoice.Skip, ConflictChoice.SkipAll
+                        CopiedFiles += 1
+                        CopiedBytes += SafeFileLength(workItem.SourcePath)
+                        ReportUploadProgress(Report, TotalSize, CopiedBytes, CopiedFiles, FileCount, workItem.Name, LastReport, True)
+                        Continue For
+                    Case Else
+                        Replace = True
+                End Select
+            End If
+
+            If Replace Then _FileSystem.DeleteEntry(ParentAnchor, Existing.Name)
+
+            Dim FileAnchorId = _FileSystem.CreateFile(ParentAnchor, workItem.Name)
+            Try
+                Using SourceStream = New FileStream(workItem.SourcePath, FileMode.Open, FileAccess.Read, FileShare.Read)
+                    Using DestinationStream = _FileSystem.OpenFile(FileAnchorId)
+                        Dim Buffer(1024 * 1024 - 1) As Byte
+                        While True
+                            Dim BytesRead = SourceStream.Read(Buffer, 0, Buffer.Length)
+                            If BytesRead = 0 Then Exit While
+                            DestinationStream.Write(Buffer, 0, BytesRead)
+                            CopiedBytes += BytesRead
+                            ReportUploadProgress(Report, TotalSize, CopiedBytes, CopiedFiles, FileCount, workItem.Name, LastReport, False)
+                        End While
+                        DestinationStream.Flush()
+                    End Using
                 End Using
-            End Using
-        Catch
-            Try
-                _FileSystem.DeleteEntry(ParentDirectoryAnchorId, FileName)
             Catch
+                Try
+                    _FileSystem.DeleteEntry(ParentAnchor, workItem.Name)
+                Catch
+                End Try
+                Throw
             End Try
-            Throw
-        End Try
+
+            CopiedFiles += 1
+            ReportUploadProgress(Report, TotalSize, CopiedBytes, CopiedFiles, FileCount, workItem.Name, LastReport, True)
+        Next
     End Sub
 
-    Private Sub UploadDirectory(SourceDirectoryPath As String, ParentDirectoryAnchorId As Long)
-        Dim DirectoryName = New DirectoryInfo(SourceDirectoryPath).Name
-        EnsureDestinationNameDoesNotExist(ParentDirectoryAnchorId, DirectoryName)
-        Dim DirectoryAnchorId = _FileSystem.CreateDirectory(ParentDirectoryAnchorId, DirectoryName)
+    ''' <summary>
+    ''' Pushes the current byte/file counts to the progress dialog. Throttled to ~10 updates a second
+    ''' unless <paramref name="Force"/> is set (file finished, or an item was skipped).
+    ''' </summary>
+    Private Shared Sub ReportUploadProgress(Report As i00CodeLib.frmProgress.ProgressReport, TotalSize As TotalSizeBox,
+                                            CopiedBytes As Long, CopiedFiles As Integer, FileCount As Integer, Name As String,
+                                            ByRef LastReport As Date, Force As Boolean)
+        Dim Timestamp = Date.UtcNow
+        If Force = False AndAlso Timestamp.Subtract(LastReport).TotalMilliseconds < 100 Then Return
+        LastReport = Timestamp
 
-        Try
-            For Each sourceFilePath In Directory.EnumerateFiles(SourceDirectoryPath)
-                UploadFile(sourceFilePath, DirectoryAnchorId)
-            Next
-            For Each childDirectoryPath In Directory.EnumerateDirectories(SourceDirectoryPath)
-                UploadDirectory(childDirectoryPath, DirectoryAnchorId)
-            Next
-        Catch
-            Try
-                _FileSystem.DeleteEntry(ParentDirectoryAnchorId, DirectoryName)
-            Catch
-            End Try
-            Throw
-        End Try
-    End Sub
-
-    Private Sub EnsureDestinationNameDoesNotExist(ParentDirectoryAnchorId As Long, Name As String)
-        If _FileSystem.GetDirectoryEntries(ParentDirectoryAnchorId).
-                       Any(Function(x) String.Equals(x.Name, Name, StringComparison.OrdinalIgnoreCase)) Then
-            Throw New IOException($"An item named '{Name}' already exists in the destination folder.")
+        Dim Total = TotalSize.Value
+        If Total.HasValue Then
+            Report.SetText($"Uploading {Name} ({CopiedFiles:N0} of {FileCount:N0})...")
+            Report.SetProgress(CopiedBytes, Math.Max(Total.Value, CopiedBytes))
+        Else
+            Report.SetText($"Uploading {Name} ({FormatByteLength(CopiedBytes)} copied)...")
         End If
     End Sub
 
-    Private Sub SaveSelectedFiles(Sender As Object, EventArgs As EventArgs)
-        Dim Entries = GetSelectedFileEntries()
+    Private Shared Function SafeFileLength(FilePath As String) As Long
+        Try
+            Return New FileInfo(FilePath).Length
+        Catch
+            Return 0
+        End Try
+    End Function
+
+    Private Function EnsureUploadFolderPath(RelativeParent As String, TargetDirectoryAnchorId As Long,
+                                            FolderAnchors As Dictionary(Of String, Long)) As Long
+        If RelativeParent.Length = 0 Then Return TargetDirectoryAnchorId
+
+        Dim CachedAnchor As Long
+        If FolderAnchors.TryGetValue(RelativeParent, CachedAnchor) Then Return CachedAnchor
+
+        Dim SeparatorIndex = RelativeParent.LastIndexOf("/"c)
+        Dim GrandParent = If(SeparatorIndex < 0, String.Empty, RelativeParent.Substring(0, SeparatorIndex))
+        Dim Name = If(SeparatorIndex < 0, RelativeParent, RelativeParent.Substring(SeparatorIndex + 1))
+        Return EnsureUploadFolder(GrandParent, Name, TargetDirectoryAnchorId, FolderAnchors)
+    End Function
+
+    Private Function EnsureUploadFolder(RelativeParent As String, Name As String, TargetDirectoryAnchorId As Long,
+                                        FolderAnchors As Dictionary(Of String, Long)) As Long
+        Dim ParentAnchor = EnsureUploadFolderPath(RelativeParent, TargetDirectoryAnchorId, FolderAnchors)
+        Dim Key = If(RelativeParent.Length = 0, Name, $"{RelativeParent}/{Name}")
+
+        Dim CachedAnchor As Long
+        If FolderAnchors.TryGetValue(Key, CachedAnchor) Then Return CachedAnchor
+
+        Dim Existing = _FileSystem.GetDirectoryEntries(ParentAnchor).
+                                   FirstOrDefault(Function(x) String.Equals(x.Name, Name, StringComparison.OrdinalIgnoreCase))
+        Dim Anchor As Long
+        If Existing Is Nothing Then
+            Anchor = _FileSystem.CreateDirectory(ParentAnchor, Name)
+        ElseIf IsDirectory(Existing) Then
+            ' An upload merges into a folder that already exists.
+            Anchor = Existing.ChildAnchorId
+        Else
+            Throw New IOException($"A file named '{Name}' already exists where a folder is being uploaded.")
+        End If
+
+        FolderAnchors(Key) = Anchor
+        Return Anchor
+    End Function
+
+    Private Shared Function PromptForConflictChoice(Report As i00CodeLib.frmProgress.ProgressReport, Name As String) As ConflictChoice
+        Dim Choice As ConflictChoice = ConflictChoice.Cancel
+        Dim Buttons As New List(Of i00CodeLib.MessageBox.MsgBoxButton) From {
+            New i00CodeLib.MessageBox.MsgBoxButton("Skip", Sub() Choice = ConflictChoice.Skip),
+            New i00CodeLib.MessageBox.MsgBoxButton("Skip All", Sub() Choice = ConflictChoice.SkipAll),
+            New i00CodeLib.MessageBox.MsgBoxButton("Replace", Sub() Choice = ConflictChoice.Replace),
+            New i00CodeLib.MessageBox.MsgBoxButton("Replace All", Sub() Choice = ConflictChoice.ReplaceAll),
+            New i00CodeLib.MessageBox.MsgBoxButton("Cancel", Sub() Choice = ConflictChoice.Cancel)
+        }
+
+        Report.ShowMessageBox($"'{Name}' already exists in the destination folder.{Environment.NewLine}What would you like to do?",
+                              MsgBoxStyle.Exclamation, "Replace File", Buttons)
+        Return Choice
+    End Function
+
+    Private Sub SaveSelectedEntries(Sender As Object, EventArgs As EventArgs)
+        Dim Entries = GetSelectedEntries()
         If Entries.Count = 0 Then Return
 
-        If Entries.Count = 1 Then
+        If Entries.Count = 1 AndAlso IsDirectory(Entries(0)) = False Then
             Using Dialog As New SaveFileDialog With {
                 .Title = "Save file",
                 .FileName = Entries(0).Name,
@@ -429,20 +826,28 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 .OverwritePrompt = True
             }
                 If Dialog.ShowDialog(Me) <> DialogResult.OK Then Return
-                ExportFile(Entries(0), Dialog.FileName)
+                ExecuteLongBlockingActionOnThread(Sub() ExportFile(Entries(0), Dialog.FileName),
+                                                  "The file could not be saved.")
             End Using
             Return
         End If
 
-        Using Dialog As New FolderBrowserDialog With {.Description = "Select a destination for the selected files"}
+        Dim Description = If(Entries.Count = 1, "Select where to save the folder", "Select a destination for the selected items")
+        Using Dialog As New FolderBrowserDialog With {.Description = Description}
             If Dialog.ShowDialog(Me) <> DialogResult.OK Then Return
+            Dim DestinationRoot = Dialog.SelectedPath
             ExecuteLongBlockingActionOnThread(
                 Sub()
                     For Each entry In Entries
-                        ExportFile(entry, Path.Combine(Dialog.SelectedPath, MakeSafeFileName(entry.Name)))
+                        Dim OutputPath = Path.Combine(DestinationRoot, MakeSafeFileName(entry.Name))
+                        If IsDirectory(entry) Then
+                            ExportDirectory(entry.ChildAnchorId, OutputPath)
+                        Else
+                            ExportFile(entry, OutputPath)
+                        End If
                     Next
                 End Sub,
-                "One or more files could not be saved.")
+                "One or more items could not be saved.")
         End Using
     End Sub
 
@@ -500,22 +905,31 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Return Result
     End Function
 
-    Private Sub DeleteSelectedFiles(Sender As Object, EventArgs As EventArgs)
-        Dim Entries = GetSelectedFileEntries()
+    Private Sub DeleteSelectedEntries(Sender As Object, EventArgs As EventArgs)
+        Dim Entries = GetSelectedEntries()
         If Entries.Count = 0 Then Return
 
-        Dim Prompt = If(Entries.Count = 1,
-                        $"Delete '{Entries(0).Name}'?",
+        Dim ContainsFolder = Entries.Any(AddressOf IsDirectory)
+        Dim Prompt As String
+        If Entries.Count = 1 Then
+            Prompt = If(IsDirectory(Entries(0)),
+                        $"Delete '{Entries(0).Name}' and all of its contents?",
+                        $"Delete '{Entries(0).Name}'?")
+        Else
+            Prompt = If(ContainsFolder,
+                        $"Delete the {Entries.Count:N0} selected items, including all folder contents?",
                         $"Delete the {Entries.Count:N0} selected files?")
+        End If
         If i00CodeLib.MsgBox(Me, Prompt, MsgBoxStyle.YesNo Or MsgBoxStyle.Exclamation) <> MsgBoxResult.Yes Then Return
 
+        Dim DirectoryAnchorId = _CurrentDirectoryAnchorId
         ExecuteLongBlockingActionOnThread(
             Sub()
                 For Each entry In Entries
-                    _FileSystem.DeleteEntry(_CurrentDirectoryAnchorId, entry.Name)
+                    _FileSystem.DeleteEntry(DirectoryAnchorId, entry.Name)
                 Next
             End Sub,
-            "One or more files could not be deleted.")
+            "One or more items could not be deleted.")
 
         RefreshFileSystemView()
     End Sub
@@ -571,7 +985,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Function
 
     Private Sub lvFiles_DragDrop(Sender As Object, EventArgs As DragEventArgs) Handles lvFiles.DragDrop
-        UploadDroppedPaths(EventArgs.Data, _CurrentDirectoryAnchorId)
+        QueueDroppedPathUpload(EventArgs.Data, _CurrentDirectoryAnchorId)
     End Sub
 
     Private Sub tvFolders_DragDrop(Sender As Object, EventArgs As DragEventArgs) Handles tvFolders.DragDrop
@@ -580,14 +994,20 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If TargetNode Is Nothing Then Return
         Dim Info = TryCast(TargetNode.Tag, DirectoryNodeInfo)
         If Info Is Nothing Then Return
-        UploadDroppedPaths(EventArgs.Data, Info.AnchorId)
+        QueueDroppedPathUpload(EventArgs.Data, Info.AnchorId)
     End Sub
 
-    Private Sub UploadDroppedPaths(Data As IDataObject, TargetDirectoryAnchorId As Long)
+    ''' <summary>
+    ''' Reads the dropped paths and schedules the upload to run once this handler has returned, so the
+    ''' drop finishes immediately and the source window (Explorer) is never held while files copy.
+    ''' </summary>
+    Private Sub QueueDroppedPathUpload(Data As IDataObject, TargetDirectoryAnchorId As Long)
         If Data Is Nothing OrElse Data.GetDataPresent(DataFormats.FileDrop) = False Then Return
         Dim Paths = TryCast(Data.GetData(DataFormats.FileDrop), String())
         If Paths Is Nothing OrElse Paths.Length = 0 Then Return
-        UploadPaths(Paths, TargetDirectoryAnchorId)
+
+        Dim DroppedPaths = DirectCast(Paths.Clone(), String())
+        BeginInvoke(Sub() UploadPaths(DroppedPaths, TargetDirectoryAnchorId))
     End Sub
 
     Private Sub lvFiles_MouseDown(Sender As Object, EventArgs As MouseEventArgs) Handles lvFiles.MouseDown
@@ -600,7 +1020,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If IsDragThresholdExceeded(_ListDragStart, EventArgs.Location) = False Then Return
         _ListDragArmed = False
 
-        Dim Entries = GetSelectedFileEntries()
+        Dim Entries = GetSelectedEntries()
         If Entries.Count = 0 Then Return
         BeginExternalFileDrag(Entries)
     End Sub
@@ -667,8 +1087,12 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Try
             Dim OutputPaths As New List(Of String)(Entries.Count)
             For Each entry In Entries
-                Dim OutputPath = GetUniquePath(TemporaryDirectory, MakeSafeFileName(entry.Name), False)
-                ExportFile(entry, OutputPath)
+                Dim OutputPath = GetUniquePath(TemporaryDirectory, MakeSafeFileName(entry.Name), IsDirectory(entry))
+                If IsDirectory(entry) Then
+                    ExportDirectory(entry.ChildAnchorId, OutputPath)
+                Else
+                    ExportFile(entry, OutputPath)
+                End If
                 OutputPaths.Add(OutputPath)
             Next
             Return New DragExport(TemporaryDirectory, OutputPaths.ToArray())
@@ -725,24 +1149,35 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Return
         End If
 
-        If EventArgs.KeyCode = Keys.Delete AndAlso lvFiles.Focused AndAlso lvFiles.SelectedItems.Count > 0 Then
-            DeleteSelectedFiles(Me, EventArgs)
-            EventArgs.Handled = True
+        If EventArgs.KeyCode = Keys.Delete Then
+            If lvFiles.Focused AndAlso lvFiles.SelectedItems.Count > 0 Then
+                DeleteSelectedEntries(Me, EventArgs)
+                EventArgs.Handled = True
+            ElseIf tvFolders.Focused AndAlso tvFolders.SelectedNode IsNot Nothing AndAlso tvFolders.SelectedNode.Parent IsNot Nothing Then
+                DeleteSelectedFolder(Me, EventArgs)
+                EventArgs.Handled = True
+            End If
         End If
     End Sub
 
     Private Sub ExecuteLongBlockingActionOnThread(Operation As Action, ErrorMessage As String)
-        Using frmProgress As New i00CodeLib.frmProgress(
+        ExecuteLongBlockingActionOnThread(Sub(Report) Operation(), ErrorMessage)
+    End Sub
+
+    Private Sub ExecuteLongBlockingActionOnThread(Operation As Action(Of i00CodeLib.frmProgress.ProgressReport), ErrorMessage As String)
+        Using ProgressForm As New i00CodeLib.frmProgress(
                 Sub(Parameter, ProgressReport)
                     Try
-                        Operation()
+                        Operation(ProgressReport)
+                    Catch ex As OperationCanceledException
+                        ' The user cancelled at a prompt; nothing to report.
                     Catch ex As Exception When ex.getThreadAbortException Is Nothing
-                        i00CodeLib.MsgBox(ProgressReport.frmProgress,
-                            $"{ErrorMessage}{Environment.NewLine}{ex.GetType.Name}: {Environment.NewLine}{ex.Message}",
+                        ProgressReport.ShowMessageBox(
+                            $"{ErrorMessage}{Environment.NewLine}{ex.GetType.Name}:{Environment.NewLine}{ex.Message}",
                             MsgBoxStyle.Critical)
                     End Try
                 End Sub, Nothing)
-            frmProgress.ShowDialog(Me)
+            ProgressForm.ShowDialog(Me)
         End Using
     End Sub
 
@@ -800,11 +1235,17 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Protected Overrides Sub Dispose(Disposing As Boolean)
         If _Disposed Then Return
 
+        ' Stops any executable-icon pass and waits for it to release the file it may be reading,
+        ' so the caller can dispose the file system without hitting an open-stream guard.
+        _Disposed = True
+        _IconGeneration += 1
+        _ExecutableIconThread?.Join(TimeSpan.FromSeconds(5))
+
         If Disposing Then
             If components IsNot Nothing Then components.Dispose()
+            _IconProvider.Dispose()
         End If
 
-        _Disposed = True
         MyBase.Dispose(Disposing)
     End Sub
 
