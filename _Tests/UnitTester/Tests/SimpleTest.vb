@@ -80,11 +80,11 @@
                                              Dim BenchmarkResult = TryCast(TestResult, BenchmarkResult)
                                              Dim SuccessMessage As String = BenchmarkResult?.Message
                                              If SuccessMessage Is Nothing Then
+                                                 Dim ForeColor As String = ""
                                                  If sw.Elapsed.TotalSeconds > 1 Then
-
-                                                     Dim qwe = ""
+                                                     ForeColor = ConsoleEx.Format.Foreground.DarkYellow
                                                  End If
-                                                 SuccessMessage = $"{sw.Elapsed.Format()}"
+                                                 SuccessMessage = $"{ForeColor}{sw.Elapsed.Format()}"
                                              End If
 
                                              If test.ExpectedValueSet Then

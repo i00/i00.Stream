@@ -78,8 +78,13 @@
   <ItemGroup>
     <Compile Include="AppDomainObject.vb" />
     <Compile Include="Autoexec.vb" />
-    <Compile Include="Extensions.vb" />
-    <Compile Include="Misc.vb" />
+    <Compile Include="Misc\ConsoleEx\Formatting.vb" />
+    <Compile Include="Misc\ConsoleEx\Misc.vb" />
+    <Compile Include="Misc\ConsoleEx\ReadLine.vb" />
+    <Compile Include="Misc\ConsoleEx\_Base.vb" />
+    <Compile Include="Misc\Drawing.vb" />
+    <Compile Include="Misc\Extensions.vb" />
+    <Compile Include="Misc\Misc.vb" />
     <Compile Include="My Project\AssemblyInfo.vb" />
     <Compile Include="My Project\Application.Designer.vb">
       <AutoGen>True</AutoGen>

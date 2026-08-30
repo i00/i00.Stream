@@ -1,5 +1,19 @@
 ﻿Friend Module Extensions
 
+    <System.Runtime.CompilerServices.Extension>
+    Public Function RegexEscape(Text As String) As String
+        RegexEscape = System.Text.RegularExpressions.Regex.Escape(Text)
+        If RegexEscape?.Contains("]") OrElse RegexEscape?.Contains("-") Then
+            'to fix - and ] not escaping ... need to do this when putting in chr match string "[]"
+            RegexEscape = System.Text.RegularExpressions.Regex.Replace(RegexEscape, "(?<=[^\\]|[^\\]\\(\\\\)*|^)(-|])", Function(m) "\" & m.Value)
+        End If
+    End Function
+
+    <Runtime.CompilerServices.Extension()>
+    Public Function GetAttribute(Of T)(item As [Enum]) As T
+        Dim fi As Reflection.FieldInfo = item.GetType().GetField(item.ToString())
+        Return DirectCast(fi.GetCustomAttributes(GetType(T), False).FirstOrDefault, T)
+    End Function
 
     <System.Runtime.CompilerServices.Extension>
     Public Function Format(ts As TimeSpan) As String
