@@ -589,6 +589,234 @@ Namespace Tests
 
             End Sub
 
+            ' ================================================================================
+            ' Bulk zeroing batches under one DeferPublish scope (C2-a)
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Verifies that a non-sparse Clear folds its per-chunk writes into a single
+            ''' metadata publish rather than publishing once per chunk.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub NonSparseClearFoldsPerChunkWritesIntoOneMetadataPublish()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .StoreSparseChunks = False
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Const Chunks As Integer = 20
+                        Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * Chunks, 5301))
+
+                        Dim SequenceBefore = Cs.GetStructure().HeaderSequence
+
+                        Cs.Clear(0, CLng(Cs.Options.ChunkSize) * Chunks)
+
+                        Dim Published = Cs.GetStructure().HeaderSequence - SequenceBefore
+
+                        AssertTrue(Published > 0, "A non-sparse Clear published no metadata.")
+                        AssertTrue(
+                            Published <= 2,
+                            $"A non-sparse Clear of {Chunks} chunks published {Published} times; it should batch into one.")
+
+                        AssertTrue(Cs.ToArray().All(Function(b) b = 0), "Non-sparse Clear did not zero the range.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that losing the process while a non-sparse Clear is publishing
+            ''' reopens the stream to a consistent known state - either fully cleared or
+            ''' not cleared at all, never a partially cleared range. Before C2-a each chunk
+            ''' published on its own, so an interruption could leave the first part of the
+            ''' range cleared and the rest not.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub NonSparseClearInterruptedWhilePublishingReopensToAKnownState()
+
+                Using Ms As New FailingMemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .StoreSparseChunks = False
+                    }
+
+                    Dim Baseline = GenerateRandomData(ChunkedStream.DefaultChunkSize * 12, 5401)
+
+                    Dim Cs = ChunkedStream.Open(Ms, Options)
+                    Cs.Write(0, Baseline)
+                    Cs.Flush()
+
+                    ' From here every backing write fails - the machine "loses power"
+                    ' during the clear's single batched metadata publish.
+                    Ms.FailFromWriteNumber = Ms.WriteCount + 1
+
+                    Try
+                        Cs.Clear(0, CLng(ChunkedStream.DefaultChunkSize) * 12)
+                    Catch
+                    End Try
+
+                    ' Abandon the stream without disposing - a crash writes nothing more.
+                    Cs = Nothing
+                    Ms.FailFromWriteNumber = 0
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+
+                        AssertEqual(ChunkedStream.RecoveryStates.None, Reopened.RecoveryStateAtOpen,
+                                    "A non-sparse Clear writes no recovery state.")
+
+                        Dim Content = Reopened.ToArray()
+
+                        AssertTrue(
+                            Content.All(Function(b) b = 0) OrElse Content.SequenceEqual(Baseline),
+                            "An interrupted non-sparse Clear left a partially cleared range.")
+
+                        Reopened.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that a non-sparse Clear performed inside a checkpoint is undone by a
+            ''' rollback and kept by a commit - the batching scope defers to the checkpoint.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub NonSparseClearInsideACheckpointRollsBackAndCommitsAtomically()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .StoreSparseChunks = False
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Baseline = GenerateRandomData(Cs.Options.ChunkSize * 6, 5501)
+                        Cs.Write(0, Baseline)
+
+                        Using Checkpoint = Cs.CreateCheckpoint()
+                            Cs.Clear(0, CLng(Cs.Options.ChunkSize) * 6)
+                            AssertTrue(Cs.ToArray().All(Function(b) b = 0),
+                                       "Clear inside a checkpoint did not take effect in memory.")
+                            Checkpoint.Rollback()
+                        End Using
+
+                        AssertBytesEqual(Baseline, Cs.ToArray(),
+                                         "A checkpoint rollback did not undo a non-sparse Clear.")
+                        Cs.Validate()
+
+                        Using Checkpoint = Cs.CreateCheckpoint()
+                            Cs.Clear(0, CLng(Cs.Options.ChunkSize) * 6)
+                            Checkpoint.Commit()
+                        End Using
+
+                        AssertTrue(Cs.ToArray().All(Function(b) b = 0),
+                                   "A committed non-sparse Clear inside a checkpoint was lost.")
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that a non-sparse InsertNullBytes performed inside a caller's
+            ''' DeferPublish scope is rolled back when that outer scope is abandoned.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub NonSparseInsertNullBytesInsideOuterDeferPublishScopeRollsBackWhenAbandoned()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .StoreSparseChunks = False
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Baseline = GenerateRandomData(Cs.Options.ChunkSize * 3, 5601)
+                        Cs.Write(0, Baseline)
+
+                        Using Committed = Cs.DeferPublish()
+                            Committed.Publish()
+                        End Using
+
+                        Using Outer = Cs.DeferPublish()
+                            Cs.InsertNullBytes(Cs.Options.ChunkSize, CLng(Cs.Options.ChunkSize) * 5)
+                            AssertEqual(Baseline.Length + CLng(Cs.Options.ChunkSize) * 5, Cs.Length,
+                                        "InsertNullBytes did not extend the logical length in memory.")
+                            ' Outer abandoned - no Publish.
+                        End Using
+
+                        AssertBytesEqual(
+                            Baseline,
+                            Cs.ToArray(),
+                            "An abandoned outer DeferPublish scope did not roll back a nested non-sparse InsertNullBytes.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' An in-memory stream that throws on a chosen Write call, to exercise the
+            ''' backing-store failure paths.
+            ''' </summary>
+            Private NotInheritable Class FailingMemoryStream
+                Inherits MemoryStream
+
+                ''' <summary>1-based index of the Write call that should throw; 0 disables the failure.</summary>
+                Public Property FailOnWriteNumber As Integer
+
+                ''' <summary>1-based index from which every Write call should throw; 0 disables it.</summary>
+                Public Property FailFromWriteNumber As Integer
+
+                Public Property WriteCount As Integer
+
+                Public Overrides Sub Write(Buffer As Byte(), Offset As Integer, Count As Integer)
+
+                    WriteCount += 1
+
+                    If FailOnWriteNumber > 0 AndAlso WriteCount = FailOnWriteNumber Then
+                        Throw New IOException("Simulated backing-store write failure.")
+                    End If
+
+                    If FailFromWriteNumber > 0 AndAlso WriteCount >= FailFromWriteNumber Then
+                        Throw New IOException("Simulated backing-store write failure.")
+                    End If
+
+                    MyBase.Write(Buffer, Offset, Count)
+
+                End Sub
+
+            End Class
+
         End Class
 
     End Class

@@ -4,6 +4,34 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ---
 
+## 2026-08-30
+
+### C2-a — non-sparse Clear / InsertNullBytes now batch into one publish — FIXED
+`ClearCore` / `InsertNullBytesCore` (`_ChunkedStream.vb`), non-sparse path only, looped over
+`WriteCore` / `InsertCore` and each iteration published (`PersistIndexAndHeader`) — an N-chunk
+`Clear` was N durable publishes, and an interruption part way through left the front of the
+range cleared and persisted while the rest was not.
+Fix: the non-sparse loop now runs inside a single `DeferPublish` scope
+(`If(MetadataPublishSuspended, Nothing, DeferPublish())` — no inner scope when a checkpoint or
+an outer scope is already the boundary), `Scope.Publish()` after the loop, `Scope.Dispose()`
+in a `Finally`. One published generation; an interruption reopens all-or-nothing. The methods
+were split by branch (sparse path keeps its own `Try … Catch : _Faulted = True : Throw` and
+returns early; the non-sparse path drops it — `WriteCore` / `InsertCore` already fault
+themselves, and the scope's rollback clears `_Faulted` last). `InvalidateChunkCache()` hoisted
+above the branch.
+Tests (`Correctness and survival/DeferredPublish.vb`, +4, suite 246 → 250):
+`NonSparseClearFoldsPerChunkWritesIntoOneMetadataPublish`,
+`NonSparseClearInterruptedWhilePublishingReopensToAKnownState` (new `FailingMemoryStream`
+double),
+`NonSparseClearInsideACheckpointRollsBackAndCommitsAtomically`,
+`NonSparseInsertNullBytesInsideOuterDeferPublishScopeRollsBackWhenAbandoned`.
+Note: for all-zero data the loop writes no physical records (zeros → sparse extents), so the
+only backing I/O is the batched publish; a persistent I/O failure *during* that publish is
+completed by `EndDeferPublish` on scope close rather than rolled back (pre-existing
+`HasUnpublishedWork` behaviour — TODO DeferPublish-c).
+
+---
+
 ## 2026-08-28 — review follow-through
 
 ### C1 — anchor ids were reused after a checkpoint / DeferPublish rollback — FIXED

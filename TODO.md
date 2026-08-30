@@ -45,11 +45,6 @@ true byte count. Recover the real length from the anchor geometry
 
 ## C2 follow-ups (fault flag shipped; these tighten it)
 
-- **C2-a — compound ops still aren't atomic (highest value).** `Clear` / `InsertNullBytes`
-  on a non-sparse stream loop over `WriteCore` / `InsertCore`, each of which publishes.
-  Wrap those loops in a `DeferPublish` scope and drop the redundant outer fault-catch — the
-  scope's unpublished-dispose rollback (which clears `_Faulted`) then makes them atomic and
-  self-healing, and collapses N publishes to one.
 - **C2-b — `ApplyOptionsCore` / `DefragmentCore` don't check `_Faulted`.** On an
   already-faulted stream their own snapshot-and-restore captures the half-mutated state as
   "original". Add `ThrowIfFaulted()` at entry to both — a refusal, they don't need the trap.

@@ -2508,34 +2508,11 @@ Namespace Streams
                     "The clear range extends beyond the logical stream length.")
             End If
 
-            Try
+            InvalidateChunkCache()
 
-                InvalidateChunkCache()
+            If Options.StoreSparseChunks Then
 
-                If Options.StoreSparseChunks = False Then
-
-                    Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
-
-                    Dim Remaining = Count
-                    Dim CurrentOffset = LogicalOffset
-
-                    While Remaining > 0
-
-                        Dim ThisWrite =
-                            CInt(Math.Min(CLng(ZeroBuffer.Length),
-                                          Remaining))
-
-                        WriteCore(CurrentOffset,
-                              ZeroBuffer,
-                              0,
-                              ThisWrite)
-
-                        CurrentOffset += ThisWrite
-                        Remaining -= ThisWrite
-
-                    End While
-
-                Else
+                Try
 
                     Dim ReplacementExtents As New List(Of ExtentIndexEntry)()
 
@@ -2562,16 +2539,60 @@ Namespace Streams
                                      Count,
                                      ReplacementExtents)
 
-                End If
+                    If MetadataPublishSuspended = False Then
+                        PersistIndexAndHeader(_IndexOffset)
+                    End If
 
-                If MetadataPublishSuspended = False Then
-                    PersistIndexAndHeader(_IndexOffset)
-                End If
+                Catch
 
-            Catch
+                    _Faulted = True
+                    Throw
 
-                _Faulted = True
-                Throw
+                End Try
+
+                Return
+
+            End If
+
+            '
+            ' The non-sparse clear is a loop of chunk-sized writes, each of which would
+            ' otherwise publish on its own. Batching them under one DeferPublish scope
+            ' collapses that to a single published generation - an interruption reopens
+            ' all-or-nothing rather than a partly cleared range, and a failure during the
+            ' loop rolls back. When a checkpoint or an outer scope already holds the
+            ' per-operation publish there is nothing to add: WriteCore still faults the
+            ' stream on failure and the enclosing boundary owns the outcome.
+            '
+            Dim Scope As DeferPublishScope = If(MetadataPublishSuspended, Nothing, DeferPublish())
+
+            Try
+
+                Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
+
+                Dim Remaining = Count
+                Dim CurrentOffset = LogicalOffset
+
+                While Remaining > 0
+
+                    Dim ThisWrite =
+                        CInt(Math.Min(CLng(ZeroBuffer.Length),
+                                      Remaining))
+
+                    WriteCore(CurrentOffset,
+                          ZeroBuffer,
+                          0,
+                          ThisWrite)
+
+                    CurrentOffset += ThisWrite
+                    Remaining -= ThisWrite
+
+                End While
+
+                If Scope IsNot Nothing Then Scope.Publish()
+
+            Finally
+
+                If Scope IsNot Nothing Then Scope.Dispose()
 
             End Try
 
@@ -2619,38 +2640,11 @@ Namespace Streams
                     "The insert would exceed the maximum supported logical length.")
             End If
 
-            Try
+            InvalidateChunkCache()
 
-                InvalidateChunkCache()
+            If Options.StoreSparseChunks Then
 
-                If Options.StoreSparseChunks = False Then
-
-                    Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
-                    Dim Remaining = Count
-                    Dim InsertOffset = LogicalOffset
-                    Dim FirstInsert = True
-
-                    While Remaining > 0
-
-                        Dim ThisInsert =
-                            CInt(Math.Min(CLng(ZeroBuffer.Length),
-                                          Remaining))
-
-                        InsertCore(InsertOffset,
-                               ZeroBuffer,
-                               0,
-                               ThisInsert,
-                               If(FirstInsert,
-                                  AnchorActionAtLogicalOffset,
-                                  AnchorActionsAtLogicalOffset.TransformAway))
-
-                        InsertOffset += ThisInsert
-                        Remaining -= ThisInsert
-                        FirstInsert = False
-
-                    End While
-
-                Else
+                Try
 
                     InsertSparseRange(LogicalOffset,
                                       Count,
@@ -2660,12 +2654,60 @@ Namespace Streams
                         PersistIndexAndHeader(_IndexOffset)
                     End If
 
-                End If
+                Catch
 
-            Catch
+                    _Faulted = True
+                    Throw
 
-                _Faulted = True
-                Throw
+                End Try
+
+                Return
+
+            End If
+
+            '
+            ' The non-sparse insert is a loop of chunk-sized inserts, each of which would
+            ' otherwise publish on its own. Batching them under one DeferPublish scope
+            ' collapses that to a single published generation - an interruption reopens
+            ' all-or-nothing rather than a partial insert, and a failure during the loop
+            ' rolls back. When a checkpoint or an outer scope already holds the
+            ' per-operation publish there is nothing to add: InsertCore still faults the
+            ' stream on failure and the enclosing boundary owns the outcome.
+            '
+            Dim Scope As DeferPublishScope = If(MetadataPublishSuspended, Nothing, DeferPublish())
+
+            Try
+
+                Dim ZeroBuffer(Options.ChunkSize - 1) As Byte
+                Dim Remaining = Count
+                Dim InsertOffset = LogicalOffset
+                Dim FirstInsert = True
+
+                While Remaining > 0
+
+                    Dim ThisInsert =
+                        CInt(Math.Min(CLng(ZeroBuffer.Length),
+                                      Remaining))
+
+                    InsertCore(InsertOffset,
+                           ZeroBuffer,
+                           0,
+                           ThisInsert,
+                           If(FirstInsert,
+                              AnchorActionAtLogicalOffset,
+                              AnchorActionsAtLogicalOffset.TransformAway))
+
+                    InsertOffset += ThisInsert
+                    Remaining -= ThisInsert
+                    FirstInsert = False
+
+                End While
+
+                If Scope IsNot Nothing Then Scope.Publish()
+
+            Finally
+
+                If Scope IsNot Nothing Then Scope.Dispose()
 
             End Try
 
