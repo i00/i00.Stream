@@ -98,13 +98,16 @@ Only when `Deep` does it unwrap each payload (decrypt / decompress) and check th
 Shallow `Validate` stays MAC-only. (The old "does this all the time" note is stale.) While
 here, fold in the D6 assertions.
 
-### D5 — Defragment cost at scale
-`RelocatePhysicalRecord` does ~4–5 fsyncs + a metadata-root rewrite **per moved record**, and
-`DefragmentMove`'s outer loop is O(n²) (rebuilds the live-record list + hole list +
-`GetFragmentation()` every iteration, moves one record per iteration). Fine for small
-streams. For large / heavily fragmented streams: batch K mutually-disjoint moves under one
-journal + one publish + one fsync; compute `GetFragmentation()` every N moves (it's only for
-the progress bar); or at minimum document the cost and steer callers to `Rebuild`.
+### D5 (residual) — Defragment(Move) per-move cost
+The practical D5 problem — livelock, monotonic file growth, needing several calls — is fixed
+(see DONE: commits 128f99a / 02646a1). Still unchanged:
+`DefragmentMove` rebuilds `GetLiveRecordsSortedByOffset` + `GetDeadHoles` (deep table copies)
+and calls `GetFragmentation()` per single relocation — O(n²) within a pass; and
+`RelocatePhysicalRecord` does ~4–5 fsyncs + a `PersistDefragMoveMetadata` publish per moved
+record. Plus the progress metric `(origFrag − curFrag) / origFrag` sits near 0 for most of a
+real run, and the sample `Defrag()` callback calls `GetStructure()` (~160 ms) every 250 ms.
+**Fix:** batch K mutually-disjoint moves under one journal + one publish; compute
+`GetFragmentation()` every N moves. Lower priority now the real-file problem is solved.
 
 ### D6 — assert the cached `_PhysicalDataEnd`
 Fold into `Validate()` (it already walks every record): assert
@@ -194,6 +197,6 @@ See the audit artifact for the reasoning.
 - **S4** — `DefaultPBKDF2Iterations` is a mutable global; it is Friend/test-only.
 - **D1** — the project builds as a WinExe with WinForms; that's Form1 (a playground being
   removed) and lazily-loaded `System.Drawing`.
-- **D7** — checkpoint chunk writes append past EOF. In-checkpoint hole reuse was prototyped,
-  shown crash-safe, then shipped for the checkpoint path (C7); the DeferPublish path uses the
-  same mechanism.
+
+(**D7** — in-checkpoint chunk writes reusing pre-checkpoint holes — is **fixed**, not
+accepted: shipped in `eac5ccd` with C7 and never reverted. See DONE.)

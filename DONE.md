@@ -100,12 +100,43 @@ still open — TODO C8.)
 plus deep recursion). It now uses a single reference-counted `DeferPublish` scope for the
 whole recursive delete. (`RecoverPending` still recurses — TODO D3.)
 
-### D7 — checkpoint chunk writes append past EOF — CONSIDERED, decided
-Reusing pre-existing holes during a checkpoint was prototyped and shown crash-safe with the
-fuzzer, then reverted as a standalone change after it moved EFS growth by roughly zero (that
-growth is metadata churn). The mechanism was then shipped properly for the checkpoint path
-(C7). It promotes `_FreeSpaces` from "optimisation only" to correctness-critical during a
-checkpoint / DeferPublish window; that is now the documented behaviour and is tested.
+### D5 — Defragment(Move) got stuck, grew the file, needed several calls — FIXED (commits 128f99a / 02646a1)
+On a stream large enough to persist the hole directory (`HoleDirectoryMode = Auto`, ≥ 1 MB),
+**every** durable publish rebuilt and relocated every hole-directory page → root descriptors
+changed → the root re-appended at `Math.Max(BaseStream.Length, GetDataEndFromIndex())` (the
+root allocator, alone among metadata pages, never consulted `_FreeSpaces`). The file grew
+~19 KB per publish, monotonic, forever; and `Defragment(Move)` needed several external
+re-runs to fully compact (each pass fills only the holes it can see; the post-pass metadata
+compaction frees fresh ones), leaving a phantom "Saved: *n*" residual.
+Fix, three parts: (1) `TryAllocateSnugMetadataRootHole` — the root now reuses a freed hole it
+nearly fills (waste capped at the root length, so it can't shatter a data hole), backed by a
+new `FreeSpaceAllocator.TryAllocate(…, MaxWaste, …)` overload; (2) `WriteHoleDirectoryPages`
+leaves a byte-identical page where it sits (MAC compare, mirrors the root's `RootChanged`
+guard) instead of chasing its own tail; (3) `DefragmentMove` is wrapped in an outer fixpoint
+`Do…Loop` that re-runs passes until one relocates nothing — terminates because every
+productive pass strictly lowers the total live-record offset.
+Verified: **one** `Defragment(Move)` call on the real 292 MB `Test - defrag stuck.efs`
+(7.8 s), then calls 2–6 report `saved = 0` and the length is a strict fixed point;
+`Validate()` clean. Tests: `RepeatedDefragmentationReachesAFixedPoint` (strengthened to
+assert `saved == 0` + strict fixed point + no growth), `DefragmentMoveConvergesInOneCall`
+(new). The per-move O(n) table copies, per-move fsyncs, and the fragmentation-ratio progress
+metric are unchanged — TODO D5 (residual).
+
+### D7 — in-checkpoint chunk writes reuse free holes — FIXED (commit eac5ccd, with C7)
+Filed as "accepted (append past EOF is fine)" with a note that a prototype had been reverted;
+that note was stale. `eac5ccd` shipped the mechanism and was **not** reverted. In
+`GetNextWriteOffset` → `TryAllocateSafeSpace`, `MinOffset` is raised to the outermost
+checkpoint mark only when `IsMetadata`; a chunk record keeps `MinOffset = 0`, so inside an
+open checkpoint it runs the normal `BestFit` / `FirstFit` search with no lower bound and will
+land in a freed hole **below** the checkpoint mark — anywhere in the pre-checkpoint data
+area — whenever one fits. Only in-checkpoint metadata stays in the scratch region above the
+mark. Crash-safety: a rollback / crash reloads the pre-checkpoint durable generation, which
+never referenced the hole, so the bytes are unreferenced free space; a commit publishes
+metadata that makes them live. This promotes `_FreeSpaces` from "optimisation only" to
+correctness-critical inside a checkpoint / `DeferPublish` window. Tests:
+`CheckpointChunkWriteReusesFreeHole`, `CheckpointHoleFillingWriteRolledBackRestoresState`,
+`CheckpointHoleFillingWriteAbandonedRecoversToBaseline`,
+`CheckpointChunkAllocationPreservesDataUnderEveryPolicy`.
 
 ### Test dedup — done
 Removed the 8 header-copy / physical-record-move-recovery tests `Hardening.vb` duplicated
