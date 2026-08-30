@@ -80,6 +80,10 @@
                                              Dim BenchmarkResult = TryCast(TestResult, BenchmarkResult)
                                              Dim SuccessMessage As String = BenchmarkResult?.Message
                                              If SuccessMessage Is Nothing Then
+                                                 If sw.Elapsed.TotalSeconds > 1 Then
+
+                                                     Dim qwe = ""
+                                                 End If
                                                  SuccessMessage = $"{sw.Elapsed.Format()}"
                                              End If
 

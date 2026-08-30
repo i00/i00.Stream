@@ -530,13 +530,13 @@ Namespace Tests
             ' ================================================================================
 
             ''' <summary>
-            ''' Reopening, defragmenting and closing a stream whose backing store is large
-            ''' enough to persist the hole directory must reach a fixed point: after the
-            ''' first compaction the backing-store length stops changing from one
-            ''' open / defragment / close cycle to the next and never grows. Regression test
-            ''' for the metadata root being appended on every publish and the hole directory
-            ''' being rewritten to fresh locations wholesale, which together grew the file by
-            ''' one root length per cycle without limit.
+            ''' A single Defragment(Move) call must reach a fixed point: it fills every hole
+            ''' its metadata compaction shakes loose within the one call, and a further call
+            ''' then relocates nothing, reports nothing saved and leaves the backing store
+            ''' byte-for-byte where it was. Regression test for the move loop running a single
+            ''' pass - so the holes vacated by the end-of-run metadata compaction were only
+            ''' picked up by the *next* Defragment call - and for the resulting partially
+            ''' compacted stream trimming and regrowing by one root length on every call.
             ''' </summary>
             <UnitTester.SimpleTest()>
             Public Shared Sub RepeatedDefragmentationReachesAFixedPoint()
@@ -559,7 +559,7 @@ Namespace Tests
                     Dim Saved As New List(Of Long)
                     Dim Lengths As New List(Of Long)
 
-                    For Cycle = 1 To 10
+                    For Cycle = 1 To 8
 
                         Using Cs = ChunkedStream.Open(Ms, Options)
 
@@ -578,24 +578,21 @@ Namespace Tests
 
                     Next
 
-                    Dim StableLength = Lengths(Lengths.Count - 1)
+                    ' The first call above already compacted the stream, so every call in the
+                    ' loop is a settled no-op: nothing saved, and the length never moves.
+                    For Cycle = 1 To Saved.Count
 
-                    For Index = 3 To Lengths.Count - 1
                         AssertEqual(
-                            StableLength,
-                            Lengths(Index),
-                            $"Repeated Defragment never reached a stable physical size: lengths per cycle = {String.Join(", ", Lengths)}.")
+                            0L,
+                            Saved(Cycle - 1),
+                            $"A settled Defragment still reported saved bytes: per cycle = {String.Join(", ", Saved)}.")
+
+                        AssertEqual(
+                            Lengths(0),
+                            Lengths(Cycle - 1),
+                            $"A settled Defragment moved the backing-store length: per cycle = {String.Join(", ", Lengths)}.")
+
                     Next
-
-                    AssertTrue(
-                        StableLength <= Lengths(0),
-                        $"Repeated Defragment grew the backing store: lengths per cycle = {String.Join(", ", Lengths)}.")
-
-                    ' A settled Defragment moves nothing and, at most, re-trims a single
-                    ' in-flight metadata generation the following publish restores.
-                    AssertTrue(
-                        Saved(Saved.Count - 1) < CLng(Options.ChunkSize),
-                        $"A settled Defragment still reclaimed a chunk's worth of space: saved bytes per cycle = {String.Join(", ", Saved)}.")
 
                     Using Reopened = ChunkedStream.Open(Ms, Options)
 
@@ -610,6 +607,54 @@ Namespace Tests
                             "Reopened stream lost data after repeated defragmentation.")
 
                         Reopened.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' One Defragment(Move) call performs all the compaction it is going to do - a
+            ''' second call back-to-back relocates nothing further and reports nothing saved.
+            ''' Regression test for the move loop running a single pass, so the holes freed
+            ''' when its metadata compaction relocated the surviving pages were only consumed
+            ''' by the *next* Defragment call.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DefragmentMoveConvergesInOneCall()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .HoleDirectoryAutoThresholdBytes = 1
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Expected = CreateFragmentedStream(Cs, 41000)
+
+                        Cs.Defragment(ChunkedStream.DefragTypes.Move)
+                        Dim LengthAfterFirstCall = Ms.Length
+
+                        Dim SecondCallSaved = Cs.Defragment(ChunkedStream.DefragTypes.Move)
+
+                        AssertEqual(
+                            0L,
+                            SecondCallSaved,
+                            $"A second back-to-back Defragment(Move) reclaimed {SecondCallSaved} bytes - the first call did not converge.")
+
+                        AssertEqual(
+                            LengthAfterFirstCall,
+                            Ms.Length,
+                            "A second back-to-back Defragment(Move) changed the backing-store length.")
+
+                        AssertBytesEqual(
+                            Expected,
+                            Cs.ToArray(),
+                            "Defragment(Move) changed logical data.")
+
+                        Cs.Validate()
 
                     End Using
 

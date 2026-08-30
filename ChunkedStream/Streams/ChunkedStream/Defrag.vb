@@ -518,59 +518,75 @@ Namespace Streams
 
             Dim OriginalFragmentation As Double? = Nothing
 
+            '
+            ' A pass fills every hole it can see, then compacts the surviving metadata into
+            ' one block after the data. That compaction frees the scattered locations the
+            ' metadata pages came from - fresh holes the pass could not see - so keep
+            ' running passes until one relocates nothing. Every productive pass strictly
+            ' lowers the total live-record offset, so this terminates.
+            '
             Do
 
-                If CancellationToken.Cancel Then Return
+                Dim MovedInPass = False
 
-                Dim LiveRecords = GetLiveRecordsSortedByOffset()
-                Dim Holes = GetDeadHoles(LiveRecords)
-
-                If Holes.Count = 0 Then Exit Do
-
-                Dim MovedSomething = False
-
-                For Each hole In Holes
+                Do
 
                     If CancellationToken.Cancel Then Return
 
-                    Dim CandidateIndex = FindLatestLiveRecordThatFitsHole(LiveRecords, hole)
+                    Dim LiveRecords = GetLiveRecordsSortedByOffset()
+                    Dim Holes = GetDeadHoles(LiveRecords)
 
-                    If CandidateIndex < 0 Then Continue For
+                    If Holes.Count = 0 Then Exit Do
 
-                    Dim Candidate = LiveRecords(CandidateIndex)
+                    Dim MovedSomething = False
 
-                    RelocatePhysicalRecord(Candidate.RecordId, hole.Offset)
+                    For Each hole In Holes
 
-                    MovedSomething = True
+                        If CancellationToken.Cancel Then Return
 
-                    Dim CurrentFragmentation = GetFragmentation()
+                        Dim CandidateIndex = FindLatestLiveRecordThatFitsHole(LiveRecords, hole)
 
-                    If OriginalFragmentation.HasValue = False Then
-                        OriginalFragmentation = Math.Max(CurrentFragmentation, 0.000001R)
-                    End If
+                        If CandidateIndex < 0 Then Continue For
 
-                    Dim CompletedUnits = CLng(((OriginalFragmentation.Value - CurrentFragmentation) / OriginalFragmentation.Value) * ProgressScale)
+                        Dim Candidate = LiveRecords(CandidateIndex)
 
-                    If CompletedUnits < 0 Then CompletedUnits = 0
-                    If CompletedUnits > ProgressScale Then CompletedUnits = ProgressScale
+                        RelocatePhysicalRecord(Candidate.RecordId, hole.Offset)
 
-                    ReportProgress(ProgressCallback,
-                                   CompletedUnits,
-                                   ProgressScale,
-                                   ProcessUnitTypes.Arbitrary,
-                                   CancellationToken)
+                        MovedSomething = True
+                        MovedInPass = True
 
-                    Exit For
+                        Dim CurrentFragmentation = GetFragmentation()
 
-                Next
+                        If OriginalFragmentation.HasValue = False Then
+                            OriginalFragmentation = Math.Max(CurrentFragmentation, 0.000001R)
+                        End If
 
-                If MovedSomething = False Then Exit Do
+                        Dim CompletedUnits = CLng(((OriginalFragmentation.Value - CurrentFragmentation) / OriginalFragmentation.Value) * ProgressScale)
+
+                        If CompletedUnits < 0 Then CompletedUnits = 0
+                        If CompletedUnits > ProgressScale Then CompletedUnits = ProgressScale
+
+                        ReportProgress(ProgressCallback,
+                                       CompletedUnits,
+                                       ProgressScale,
+                                       ProcessUnitTypes.Arbitrary,
+                                       CancellationToken)
+
+                        Exit For
+
+                    Next
+
+                    If MovedSomething = False Then Exit Do
+
+                Loop
+
+                If CancellationToken.Cancel Then Return
+
+                CommitDefragCheckpoint(GetDataEndFromIndex())
+
+                If MovedInPass = False Then Exit Do
 
             Loop
-
-            If CancellationToken.Cancel Then Return
-
-            CommitDefragCheckpoint(GetDataEndFromIndex())
 
             ReportProgress(ProgressCallback,
                            ProgressScale,
