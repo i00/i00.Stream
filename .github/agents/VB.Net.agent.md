@@ -11,24 +11,16 @@ description: VB.NET Coding Standard
 - Add a line break immediately after the prefix before writing the response body.
 
 ## Project Assumptions
-- Assume VB.NET targeting .NET Framework 4.8 unless instructed otherwise.
-- Assume the project already has the correct compiler options configured.
-- Never emit `Option Strict`, `Option Explicit`, `Option Infer` or other compiler directives unless explicitly requested.
 - Generate code that is fully compatible with projects using `Option Strict On` and `Option Infer On`.
+- New projects should be created with `Option Strict On` and `Option Infer On` enabled.
+- New projects should be created in the same .NET version as existing projects unless explicitly requested otherwise.
 
 ## Language Style
 - Do not explicitly specify `ByVal`, as it is the default.
 - When implementing an expanded property, omit the implicit `value` parameter declaration. Prefer `Set` over `Set(value As Type)`.
 
 ## Available Libraries & Technologies
-Unless explicitly instructed otherwise, assume the following libraries and technologies are available and may be used where appropriate:
-- EPPlus
-- HtmlAgilityPack.fx.4.0
-- LINQ to SQL (DBML)
-- MsgReader
-- Newtonsoft.Json.Net40
-- ObjectListView
-- Xceed.Words.NET
+- Do not use libraries or technologies that are not already present in the project unless explicitly requested.
 
 #### Guidelines:
 - Prefer using these libraries over reimplementing equivalent functionality.

@@ -74,7 +74,19 @@ Namespace Streams
             '
             Public Function TryAllocate(RequiredLength As Long, FromStart As Boolean, MinOffset As Long, ByRef Offset As Long) As Boolean
 
+                Return TryAllocate(RequiredLength, FromStart, MinOffset, Long.MaxValue, Offset)
+
+            End Function
+
+            '
+            ' MaxWaste caps how much larger than RequiredLength a reused hole may be, so a
+            ' small payload (the metadata root) never splits a much larger data hole into a
+            ' sliver too small to hold a record.
+            '
+            Public Function TryAllocate(RequiredLength As Long, FromStart As Boolean, MinOffset As Long, MaxWaste As Long, ByRef Offset As Long) As Boolean
+
                 If RequiredLength <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(RequiredLength))
+                If MaxWaste < 0 Then Throw New ArgumentOutOfRangeException(NameOf(MaxWaste))
 
                 Dim SelectedOffset As Long = -1
                 Dim SelectedLength As Long = Long.MaxValue
@@ -83,6 +95,7 @@ Namespace Streams
 
                     If pair.Key < MinOffset Then Continue For
                     If pair.Value < RequiredLength Then Continue For
+                    If pair.Value - RequiredLength > MaxWaste Then Continue For
 
                     If FromStart Then
                         SelectedOffset = pair.Key
@@ -500,6 +513,37 @@ Namespace Streams
                                 IsRangeSafeForPhysicalRecord(CandidateOffset, Length))
 
                 If IsSafe Then
+                    Offset = CandidateOffset
+                    Return True
+                End If
+
+            End While
+
+            Offset = -1
+            Return False
+
+        End Function
+
+        '
+        ' Places the metadata root, which is otherwise append-only, into a freed hole it
+        ' very nearly fills. Recycling superseded root generations this way stops every
+        ' hole-directory-bearing durable publish from growing the file by one root length,
+        ' while the snug fit (waste capped at the root length) keeps the root from carving a
+        ' chunk-sized data hole into an unusable sliver. Not used while a checkpoint is
+        ' open - the root then follows the scratch-region rules like any other metadata.
+        '
+        Private Function TryAllocateSnugMetadataRootHole(Length As Integer, ByRef Offset As Long) As Boolean
+
+            If HasOpenCheckpoint Then
+                Offset = -1
+                Return False
+            End If
+
+            Dim CandidateOffset As Long
+
+            While _FreeSpaces.TryAllocate(Length, False, 0, CLng(Length), CandidateOffset)
+
+                If IsRangeSafeForMetadata(CandidateOffset, Length) Then
                     Offset = CandidateOffset
                     Return True
                 End If

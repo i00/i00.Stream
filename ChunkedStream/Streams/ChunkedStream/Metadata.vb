@@ -457,9 +457,31 @@ Namespace Streams
 
             For PageNumber = 0 To DirectoryPageCount - 1
                 Dim Page = BuildHoleDirectoryPage(PageNumber, Records)
-                Dim Offset = GetNextWriteOffset(Page.Length, Options.NewIndexDirectoryPageWriteLocationPolicy, True)
+                Dim NewMac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
+
                 Dim OldDescriptor As MetadataPageDescriptor = Nothing
                 Dim HadOldDescriptor = _HoleDirectoryPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
+
+                '
+                ' Leave an unchanged page where it already sits. The hole directory is
+                ' rebuilt in full on every durable publish, so relocating a byte-identical
+                ' page would free its old copy, alter the very hole set the page describes,
+                ' and force another rewrite next publish - the directory would chase its own
+                ' tail and never settle (and, via the root, keep growing the file).
+                '
+                If HadOldDescriptor AndAlso
+                   OldDescriptor.Offset > 0 AndAlso
+                   OldDescriptor.Length = Page.Length AndAlso
+                   OldDescriptor.Offset + CLng(OldDescriptor.Length) <= BaseStream.Length AndAlso
+                   OldDescriptor.Mac IsNot Nothing AndAlso
+                   FixedTimeEquals(OldDescriptor.Mac, 0, NewMac, 0, MacSize) Then
+
+                    Result(PageNumber) = OldDescriptor
+                    Continue For
+
+                End If
+
+                Dim Offset = GetNextWriteOffset(Page.Length, Options.NewIndexDirectoryPageWriteLocationPolicy, True)
 
                 WriteAt(Offset, Page, 0, Page.Length)
 
@@ -467,7 +489,7 @@ Namespace Streams
                     .PageNumber = PageNumber,
                     .Offset = Offset,
                     .Length = Page.Length,
-                    .Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
+                    .Mac = NewMac
                 }
 
                 If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
@@ -852,9 +874,20 @@ Namespace Streams
                 Dim OldRootOffset = _MetadataRootOffset
                 Dim OldRootLength = _MetadataRootLength
                 Dim CompactRootOffset As Long
+                Dim RecycledRootOffset As Long
 
                 If TryGetCompactMetadataWriteOffset(Root.Length, CompactRootOffset) Then
                     _MetadataRootOffset = CompactRootOffset
+                ElseIf TryAllocateSnugMetadataRootHole(Root.Length, RecycledRootOffset) Then
+                    '
+                    ' Reuse a freed hole the root nearly fills. Appending unconditionally
+                    ' (the previous behaviour) meant every durable publish that rebuilt the
+                    ' hole directory on a stream large enough to persist it grew the file by
+                    ' one root length, so a repeated open / edit / close - or a repeated
+                    ' Defragment - never reached a fixed size. The snug fit keeps this from
+                    ' carving a chunk-sized data hole into an unusable sliver.
+                    '
+                    _MetadataRootOffset = RecycledRootOffset
                 Else
                     _MetadataRootOffset = Math.Max(BaseStream.Length, GetDataEndFromIndex())
                 End If

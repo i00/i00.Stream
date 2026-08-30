@@ -445,20 +445,21 @@ Namespace Tests
 
                             '
                             ' Drift every backing record's reference count upward so the
-                            ' following overwrite cannot reclaim it, then rewrite every
-                            ' chunk. The original records are now unreferenced but still
-                            ' occupy storage, and the replacement records are appended
-                            ' beyond them, so the live-data end - and the fragmentation
-                            ' figure - stay pinned near the end of the backing store.
+                            ' following overwrite cannot reclaim it, rewrite every chunk,
+                            ' then drop those now-unreferenced records to a zero reference
+                            ' count. They still occupy storage the replacement records were
+                            ' appended beyond, so the live-data end stays pinned near the end
+                            ' of the backing store and their bytes count as wasted space.
                             '
-                            For Each RecordId In Cs.GetStructure().Chunks.
-                                                    Where(Function(chunk) chunk.PhysicalRecordId.HasValue).
-                                                    Select(Function(chunk) chunk.PhysicalRecordId.Value).
-                                                    Distinct().
-                                                    ToList()
+                            Dim OriginalRecordIds =
+                                Cs.GetStructure().Chunks.
+                                   Where(Function(chunk) chunk.PhysicalRecordId.HasValue).
+                                   Select(Function(chunk) chunk.PhysicalRecordId.Value).
+                                   Distinct().
+                                   ToList()
 
+                            For Each RecordId In OriginalRecordIds
                                 Cs.Debug_CorruptPhysicalRecordMetadataRefCount(RecordId, 4096)
-
                             Next
 
                             For ChunkIndex = 0 To ChunkCount - 1
@@ -469,6 +470,10 @@ Namespace Tests
                                 Cs.Write(ChunkIndex * ChunkSize, Replacement)
                                 Overlay(Expected, Replacement, ChunkIndex * ChunkSize)
 
+                            Next
+
+                            For Each RecordId In OriginalRecordIds
+                                Cs.Debug_CorruptPhysicalRecordMetadataRefCount(RecordId, 0)
                             Next
 
                             Dim BeforeFragmentation = Cs.GetFragmentation()
@@ -517,6 +522,98 @@ Namespace Tests
                     End Using
 
                 Next
+
+            End Sub
+
+            ' ================================================================================
+            ' Convergence
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Reopening, defragmenting and closing a stream whose backing store is large
+            ''' enough to persist the hole directory must reach a fixed point: after the
+            ''' first compaction the backing-store length stops changing from one
+            ''' open / defragment / close cycle to the next and never grows. Regression test
+            ''' for the metadata root being appended on every publish and the hole directory
+            ''' being rewritten to fresh locations wholesale, which together grew the file by
+            ''' one root length per cycle without limit.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub RepeatedDefragmentationReachesAFixedPoint()
+
+                Using Ms As New MemoryStream()
+
+                    ' Threshold of 1 forces the hole directory to be persisted even for a
+                    ' small test stream, which is what drives the churn being guarded against.
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .HoleDirectoryAutoThresholdBytes = 1
+                    }
+
+                    Dim Expected As Byte()
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+                        Expected = CreateFragmentedStream(Cs, 30000)
+                        Cs.Defragment(ChunkedStream.DefragTypes.Move)
+                    End Using
+
+                    Dim Saved As New List(Of Long)
+                    Dim Lengths As New List(Of Long)
+
+                    For Cycle = 1 To 10
+
+                        Using Cs = ChunkedStream.Open(Ms, Options)
+
+                            Saved.Add(Cs.Defragment(ChunkedStream.DefragTypes.Move))
+
+                            AssertBytesEqual(
+                                Expected,
+                                Cs.ToArray(),
+                                $"Defragment cycle {Cycle} changed logical data.")
+
+                            Cs.Validate()
+
+                        End Using
+
+                        Lengths.Add(Ms.Length)
+
+                    Next
+
+                    Dim StableLength = Lengths(Lengths.Count - 1)
+
+                    For Index = 3 To Lengths.Count - 1
+                        AssertEqual(
+                            StableLength,
+                            Lengths(Index),
+                            $"Repeated Defragment never reached a stable physical size: lengths per cycle = {String.Join(", ", Lengths)}.")
+                    Next
+
+                    AssertTrue(
+                        StableLength <= Lengths(0),
+                        $"Repeated Defragment grew the backing store: lengths per cycle = {String.Join(", ", Lengths)}.")
+
+                    ' A settled Defragment moves nothing and, at most, re-trims a single
+                    ' in-flight metadata generation the following publish restores.
+                    AssertTrue(
+                        Saved(Saved.Count - 1) < CLng(Options.ChunkSize),
+                        $"A settled Defragment still reclaimed a chunk's worth of space: saved bytes per cycle = {String.Join(", ", Saved)}.")
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                        AssertEqual(
+                            ChunkedStream.RecoveryStates.None,
+                            Reopened.RecoveryStateAtOpen,
+                            "Reopening a repeatedly defragmented stream should not trigger recovery.")
+
+                        AssertBytesEqual(
+                            Expected,
+                            Reopened.ToArray(),
+                            "Reopened stream lost data after repeated defragmentation.")
+
+                        Reopened.Validate()
+
+                    End Using
+
+                End Using
 
             End Sub
 
