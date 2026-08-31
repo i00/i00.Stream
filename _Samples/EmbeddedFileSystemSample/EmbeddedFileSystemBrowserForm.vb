@@ -1,5 +1,6 @@
 Imports i00.Streams
 Imports System.ComponentModel
+Imports System.Drawing.Drawing2D
 Imports System.IO
 Imports System.Threading
 Imports i00CodeLib
@@ -10,6 +11,20 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     <DllImport("uxtheme.dll", CharSet:=CharSet.Unicode)>
     Private Shared Function SetWindowTheme(hWnd As IntPtr, pszSubAppName As String, pszSubIdList As String) As Integer
     End Function
+
+    <DllImport("user32.dll")>
+    Private Shared Function SendMessage(Handle As IntPtr, Message As Integer, WParam As IntPtr, LParam As IntPtr) As IntPtr
+    End Function
+
+    Private Const LvmSetExtendedListViewStyle As Integer = &H1000 + 54
+    Private Const LvsExDoubleBuffer As Integer = &H10000
+
+    ''' <summary>Extensions previewed as thumbnails in the thumbnail views (all GDI+-decodable).</summary>
+    Private Shared ReadOnly ThumbnailImageExtensions As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+        ".png", ".jpg", ".jpeg", ".jfif", ".gif", ".bmp", ".dib", ".tif", ".tiff", ".ico"
+    }
+    Private Const MaximumThumbnailSourceBytes As Long = 40L * 1024L * 1024L
+    Private Const ThumbnailRenderSize As Integer = 256
 
     Private NotInheritable Class DirectoryNodeInfo
         Public Sub New(AnchorId As Long, Name As String)
@@ -131,14 +146,18 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private ReadOnly _FileSystem As EmbeddedFileSystem
     Private ReadOnly _IconProvider As New FileIconProvider()
     Private ReadOnly _ListSorter As New EntryListViewComparer()
+    Private ReadOnly _ThumbnailCache As New Dictionary(Of Long, Bitmap)()
+    Private ReadOnly _ThumbnailPending As New HashSet(Of Long)()
+    Private ReadOnly _ThumbnailUnavailable As New HashSet(Of Long)()
     Private _CurrentDirectoryAnchorId As Long
     Private _ListDragStart As Point
     Private _TreeDragStart As Point
     Private _ListDragArmed As Boolean
     Private _TreeDragArmed As Boolean
     Private _Disposed As Boolean
-    Private _IconGeneration As Integer
-    Private _ExecutableIconThread As Thread
+    Private _ThumbnailGeneration As Integer
+    Private _ThumbnailCacheAnchorId As Long
+    Private _ThumbnailCellSize As Integer
 
 
     Public Sub New(FileSystem As EmbeddedFileSystem)
@@ -149,20 +168,19 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         InitializeComponent()
 
-        tvFolders.ImageList = _IconProvider.SmallImages
-        lvFiles.SmallImageList = _IconProvider.SmallImages
-        lvFiles.LargeImageList = _IconProvider.LargeImages
-        lvFiles.TileSize = New Size(260, (FileIconProvider.LargeIconSize * 3) \ 2)
+        tvFolders.ImageList = _IconProvider.TreeImages
         lvFiles.ListViewItemSorter = _ListSorter
 
         Try
             SetWindowTheme(tvFolders.Handle, "Explorer", Nothing)
             SetWindowTheme(lvFiles.Handle, "Explorer", Nothing)
+            SendMessage(lvFiles.Handle, LvmSetExtendedListViewStyle, New IntPtr(LvsExDoubleBuffer), New IntPtr(LvsExDoubleBuffer))
         Catch ex As Exception
 
         End Try
 
         RefreshFileSystemView()
+        ApplySavedFileListView()
 
     End Sub
 
@@ -263,9 +281,12 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private Sub RefreshCurrentDirectory()
         If _CurrentDirectoryAnchorId <= 0 Then Return
 
-        ' A new listing invalidates any executable-icon pass still running for the previous one.
-        _IconGeneration += 1
-        Dim Generation = _IconGeneration
+        ' Thumbnails stay resident while the same folder is shown (including plain refreshes) and are
+        ' released only when a different folder is opened.
+        If _ThumbnailCacheAnchorId <> _CurrentDirectoryAnchorId Then
+            ClearThumbnailCache()
+            _ThumbnailCacheAnchorId = _CurrentDirectoryAnchorId
+        End If
 
         Dim Entries = _FileSystem.GetDirectoryEntries(_CurrentDirectoryAnchorId).
                                   OrderBy(Function(x) x.Name, StringComparer.OrdinalIgnoreCase).
@@ -278,10 +299,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
             For Each entry In Entries
                 Dim IsDirectory = entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory
-                Dim Item = New ListViewItem(entry.Name) With {
-                    .Tag = entry,
-                    .ImageKey = ResolveEntryImageKey(entry, IsDirectory)
-                }
+                Dim Item = New ListViewItem(entry.Name) With {.Tag = entry}
                 Item.SubItems.Add(If(IsDirectory, String.Empty, FormatByteLength(entry.LengthOfDataAtEntry)))
                 Item.SubItems.Add(GetEntryStateText(entry.EntryType))
                 If entry.EntryType = EmbeddedFileSystem.EntryTypes.PendingFile Then Item.ForeColor = i00CodeLib.Drawing.BlendColor(lvFiles.ForeColor, Color.Red)
@@ -295,89 +313,87 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Try
 
         UpdateStatus()
-
-        ' Before the window is shown the icon pass cannot marshal its results back; BrowserForm_Shown
-        ' runs it for the first listing once the handle exists.
-        If IsHandleCreated Then BeginExecutableIconLoad(Generation, Entries)
     End Sub
 
-    Private Sub BrowserForm_Shown(Sender As Object, EventArgs As EventArgs) Handles Me.Shown
-        _IconGeneration += 1
-        BeginExecutableIconLoad(_IconGeneration, _FileSystem.GetDirectoryEntries(_CurrentDirectoryAnchorId).ToList())
-    End Sub
+    ''' <summary>
+    ''' Returns the icon bitmap for an entry at <paramref name="Size"/> px: the executable's own icon
+    ''' when it has been loaded (queuing a background load if not), otherwise the shell icon for its
+    ''' extension. Every result is a cached bitmap, so this is fine to call from the paint path.
+    ''' </summary>
+    Private Function GetEntryIcon(Entry As EmbeddedFileSystem.ContentListEntry, Size As Integer) As Bitmap
+        If Entry Is Nothing Then Return Nothing
 
-    Private Function ResolveEntryImageKey(Entry As EmbeddedFileSystem.ContentListEntry, IsDirectory As Boolean) As String
-        If IsDirectory Then Return FileIconProvider.FolderKey
+        If Entry.EntryType <> EmbeddedFileSystem.EntryTypes.Directory AndAlso
+           Entry.LengthOfDataAtEntry > 0 AndAlso
+           String.Equals(Path.GetExtension(Entry.Name), ".exe", StringComparison.OrdinalIgnoreCase) Then
+            Dim ExecutableIcon = _IconProvider.TryGetExecutableIcon(Entry.ChildAnchorId, Size)
+            If ExecutableIcon IsNot Nothing Then Return ExecutableIcon
+            RequestExecutableIcon(Entry)
+        End If
 
-        Dim ExecutableKey = $"exe:{Entry.ChildAnchorId}"
-        If _IconProvider.ContainsKey(ExecutableKey) Then Return ExecutableKey
-        Return _IconProvider.EnsureExtensionIcon(Entry.Name)
+        Dim IsDirectory = Entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory
+        Return _IconProvider.GetShellIcon(FileIconProvider.KeyForEntry(Entry.Name, IsDirectory), Size)
     End Function
 
     ''' <summary>
-    ''' Loads each executable's own icon on a background thread and swaps it into the list when ready.
-    ''' Until then the shared <c>.exe</c> icon is shown; if extraction fails it simply stays. Results
-    ''' are keyed by anchor ID so an executable is only read out of the store once per session.
+    ''' Queues a background read of an executable's own icon (rendered to bitmaps at every list size).
+    ''' The read goes through <see cref="EmbeddedFileReadStream"/>, so the entry is not flipped to
+    ''' PendingFile, and the result is cached by anchor ID for the session.
     ''' </summary>
-    Private Sub BeginExecutableIconLoad(Generation As Integer, Entries As List(Of EmbeddedFileSystem.ContentListEntry))
-        Dim Executables = Entries.Where(Function(x) x.EntryType <> EmbeddedFileSystem.EntryTypes.Directory AndAlso
-                                                    String.Equals(Path.GetExtension(x.Name), ".exe", StringComparison.OrdinalIgnoreCase) AndAlso
-                                                    x.LengthOfDataAtEntry > 0 AndAlso
-                                                    _IconProvider.ContainsKey($"exe:{x.ChildAnchorId}") = False).
-                                  ToList()
-        If Executables.Count = 0 Then Return
-
-        Dim Worker = New Thread(
-            Sub()
-                For Each entry In Executables
-                    If Generation <> _IconGeneration OrElse _Disposed Then Return
-
-                    Dim ExtractedIcons As FileIconProvider.ExecutableIcons = Nothing
-                    Try
-                        Using Source = _FileSystem.OpenFile(entry.ChildAnchorId)
-                            ExtractedIcons = FileIconProvider.ExtractExecutableIcons(Source, Source.Length)
-                        End Using
-                    Catch
-                        ExtractedIcons = Nothing
-                    End Try
-
-                    If ExtractedIcons IsNot Nothing Then ApplyExecutableIcon(Generation, entry.ChildAnchorId, ExtractedIcons)
-                Next
-            End Sub) With {.IsBackground = True, .Name = "EFS executable icons"}
-        _ExecutableIconThread = Worker
-        Worker.Start()
+    Private Sub RequestExecutableIcon(Entry As EmbeddedFileSystem.ContentListEntry)
+        If _IconProvider.BeginExecutableLoad(Entry.ChildAnchorId) = False Then Return
+        Dim RequestedEntry = Entry
+        System.Threading.ThreadPool.QueueUserWorkItem(Sub() LoadExecutableIcon(RequestedEntry))
     End Sub
 
-    Private Sub ApplyExecutableIcon(Generation As Integer, AnchorId As Long, ExtractedIcons As FileIconProvider.ExecutableIcons)
+    Private Sub LoadExecutableIcon(Entry As EmbeddedFileSystem.ContentListEntry)
+        Dim Result As Dictionary(Of Integer, Bitmap) = Nothing
+        Try
+            If _Disposed = False Then
+                Using Source = EmbeddedFileReadStream.TryOpen(_FileSystem, Entry)
+                    If Source IsNot Nothing Then
+                        Result = FileIconProvider.ExtractExecutableIconBitmaps(
+                            Source, Source.Length,
+                            {FileIconProvider.SmallIconSize, FileIconProvider.LargeIconSize, FileIconProvider.JumboIconSize})
+                    End If
+                End Using
+            End If
+        Catch
+            Result = Nothing
+        End Try
+
         If _Disposed OrElse IsHandleCreated = False Then
-            ExtractedIcons.Dispose()
+            DisposeBitmaps(Result)
             Return
         End If
 
-        Dim Key = $"exe:{AnchorId}"
         Try
             BeginInvoke(
                 Sub()
-                    If Generation <> _IconGeneration OrElse _Disposed Then
-                        ExtractedIcons.Dispose()
-                        Return
-                    End If
-
-                    ' The provider takes ownership of the icons here; they must not be disposed elsewhere.
-                    _IconProvider.AddExecutableIcon(Key, ExtractedIcons)
-
-                    For Each item As ListViewItem In lvFiles.Items
-                        Dim ItemEntry = TryCast(item.Tag, EmbeddedFileSystem.ContentListEntry)
-                        If ItemEntry IsNot Nothing AndAlso ItemEntry.ChildAnchorId = AnchorId Then
-                            item.ImageKey = Key
-                            Exit For
-                        End If
-                    Next
+                    _IconProvider.CompleteExecutableLoad(Entry.ChildAnchorId, Result)
+                    If _Disposed = False Then InvalidateEntry(Entry.ChildAnchorId)
                 End Sub)
         Catch ex As InvalidOperationException
             ' The form closed between the guard above and the marshalled call.
-            ExtractedIcons.Dispose()
+            DisposeBitmaps(Result)
         End Try
+    End Sub
+
+    Private Sub InvalidateEntry(AnchorId As Long)
+        For Each item As ListViewItem In lvFiles.Items
+            Dim Entry = TryCast(item.Tag, EmbeddedFileSystem.ContentListEntry)
+            If Entry IsNot Nothing AndAlso Entry.ChildAnchorId = AnchorId Then
+                lvFiles.Invalidate(item.Bounds)
+                Return
+            End If
+        Next
+    End Sub
+
+    Private Shared Sub DisposeBitmaps(Bitmaps As Dictionary(Of Integer, Bitmap))
+        If Bitmaps Is Nothing Then Return
+        For Each Bitmap In Bitmaps.Values
+            Bitmap?.Dispose()
+        Next
     End Sub
 
     Private Sub UpdateStatus()
@@ -544,18 +560,372 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
     Private Sub AddViewMenu(Menu As ContextMenuStrip)
         Dim ViewMenu = New ToolStripMenuItem("View")
-        AddViewOption(ViewMenu, "Large Icons", View.LargeIcon)
-        AddViewOption(ViewMenu, "Small Icons", View.SmallIcon)
-        AddViewOption(ViewMenu, "List", View.List)
-        AddViewOption(ViewMenu, "Details", View.Details)
-        AddViewOption(ViewMenu, "Tiles", View.Tile)
+        AddViewOption(ViewMenu, "Extra Large Thumbnails", View.LargeIcon, 256)
+        AddViewOption(ViewMenu, "Large Thumbnails", View.LargeIcon, 128)
+        AddViewOption(ViewMenu, "Large Icons", View.LargeIcon, 0)
+        AddViewOption(ViewMenu, "Small Icons", View.SmallIcon, 0)
+        AddViewOption(ViewMenu, "List", View.List, 0)
+        AddViewOption(ViewMenu, "Details", View.Details, 0)
+        AddViewOption(ViewMenu, "Tiles", View.Tile, 0)
         Menu.Items.Add(ViewMenu)
     End Sub
 
-    Private Sub AddViewOption(ViewMenu As ToolStripMenuItem, Text As String, TargetView As View)
-        Dim Item = New ToolStripMenuItem(Text) With {.Checked = lvFiles.View = TargetView}
-        AddHandler Item.Click, Sub() lvFiles.View = TargetView
+    Private Sub AddViewOption(ViewMenu As ToolStripMenuItem, Text As String, TargetView As View, ThumbnailCellSize As Integer)
+        Dim IsCurrent = _ThumbnailCellSize = ThumbnailCellSize AndAlso
+                        (ThumbnailCellSize <> 0 OrElse lvFiles.View = TargetView)
+        Dim Item = New ToolStripMenuItem(Text) With {.Checked = IsCurrent}
+        AddHandler Item.Click, Sub() SelectFileListView(TargetView, ThumbnailCellSize)
         ViewMenu.DropDownItems.Add(Item)
+    End Sub
+
+    ''' <summary>Applies a file-list view and remembers it (view mode plus thumbnail cell size).</summary>
+    Private Sub SelectFileListView(TargetView As View, ThumbnailCellSize As Integer)
+        SetFileListView(TargetView, ThumbnailCellSize)
+        Try
+            My.Settings.FileListView = SerializeFileListView(TargetView, ThumbnailCellSize)
+            My.Settings.Save()
+        Catch
+            ' A settings write failure must not break the view switch.
+        End Try
+    End Sub
+
+    Private Sub ApplySavedFileListView()
+        Dim Saved As String = Nothing
+        Try
+            Saved = My.Settings.FileListView
+        Catch
+        End Try
+
+        Select Case Saved
+            Case "Thumbnail256" : SetFileListView(View.LargeIcon, 256)
+            Case "Thumbnail128" : SetFileListView(View.LargeIcon, 128)
+            Case "LargeIcon" : SetFileListView(View.LargeIcon, 0)
+            Case "SmallIcon" : SetFileListView(View.SmallIcon, 0)
+            Case "List" : SetFileListView(View.List, 0)
+            Case "Tile" : SetFileListView(View.Tile, 0)
+            Case Else : SetFileListView(View.Details, 0)
+        End Select
+    End Sub
+
+    Private Shared Function SerializeFileListView(TargetView As View, ThumbnailCellSize As Integer) As String
+        If ThumbnailCellSize <> 0 Then Return $"Thumbnail{ThumbnailCellSize}"
+        Return TargetView.ToString()
+    End Function
+
+    ''' <summary>
+    ''' Switches the file list to <paramref name="TargetView"/>. A non-zero <paramref name="ThumbnailCellSize"/>
+    ''' selects the image-preview thumbnail view (128 or 256 px cells) laid out as large icons. The list is
+    ''' always owner-drawn; the empty image lists only fix the cell geometry per view.
+    ''' </summary>
+    Private Sub SetFileListView(TargetView As View, ThumbnailCellSize As Integer)
+        _ThumbnailCellSize = ThumbnailCellSize
+        lvFiles.BeginUpdate()
+        Try
+            If ThumbnailCellSize >= 256 Then
+                lvFiles.LargeImageList = _Thumbnail256Sizer
+            ElseIf ThumbnailCellSize > 0 Then
+                lvFiles.LargeImageList = _Thumbnail128Sizer
+            Else
+                lvFiles.LargeImageList = _Large32Sizer
+            End If
+            lvFiles.View = If(ThumbnailCellSize > 0, View.LargeIcon, TargetView)
+        Finally
+            lvFiles.EndUpdate()
+        End Try
+        lvFiles.Invalidate()
+    End Sub
+
+    ''' <summary>The icon edge, in pixels, for the current view.</summary>
+    Private Function CurrentIconSize() As Integer
+        If _ThumbnailCellSize <> 0 Then Return FileIconProvider.JumboIconSize
+        Select Case lvFiles.View
+            Case View.LargeIcon, View.Tile
+                Return FileIconProvider.LargeIconSize
+            Case Else
+                Return FileIconProvider.SmallIconSize
+        End Select
+    End Function
+
+    Private Sub lvFiles_DrawColumnHeader(Sender As Object, EventArgs As DrawListViewColumnHeaderEventArgs) Handles lvFiles.DrawColumnHeader
+        EventArgs.DrawDefault = True
+    End Sub
+
+    Private Sub lvFiles_DrawItem(Sender As Object, EventArgs As DrawListViewItemEventArgs) Handles lvFiles.DrawItem
+        ' In Details view every column is painted by DrawSubItem instead.
+        If lvFiles.View = View.Details Then Return
+
+        If _ThumbnailCellSize <> 0 Then
+            DrawThumbnailItem(EventArgs)
+        Else
+            DrawIconViewItem(EventArgs)
+        End If
+    End Sub
+
+    Private Sub lvFiles_DrawSubItem(Sender As Object, EventArgs As DrawListViewSubItemEventArgs) Handles lvFiles.DrawSubItem
+        If EventArgs.SubItem Is Nothing Then
+            EventArgs.DrawDefault = True
+            Return
+        End If
+
+        Dim Canvas = EventArgs.Graphics
+        Dim Bounds = EventArgs.Bounds
+        Dim Selected = EventArgs.Item.Selected
+
+        Using Background As New SolidBrush(If(Selected, SystemColors.Highlight, lvFiles.BackColor))
+            Canvas.FillRectangle(Background, Bounds)
+        End Using
+
+        Dim ForeColour = If(Selected, SystemColors.HighlightText, EventArgs.Item.ForeColor)
+        Dim TextBounds = Bounds
+        If EventArgs.ColumnIndex = 0 Then
+            Dim Entry = TryCast(EventArgs.Item.Tag, EmbeddedFileSystem.ContentListEntry)
+            Dim IconRectangle = New Rectangle(Bounds.X + 2, Bounds.Y + ((Bounds.Height - FileIconProvider.SmallIconSize) \ 2),
+                                              FileIconProvider.SmallIconSize, FileIconProvider.SmallIconSize)
+            DrawEntryIcon(Canvas, Entry, IconRectangle)
+            TextBounds = Rectangle.FromLTRB(IconRectangle.Right + 4, Bounds.Top, Bounds.Right, Bounds.Bottom)
+        End If
+
+        Dim Flags = TextFormatFlags.VerticalCenter Or TextFormatFlags.EndEllipsis Or TextFormatFlags.NoPrefix
+        If EventArgs.Header IsNot Nothing AndAlso EventArgs.Header.TextAlign = HorizontalAlignment.Right Then
+            Flags = Flags Or TextFormatFlags.Right
+        ElseIf EventArgs.Header IsNot Nothing AndAlso EventArgs.Header.TextAlign = HorizontalAlignment.Center Then
+            Flags = Flags Or TextFormatFlags.HorizontalCenter
+        End If
+        TextRenderer.DrawText(Canvas, EventArgs.SubItem.Text, lvFiles.Font, TextBounds, ForeColour, Flags)
+    End Sub
+
+    Private Sub DrawIconViewItem(EventArgs As DrawListViewItemEventArgs)
+        Dim Canvas = EventArgs.Graphics
+        Canvas.InterpolationMode = InterpolationMode.HighQualityBicubic
+        EventArgs.DrawBackground()
+
+        Dim Bounds = EventArgs.Bounds
+        Dim Entry = TryCast(EventArgs.Item.Tag, EmbeddedFileSystem.ContentListEntry)
+        Dim IconSize = CurrentIconSize()
+
+        If lvFiles.View = View.LargeIcon Then
+            Dim IconRectangle = New Rectangle(Bounds.X + ((Bounds.Width - IconSize) \ 2), Bounds.Y + 2, IconSize, IconSize)
+            DrawEntryIcon(Canvas, Entry, IconRectangle)
+            Dim LabelArea = Rectangle.FromLTRB(Bounds.Left, IconRectangle.Bottom + 2, Bounds.Right, Bounds.Bottom)
+            DrawIconViewLabel(Canvas, EventArgs.Item, LabelArea,
+                              TextFormatFlags.HorizontalCenter Or TextFormatFlags.WordEllipsis Or TextFormatFlags.NoPrefix)
+        Else
+            Dim IconRectangle = New Rectangle(Bounds.X + 1, Bounds.Y + ((Bounds.Height - IconSize) \ 2), IconSize, IconSize)
+            DrawEntryIcon(Canvas, Entry, IconRectangle)
+            Dim LabelArea = Rectangle.FromLTRB(IconRectangle.Right + 3, Bounds.Top, Bounds.Right - 2, Bounds.Bottom)
+            DrawIconViewLabel(Canvas, EventArgs.Item, LabelArea,
+                              TextFormatFlags.Left Or TextFormatFlags.VerticalCenter Or TextFormatFlags.EndEllipsis Or TextFormatFlags.NoPrefix)
+        End If
+
+        If EventArgs.Item.Focused Then EventArgs.DrawFocusRectangle()
+    End Sub
+
+    Private Sub DrawIconViewLabel(Canvas As Graphics, Item As ListViewItem, LabelArea As Rectangle, Flags As TextFormatFlags)
+        Dim Selected = Item.Selected
+        Dim ForeColour = If(Selected, SystemColors.HighlightText, Item.ForeColor)
+
+        If Selected Then
+            Dim TextSize = TextRenderer.MeasureText(Canvas, Item.Text, lvFiles.Font, LabelArea.Size, Flags)
+            Dim HighlightWidth = Math.Min(TextSize.Width + 4, LabelArea.Width)
+            Dim HighlightHeight = Math.Min(TextSize.Height + 1, LabelArea.Height)
+            Dim HighlightLeft = If((Flags And TextFormatFlags.HorizontalCenter) <> 0,
+                                   LabelArea.X + ((LabelArea.Width - HighlightWidth) \ 2), LabelArea.X)
+            Using Fill As New SolidBrush(SystemColors.Highlight)
+                Canvas.FillRectangle(Fill, HighlightLeft, LabelArea.Y, HighlightWidth, HighlightHeight)
+            End Using
+        End If
+
+        TextRenderer.DrawText(Canvas, Item.Text, lvFiles.Font, LabelArea, ForeColour, Flags)
+    End Sub
+
+    Private Sub DrawEntryIcon(Canvas As Graphics, Entry As EmbeddedFileSystem.ContentListEntry, Destination As Rectangle)
+        If Entry Is Nothing Then Return
+        Dim Icon = GetEntryIcon(Entry, Destination.Width)
+        If Icon Is Nothing Then Return
+        Canvas.InterpolationMode = InterpolationMode.HighQualityBicubic
+        Canvas.DrawImage(Icon, Destination)
+    End Sub
+
+    Private Sub DrawThumbnailItem(EventArgs As DrawListViewItemEventArgs)
+        Dim Canvas = EventArgs.Graphics
+        Canvas.InterpolationMode = InterpolationMode.HighQualityBicubic
+        Canvas.PixelOffsetMode = PixelOffsetMode.HighQuality
+        EventArgs.DrawBackground()
+
+        Dim Bounds = EventArgs.Bounds
+        If EventArgs.Item.Selected Then
+            Using Fill As New SolidBrush(Color.FromArgb(48, SystemColors.Highlight))
+                Canvas.FillRectangle(Fill, Bounds)
+            End Using
+            Using Border As New Pen(SystemColors.Highlight)
+                Canvas.DrawRectangle(Border, Bounds.X, Bounds.Y, Bounds.Width - 1, Bounds.Height - 1)
+            End Using
+        End If
+
+        Dim CellSize = _ThumbnailCellSize
+        Dim IconArea = New Rectangle(Bounds.X, Bounds.Y + 3, Bounds.Width, CellSize)
+        Dim Entry = TryCast(EventArgs.Item.Tag, EmbeddedFileSystem.ContentListEntry)
+        Dim Thumbnail = If(Entry IsNot Nothing AndAlso IsThumbnailableEntry(Entry), GetOrRequestThumbnail(Entry), Nothing)
+
+        If Thumbnail IsNot Nothing Then
+            Dim Target = FitCentered(Thumbnail.Size, IconArea, CellSize)
+            Canvas.DrawImage(Thumbnail, Target)
+            Using Border As New Pen(Color.FromArgb(128, Color.Gray))
+                Canvas.DrawRectangle(Border, Target.X - 1, Target.Y - 1, Target.Width + 1, Target.Height + 1)
+            End Using
+            DrawTypeBadge(Canvas, Entry, Target)
+        Else
+            Dim TypeIcon = GetEntryIcon(Entry, FileIconProvider.JumboIconSize)
+            If TypeIcon IsNot Nothing Then Canvas.DrawImage(TypeIcon, FitCentered(TypeIcon.Size, IconArea, CInt(CellSize * 0.82)))
+        End If
+
+        Dim LabelArea = New Rectangle(Bounds.X + 2, IconArea.Bottom + 2, Bounds.Width - 4, Bounds.Bottom - IconArea.Bottom - 4)
+        TextRenderer.DrawText(Canvas, EventArgs.Item.Text, lvFiles.Font, LabelArea, lvFiles.ForeColor,
+                              TextFormatFlags.HorizontalCenter Or TextFormatFlags.WordEllipsis Or TextFormatFlags.NoPrefix)
+
+        If EventArgs.Item.Focused Then EventArgs.DrawFocusRectangle()
+    End Sub
+
+    Private Shared Function FitCentered(ImageSize As Size, Area As Rectangle, MaximumEdge As Integer) As Rectangle
+        Dim Scale = Math.Min(MaximumEdge / CDbl(ImageSize.Width), MaximumEdge / CDbl(ImageSize.Height))
+        If Scale > 1 Then Scale = 1
+        Dim Width = Math.Max(1, CInt(Math.Round(ImageSize.Width * Scale)))
+        Dim Height = Math.Max(1, CInt(Math.Round(ImageSize.Height * Scale)))
+        Return New Rectangle(Area.X + ((Area.Width - Width) \ 2), Area.Y + ((Area.Height - Height) \ 2), Width, Height)
+    End Function
+
+    Private Sub DrawTypeBadge(Canvas As Graphics, Entry As EmbeddedFileSystem.ContentListEntry, ThumbnailRectangle As Rectangle)
+        Dim Badge = GetEntryIcon(Entry, FileIconProvider.SmallIconSize)
+        If Badge Is Nothing Then Return
+
+        Dim X = ThumbnailRectangle.Right - Badge.Width
+        Dim Y = ThumbnailRectangle.Bottom - Badge.Height
+        Using Backing As New SolidBrush(Color.FromArgb(210, Color.White))
+            Canvas.FillRectangle(Backing, X - 1, Y - 1, Badge.Width + 2, Badge.Height + 2)
+        End Using
+        Canvas.DrawImage(Badge, X, Y, Badge.Width, Badge.Height)
+    End Sub
+
+    Private Shared Function IsThumbnailableEntry(Entry As EmbeddedFileSystem.ContentListEntry) As Boolean
+        Return Entry.EntryType <> EmbeddedFileSystem.EntryTypes.Directory AndAlso
+               Entry.LengthOfDataAtEntry > 0 AndAlso
+               Entry.LengthOfDataAtEntry <= MaximumThumbnailSourceBytes AndAlso
+               ThumbnailImageExtensions.Contains(Path.GetExtension(Entry.Name))
+    End Function
+
+    ''' <summary>
+    ''' Returns the cached thumbnail for <paramref name="Entry"/>, or Nothing while one is generated on a
+    ''' background thread. Called from the paint path, so the item is generated the first time it scrolls
+    ''' into view and stays cached until the folder changes.
+    ''' </summary>
+    Private Function GetOrRequestThumbnail(Entry As EmbeddedFileSystem.ContentListEntry) As Bitmap
+        Dim AnchorId = Entry.ChildAnchorId
+        Dim Cached As Bitmap = Nothing
+        If _ThumbnailCache.TryGetValue(AnchorId, Cached) Then Return Cached
+        If _ThumbnailUnavailable.Contains(AnchorId) OrElse _ThumbnailPending.Contains(AnchorId) Then Return Nothing
+
+        _ThumbnailPending.Add(AnchorId)
+        Dim Generation = _ThumbnailGeneration
+        Dim RequestedEntry = Entry
+        System.Threading.ThreadPool.QueueUserWorkItem(Sub() GenerateThumbnail(Generation, RequestedEntry))
+        Return Nothing
+    End Function
+
+    Private Sub GenerateThumbnail(Generation As Integer, Entry As EmbeddedFileSystem.ContentListEntry)
+        Dim Result As Bitmap = Nothing
+        Try
+            If Generation = _ThumbnailGeneration AndAlso _Disposed = False Then
+                Dim Bytes = ReadEntryBytes(Entry)
+                If Bytes IsNot Nothing Then
+                    Using SourceStream As New MemoryStream(Bytes, False)
+                        Using Original = Image.FromStream(SourceStream)
+                            Result = ScaleImageToBox(Original, ThumbnailRenderSize)
+                        End Using
+                    End Using
+                End If
+            End If
+        Catch
+            Result?.Dispose()
+            Result = Nothing
+        End Try
+
+        If _Disposed OrElse IsHandleCreated = False Then
+            Result?.Dispose()
+            Return
+        End If
+
+        Try
+            BeginInvoke(Sub() CompleteThumbnail(Generation, Entry.ChildAnchorId, Result))
+        Catch ex As InvalidOperationException
+            Result?.Dispose()
+        End Try
+    End Sub
+
+    Private Function ReadEntryBytes(Entry As EmbeddedFileSystem.ContentListEntry) As Byte()
+        Using Source = EmbeddedFileReadStream.TryOpen(_FileSystem, Entry)
+            If Source Is Nothing OrElse Source.Length <= 0 OrElse Source.Length > MaximumThumbnailSourceBytes Then Return Nothing
+
+            Dim Bytes = New Byte(CInt(Source.Length) - 1) {}
+            Dim Total = 0
+            While Total < Bytes.Length
+                Dim ThisRead = Source.Read(Bytes, Total, Bytes.Length - Total)
+                If ThisRead = 0 Then Return Nothing
+                Total += ThisRead
+            End While
+            Return Bytes
+        End Using
+    End Function
+
+    Private Sub CompleteThumbnail(Generation As Integer, AnchorId As Long, Result As Bitmap)
+        _ThumbnailPending.Remove(AnchorId)
+        If Generation <> _ThumbnailGeneration OrElse _Disposed Then
+            Result?.Dispose()
+            Return
+        End If
+
+        If Result Is Nothing Then
+            _ThumbnailUnavailable.Add(AnchorId)
+        Else
+            _ThumbnailCache(AnchorId) = Result
+        End If
+        InvalidateThumbnailItem(AnchorId)
+    End Sub
+
+    Private Sub InvalidateThumbnailItem(AnchorId As Long)
+        If _ThumbnailCellSize = 0 Then Return
+        For Each item As ListViewItem In lvFiles.Items
+            Dim Entry = TryCast(item.Tag, EmbeddedFileSystem.ContentListEntry)
+            If Entry IsNot Nothing AndAlso Entry.ChildAnchorId = AnchorId Then
+                lvFiles.Invalidate(item.Bounds)
+                Return
+            End If
+        Next
+    End Sub
+
+    Private Shared Function ScaleImageToBox(Source As Image, MaximumEdge As Integer) As Bitmap
+        Dim Scale = Math.Min(MaximumEdge / CDbl(Source.Width), MaximumEdge / CDbl(Source.Height))
+        If Scale > 1 Then Scale = 1
+        Dim Width = Math.Max(1, CInt(Math.Round(Source.Width * Scale)))
+        Dim Height = Math.Max(1, CInt(Math.Round(Source.Height * Scale)))
+
+        Dim Result = New Bitmap(Width, Height, Imaging.PixelFormat.Format32bppPArgb)
+        Using Canvas = Graphics.FromImage(Result)
+            Canvas.InterpolationMode = InterpolationMode.HighQualityBicubic
+            Canvas.PixelOffsetMode = PixelOffsetMode.HighQuality
+            Canvas.CompositingQuality = CompositingQuality.HighQuality
+            Canvas.DrawImage(Source, New Rectangle(0, 0, Width, Height))
+        End Using
+        Return Result
+    End Function
+
+    Private Sub ClearThumbnailCache()
+        _ThumbnailGeneration += 1
+        For Each thumbnail In _ThumbnailCache.Values
+            thumbnail.Dispose()
+        Next
+        _ThumbnailCache.Clear()
+        _ThumbnailPending.Clear()
+        _ThumbnailUnavailable.Clear()
     End Sub
 
     Private Shared Sub AddMenuItem(Menu As ContextMenuStrip, Text As String, ClickHandler As EventHandler)
@@ -1256,15 +1626,17 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Protected Overrides Sub Dispose(Disposing As Boolean)
         If _Disposed Then Return
 
-        ' Stops any executable-icon pass and waits for it to release the file it may be reading,
-        ' so the caller can dispose the file system without hitting an open-stream guard.
+        ' Signals any executable-icon or thumbnail worker still in flight to drop its result.
         _Disposed = True
-        _IconGeneration += 1
-        _ExecutableIconThread?.Join(TimeSpan.FromSeconds(5))
+        _ThumbnailGeneration += 1
 
         If Disposing Then
             If components IsNot Nothing Then components.Dispose()
             _IconProvider.Dispose()
+            For Each thumbnail In _ThumbnailCache.Values
+                thumbnail.Dispose()
+            Next
+            _ThumbnailCache.Clear()
         End If
 
         MyBase.Dispose(Disposing)

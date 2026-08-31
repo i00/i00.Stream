@@ -14,6 +14,10 @@ Partial Class EmbeddedFileSystemBrowserForm
     Private WithEvents _StateColumnHeader As ColumnHeader
     Private WithEvents tvFolders As TreeView
     Private WithEvents lvFiles As ListView
+    Friend WithEvents _SmallSizer As ImageList
+    Friend WithEvents _Large32Sizer As ImageList
+    Friend WithEvents _Thumbnail128Sizer As ImageList
+    Friend WithEvents _Thumbnail256Sizer As ImageList
 
     <DebuggerStepThrough()>
     Private Sub InitializeComponent()
@@ -44,6 +48,10 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.EncryptToolStripMenuItem1 = New System.Windows.Forms.ToolStripMenuItem()
         Me.ToolStripMenuItem1 = New System.Windows.Forms.ToolStripSeparator()
         Me.tsiExit = New System.Windows.Forms.ToolStripMenuItem()
+        Me._SmallSizer = New System.Windows.Forms.ImageList(Me.components)
+        Me._Large32Sizer = New System.Windows.Forms.ImageList(Me.components)
+        Me._Thumbnail128Sizer = New System.Windows.Forms.ImageList(Me.components)
+        Me._Thumbnail256Sizer = New System.Windows.Forms.ImageList(Me.components)
         CType(Me._SplitContainer, System.ComponentModel.ISupportInitialize).BeginInit()
         Me._SplitContainer.Panel1.SuspendLayout()
         Me._SplitContainer.Panel2.SuspendLayout()
@@ -101,8 +109,11 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.lvFiles.HideSelection = False
         Me.lvFiles.Location = New System.Drawing.Point(0, 0)
         Me.lvFiles.Name = "lvFiles"
+        Me.lvFiles.OwnerDraw = True
         Me.lvFiles.Size = New System.Drawing.Size(756, 611)
+        Me.lvFiles.SmallImageList = Me._SmallSizer
         Me.lvFiles.TabIndex = 0
+        Me.lvFiles.TileSize = New System.Drawing.Size(260, 48)
         Me.lvFiles.UseCompatibleStateImageBehavior = False
         Me.lvFiles.View = System.Windows.Forms.View.Details
         '
@@ -121,6 +132,30 @@ Partial Class EmbeddedFileSystemBrowserForm
         '
         Me._StateColumnHeader.Text = "State"
         Me._StateColumnHeader.Width = 120
+        '
+        '_SmallSizer
+        '
+        Me._SmallSizer.ColorDepth = System.Windows.Forms.ColorDepth.Depth32Bit
+        Me._SmallSizer.ImageSize = New System.Drawing.Size(16, 16)
+        Me._SmallSizer.TransparentColor = System.Drawing.Color.Transparent
+        '
+        '_Large32Sizer
+        '
+        Me._Large32Sizer.ColorDepth = System.Windows.Forms.ColorDepth.Depth32Bit
+        Me._Large32Sizer.ImageSize = New System.Drawing.Size(32, 32)
+        Me._Large32Sizer.TransparentColor = System.Drawing.Color.Transparent
+        '
+        '_Thumbnail128Sizer
+        '
+        Me._Thumbnail128Sizer.ColorDepth = System.Windows.Forms.ColorDepth.Depth32Bit
+        Me._Thumbnail128Sizer.ImageSize = New System.Drawing.Size(128, 128)
+        Me._Thumbnail128Sizer.TransparentColor = System.Drawing.Color.Transparent
+        '
+        '_Thumbnail256Sizer
+        '
+        Me._Thumbnail256Sizer.ColorDepth = System.Windows.Forms.ColorDepth.Depth32Bit
+        Me._Thumbnail256Sizer.ImageSize = New System.Drawing.Size(256, 256)
+        Me._Thumbnail256Sizer.TransparentColor = System.Drawing.Color.Transparent
         '
         '_EmptyFileContextMenu
         '

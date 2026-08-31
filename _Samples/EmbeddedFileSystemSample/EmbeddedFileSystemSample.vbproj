@@ -85,6 +85,7 @@
       <DependentUpon>EmbeddedFileSystemBrowserForm.vb</DependentUpon>
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="EmbeddedFileReadStream.vb" />
     <Compile Include="Extensions.vb" />
     <Compile Include="FileIconProvider.vb" />
     <Compile Include="PeIconReader.vb" />
