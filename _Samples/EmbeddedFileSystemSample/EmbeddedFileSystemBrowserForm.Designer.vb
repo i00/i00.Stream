@@ -22,6 +22,7 @@ Partial Class EmbeddedFileSystemBrowserForm
     <DebuggerStepThrough()>
     Private Sub InitializeComponent()
         Me.components = New System.ComponentModel.Container()
+        Dim resources As System.ComponentModel.ComponentResourceManager = New System.ComponentModel.ComponentResourceManager(GetType(EmbeddedFileSystemBrowserForm))
         Me._SplitContainer = New i00CodeLib.Controls.SplitContainer()
         Me.tvFolders = New System.Windows.Forms.TreeView()
         Me._FolderContextMenu = New System.Windows.Forms.ContextMenuStrip(Me.components)
@@ -30,6 +31,7 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me._SizeColumnHeader = CType(New System.Windows.Forms.ColumnHeader(), System.Windows.Forms.ColumnHeader)
         Me._StateColumnHeader = CType(New System.Windows.Forms.ColumnHeader(), System.Windows.Forms.ColumnHeader)
         Me._EmptyFileContextMenu = New System.Windows.Forms.ContextMenuStrip(Me.components)
+        Me._SmallSizer = New System.Windows.Forms.ImageList(Me.components)
         Me._FileContextMenu = New System.Windows.Forms.ContextMenuStrip(Me.components)
         Me.ToolStrip1 = New System.Windows.Forms.ToolStrip()
         Me.tsiFragmentation = New System.Windows.Forms.ToolStripButton()
@@ -48,7 +50,8 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.EncryptToolStripMenuItem1 = New System.Windows.Forms.ToolStripMenuItem()
         Me.ToolStripMenuItem1 = New System.Windows.Forms.ToolStripSeparator()
         Me.tsiExit = New System.Windows.Forms.ToolStripMenuItem()
-        Me._SmallSizer = New System.Windows.Forms.ImageList(Me.components)
+        Me.tsiBack = New System.Windows.Forms.ToolStripButton()
+        Me.tsiForward = New System.Windows.Forms.ToolStripButton()
         Me._Large32Sizer = New System.Windows.Forms.ImageList(Me.components)
         Me._Thumbnail128Sizer = New System.Windows.Forms.ImageList(Me.components)
         Me._Thumbnail256Sizer = New System.Windows.Forms.ImageList(Me.components)
@@ -66,6 +69,7 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me._SplitContainer.Dock = System.Windows.Forms.DockStyle.Fill
         Me._SplitContainer.GripSpacing = 1.5!
         Me._SplitContainer.Location = New System.Drawing.Point(0, 0)
+        Me._SplitContainer.Margin = New System.Windows.Forms.Padding(4, 5, 4, 5)
         Me._SplitContainer.Name = "_SplitContainer"
         '
         '_SplitContainer.Panel1
@@ -76,9 +80,9 @@ Partial Class EmbeddedFileSystemBrowserForm
         '_SplitContainer.Panel2
         '
         Me._SplitContainer.Panel2.Controls.Add(Me.lvFiles)
-        Me._SplitContainer.Size = New System.Drawing.Size(1084, 611)
-        Me._SplitContainer.SplitterDistance = 320
-        Me._SplitContainer.SplitterWidth = 8
+        Me._SplitContainer.Size = New System.Drawing.Size(1626, 953)
+        Me._SplitContainer.SplitterDistance = 480
+        Me._SplitContainer.SplitterWidth = 12
         Me._SplitContainer.TabIndex = 0
         '
         'tvFolders
@@ -88,9 +92,10 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.tvFolders.Dock = System.Windows.Forms.DockStyle.Fill
         Me.tvFolders.HideSelection = False
         Me.tvFolders.Location = New System.Drawing.Point(0, 0)
+        Me.tvFolders.Margin = New System.Windows.Forms.Padding(4, 5, 4, 5)
         Me.tvFolders.Name = "tvFolders"
         Me.tvFolders.ShowNodeToolTips = True
-        Me.tvFolders.Size = New System.Drawing.Size(320, 611)
+        Me.tvFolders.Size = New System.Drawing.Size(480, 953)
         Me.tvFolders.TabIndex = 0
         '
         '_FolderContextMenu
@@ -108,9 +113,10 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.lvFiles.FullRowSelect = True
         Me.lvFiles.HideSelection = False
         Me.lvFiles.Location = New System.Drawing.Point(0, 0)
+        Me.lvFiles.Margin = New System.Windows.Forms.Padding(4, 5, 4, 5)
         Me.lvFiles.Name = "lvFiles"
         Me.lvFiles.OwnerDraw = True
-        Me.lvFiles.Size = New System.Drawing.Size(756, 611)
+        Me.lvFiles.Size = New System.Drawing.Size(1134, 953)
         Me.lvFiles.SmallImageList = Me._SmallSizer
         Me.lvFiles.TabIndex = 0
         Me.lvFiles.TileSize = New System.Drawing.Size(260, 48)
@@ -133,35 +139,17 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me._StateColumnHeader.Text = "State"
         Me._StateColumnHeader.Width = 120
         '
-        '_SmallSizer
-        '
-        Me._SmallSizer.ColorDepth = System.Windows.Forms.ColorDepth.Depth32Bit
-        Me._SmallSizer.ImageSize = New System.Drawing.Size(16, 16)
-        Me._SmallSizer.TransparentColor = System.Drawing.Color.Transparent
-        '
-        '_Large32Sizer
-        '
-        Me._Large32Sizer.ColorDepth = System.Windows.Forms.ColorDepth.Depth32Bit
-        Me._Large32Sizer.ImageSize = New System.Drawing.Size(32, 32)
-        Me._Large32Sizer.TransparentColor = System.Drawing.Color.Transparent
-        '
-        '_Thumbnail128Sizer
-        '
-        Me._Thumbnail128Sizer.ColorDepth = System.Windows.Forms.ColorDepth.Depth32Bit
-        Me._Thumbnail128Sizer.ImageSize = New System.Drawing.Size(128, 128)
-        Me._Thumbnail128Sizer.TransparentColor = System.Drawing.Color.Transparent
-        '
-        '_Thumbnail256Sizer
-        '
-        Me._Thumbnail256Sizer.ColorDepth = System.Windows.Forms.ColorDepth.Depth32Bit
-        Me._Thumbnail256Sizer.ImageSize = New System.Drawing.Size(256, 256)
-        Me._Thumbnail256Sizer.TransparentColor = System.Drawing.Color.Transparent
-        '
         '_EmptyFileContextMenu
         '
         Me._EmptyFileContextMenu.ImageScalingSize = New System.Drawing.Size(24, 24)
         Me._EmptyFileContextMenu.Name = "_EmptyFileContextMenu"
         Me._EmptyFileContextMenu.Size = New System.Drawing.Size(61, 4)
+        '
+        '_SmallSizer
+        '
+        Me._SmallSizer.ColorDepth = System.Windows.Forms.ColorDepth.Depth32Bit
+        Me._SmallSizer.ImageSize = New System.Drawing.Size(16, 16)
+        Me._SmallSizer.TransparentColor = System.Drawing.Color.Transparent
         '
         '_FileContextMenu
         '
@@ -175,10 +163,10 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.ToolStrip1.GripStyle = System.Windows.Forms.ToolStripGripStyle.Hidden
         Me.ToolStrip1.ImageScalingSize = New System.Drawing.Size(24, 24)
         Me.ToolStrip1.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.tsiFragmentation, Me.tsiCompressionBar, Me.tsiCompression, Me.StatusLabel})
-        Me.ToolStrip1.Location = New System.Drawing.Point(0, 636)
+        Me.ToolStrip1.Location = New System.Drawing.Point(0, 987)
         Me.ToolStrip1.Name = "ToolStrip1"
-        Me.ToolStrip1.Padding = New System.Windows.Forms.Padding(0, 0, 6, 0)
-        Me.ToolStrip1.Size = New System.Drawing.Size(1084, 25)
+        Me.ToolStrip1.Padding = New System.Windows.Forms.Padding(0, 0, 9, 0)
+        Me.ToolStrip1.Size = New System.Drawing.Size(1626, 30)
         Me.ToolStrip1.TabIndex = 3
         Me.ToolStrip1.Text = "ToolStrip1"
         '
@@ -203,38 +191,41 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.tsiCompressionBar.Padding = New System.Windows.Forms.Padding(0, 1, 0, 2)
         Me.tsiCompressionBar.PercentageBasedOn = i00CodeLib.Controls.NeroBar.NeroBarPercentageCalculationModes.WholeControl
         Me.tsiCompressionBar.SegmentCount = i00CodeLib.Controls.NeroBar.NeroBarSegments.One
-        Me.tsiCompressionBar.Size = New System.Drawing.Size(100, 15)
+        Me.tsiCompressionBar.Size = New System.Drawing.Size(150, 18)
         Me.tsiCompressionBar.Text = "NeroBarToolStripItem1"
         '
         'tsiCompression
         '
         Me.tsiCompression.Alignment = System.Windows.Forms.ToolStripItemAlignment.Right
         Me.tsiCompression.Name = "tsiCompression"
-        Me.tsiCompression.Size = New System.Drawing.Size(73, 22)
+        Me.tsiCompression.Size = New System.Drawing.Size(110, 25)
         Me.tsiCompression.Text = "Relative size:"
         '
         'StatusLabel
         '
         Me.StatusLabel.Name = "StatusLabel"
-        Me.StatusLabel.Size = New System.Drawing.Size(39, 22)
+        Me.StatusLabel.Size = New System.Drawing.Size(60, 25)
         Me.StatusLabel.Text = "Status"
         '
         'pnlExplorer
         '
         Me.pnlExplorer.Controls.Add(Me._SplitContainer)
         Me.pnlExplorer.Dock = System.Windows.Forms.DockStyle.Fill
-        Me.pnlExplorer.Location = New System.Drawing.Point(0, 25)
+        Me.pnlExplorer.Location = New System.Drawing.Point(0, 34)
+        Me.pnlExplorer.Margin = New System.Windows.Forms.Padding(4, 5, 4, 5)
         Me.pnlExplorer.Name = "pnlExplorer"
-        Me.pnlExplorer.Size = New System.Drawing.Size(1084, 611)
+        Me.pnlExplorer.Size = New System.Drawing.Size(1626, 953)
         Me.pnlExplorer.TabIndex = 1
         '
         'ToolStrip2
         '
         Me.ToolStrip2.GripStyle = System.Windows.Forms.ToolStripGripStyle.Hidden
-        Me.ToolStrip2.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.tsiSearch, Me.ToolStripLabel1, Me.ToolStripDropDownButton1})
+        Me.ToolStrip2.ImageScalingSize = New System.Drawing.Size(24, 24)
+        Me.ToolStrip2.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.tsiSearch, Me.ToolStripLabel1, Me.ToolStripDropDownButton1, Me.tsiBack, Me.tsiForward})
         Me.ToolStrip2.Location = New System.Drawing.Point(0, 0)
         Me.ToolStrip2.Name = "ToolStrip2"
-        Me.ToolStrip2.Size = New System.Drawing.Size(1084, 25)
+        Me.ToolStrip2.Padding = New System.Windows.Forms.Padding(0, 0, 3, 0)
+        Me.ToolStrip2.Size = New System.Drawing.Size(1626, 34)
         Me.ToolStrip2.TabIndex = 4
         Me.ToolStrip2.Text = "ToolStrip2"
         '
@@ -243,13 +234,13 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.tsiSearch.Alignment = System.Windows.Forms.ToolStripItemAlignment.Right
         Me.tsiSearch.Font = New System.Drawing.Font("Segoe UI", 9.0!)
         Me.tsiSearch.Name = "tsiSearch"
-        Me.tsiSearch.Size = New System.Drawing.Size(100, 25)
+        Me.tsiSearch.Size = New System.Drawing.Size(148, 34)
         '
         'ToolStripLabel1
         '
         Me.ToolStripLabel1.Alignment = System.Windows.Forms.ToolStripItemAlignment.Right
         Me.ToolStripLabel1.Name = "ToolStripLabel1"
-        Me.ToolStripLabel1.Size = New System.Drawing.Size(42, 22)
+        Me.ToolStripLabel1.Size = New System.Drawing.Size(64, 29)
         Me.ToolStripLabel1.Text = "Search"
         '
         'ToolStripDropDownButton1
@@ -258,7 +249,7 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.ToolStripDropDownButton1.DropDownItems.AddRange(New System.Windows.Forms.ToolStripItem() {Me.MenuTextSeparator2, Me.tsiScan, Me.tsiDefrag, Me.MenuTextSeparator1, Me.EncryptToolStripMenuItem1, Me.ToolStripMenuItem1, Me.tsiExit})
         Me.ToolStripDropDownButton1.ImageTransparentColor = System.Drawing.Color.Magenta
         Me.ToolStripDropDownButton1.Name = "ToolStripDropDownButton1"
-        Me.ToolStripDropDownButton1.Size = New System.Drawing.Size(38, 22)
+        Me.ToolStripDropDownButton1.Size = New System.Drawing.Size(56, 29)
         Me.ToolStripDropDownButton1.Text = "&File"
         '
         'MenuTextSeparator2
@@ -267,19 +258,19 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.MenuTextSeparator2.BackColor = System.Drawing.SystemColors.Control
         Me.MenuTextSeparator2.ForeColor = System.Drawing.SystemColors.ControlText
         Me.MenuTextSeparator2.Name = "MenuTextSeparator2"
-        Me.MenuTextSeparator2.Size = New System.Drawing.Size(3840, 18)
+        Me.MenuTextSeparator2.Size = New System.Drawing.Size(1680, 18)
         Me.MenuTextSeparator2.Text = "Tools"
         '
         'tsiScan
         '
         Me.tsiScan.Name = "tsiScan"
-        Me.tsiScan.Size = New System.Drawing.Size(180, 22)
+        Me.tsiScan.Size = New System.Drawing.Size(178, 34)
         Me.tsiScan.Text = "&Scan"
         '
         'tsiDefrag
         '
         Me.tsiDefrag.Name = "tsiDefrag"
-        Me.tsiDefrag.Size = New System.Drawing.Size(180, 22)
+        Me.tsiDefrag.Size = New System.Drawing.Size(178, 34)
         Me.tsiDefrag.Text = "&Defrag"
         '
         'MenuTextSeparator1
@@ -288,36 +279,73 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.MenuTextSeparator1.BackColor = System.Drawing.SystemColors.Control
         Me.MenuTextSeparator1.ForeColor = System.Drawing.SystemColors.ControlText
         Me.MenuTextSeparator1.Name = "MenuTextSeparator1"
-        Me.MenuTextSeparator1.Size = New System.Drawing.Size(3840, 18)
+        Me.MenuTextSeparator1.Size = New System.Drawing.Size(1680, 18)
         Me.MenuTextSeparator1.Text = "Options"
         '
         'EncryptToolStripMenuItem1
         '
         Me.EncryptToolStripMenuItem1.Name = "EncryptToolStripMenuItem1"
-        Me.EncryptToolStripMenuItem1.Size = New System.Drawing.Size(180, 22)
+        Me.EncryptToolStripMenuItem1.Size = New System.Drawing.Size(178, 34)
         Me.EncryptToolStripMenuItem1.Text = "&Encrypt"
         '
         'ToolStripMenuItem1
         '
         Me.ToolStripMenuItem1.Name = "ToolStripMenuItem1"
-        Me.ToolStripMenuItem1.Size = New System.Drawing.Size(177, 6)
+        Me.ToolStripMenuItem1.Size = New System.Drawing.Size(175, 6)
         '
         'tsiExit
         '
         Me.tsiExit.Name = "tsiExit"
-        Me.tsiExit.Size = New System.Drawing.Size(180, 22)
+        Me.tsiExit.Size = New System.Drawing.Size(178, 34)
         Me.tsiExit.Text = "E&xit"
+        '
+        'tsiBack
+        '
+        Me.tsiBack.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image
+        Me.tsiBack.Image = CType(resources.GetObject("tsiBack.Image"), System.Drawing.Image)
+        Me.tsiBack.Name = "tsiBack"
+        Me.tsiBack.RightToLeftAutoMirrorImage = True
+        Me.tsiBack.Size = New System.Drawing.Size(34, 29)
+        Me.tsiBack.Text = "Move previous"
+        '
+        'tsiForward
+        '
+        Me.tsiForward.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image
+        Me.tsiForward.Image = CType(resources.GetObject("tsiForward.Image"), System.Drawing.Image)
+        Me.tsiForward.Name = "tsiForward"
+        Me.tsiForward.RightToLeftAutoMirrorImage = True
+        Me.tsiForward.Size = New System.Drawing.Size(34, 29)
+        Me.tsiForward.Text = "Move next"
+        '
+        '_Large32Sizer
+        '
+        Me._Large32Sizer.ColorDepth = System.Windows.Forms.ColorDepth.Depth32Bit
+        Me._Large32Sizer.ImageSize = New System.Drawing.Size(32, 32)
+        Me._Large32Sizer.TransparentColor = System.Drawing.Color.Transparent
+        '
+        '_Thumbnail128Sizer
+        '
+        Me._Thumbnail128Sizer.ColorDepth = System.Windows.Forms.ColorDepth.Depth32Bit
+        Me._Thumbnail128Sizer.ImageSize = New System.Drawing.Size(128, 128)
+        Me._Thumbnail128Sizer.TransparentColor = System.Drawing.Color.Transparent
+        '
+        '_Thumbnail256Sizer
+        '
+        Me._Thumbnail256Sizer.ColorDepth = System.Windows.Forms.ColorDepth.Depth32Bit
+        Me._Thumbnail256Sizer.ImageSize = New System.Drawing.Size(256, 256)
+        Me._Thumbnail256Sizer.TransparentColor = System.Drawing.Color.Transparent
         '
         'EmbeddedFileSystemBrowserForm
         '
-        Me.AutoScaleDimensions = New System.Drawing.SizeF(6.0!, 13.0!)
+        Me.AutoScaleDimensions = New System.Drawing.SizeF(9.0!, 20.0!)
         Me.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
-        Me.ClientSize = New System.Drawing.Size(1084, 661)
+        Me.ClientSize = New System.Drawing.Size(1626, 1017)
         Me.Controls.Add(Me.pnlExplorer)
         Me.Controls.Add(Me.ToolStrip1)
         Me.Controls.Add(Me.ToolStrip2)
         Me.KeyPreview = True
-        Me.MinimumSize = New System.Drawing.Size(760, 480)
+        Me.Margin = New System.Windows.Forms.Padding(4, 5, 4, 5)
+        Me.MinimumSize = New System.Drawing.Size(1129, 708)
         Me.Name = "EmbeddedFileSystemBrowserForm"
         Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterParent
         Me.Text = "Embedded File System"
@@ -344,7 +372,6 @@ Partial Class EmbeddedFileSystemBrowserForm
     Friend WithEvents tsiFragmentation As ToolStripButton
     Friend WithEvents ToolStrip2 As ToolStrip
     Friend WithEvents tsiSearch As ToolStripTextBox
-    Friend WithEvents ToolStripLabel1 As ToolStripLabel
     Friend WithEvents ToolStripDropDownButton1 As ToolStripDropDownButton
     Friend WithEvents tsiExit As ToolStripMenuItem
     Friend WithEvents tsiDefrag As ToolStripMenuItem
@@ -353,4 +380,7 @@ Partial Class EmbeddedFileSystemBrowserForm
     Friend WithEvents MenuTextSeparator1 As i00CodeLib.Controls.MenuTextSeparator
     Friend WithEvents MenuTextSeparator2 As i00CodeLib.Controls.MenuTextSeparator
     Friend WithEvents tsiScan As ToolStripMenuItem
+    Friend WithEvents tsiBack As ToolStripButton
+    Friend WithEvents tsiForward As ToolStripButton
+    Friend WithEvents ToolStripLabel1 As ToolStripLabel
 End Class

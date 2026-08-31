@@ -65,6 +65,18 @@ Namespace My
                 Me("FileListView") = value
             End Set
         End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("List")>  _
+        Public Property SearchListView() As String
+            Get
+                Return CType(Me("SearchListView"),String)
+            End Get
+            Set
+                Me("SearchListView") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

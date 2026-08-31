@@ -123,8 +123,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Dim Result As Integer
             If Column = 1 Then
                 Result = EntryLength(LeftEntry).CompareTo(EntryLength(RightEntry))
-            ElseIf Column = 2 Then
-                Result = String.Compare(Left.SubItems(2).Text, Right.SubItems(2).Text, StringComparison.OrdinalIgnoreCase)
+            ElseIf Column >= 2 AndAlso Left.SubItems.Count > Column AndAlso Right.SubItems.Count > Column Then
+                Result = String.Compare(Left.SubItems(Column).Text, Right.SubItems(Column).Text, StringComparison.OrdinalIgnoreCase)
             Else
                 Result = String.Compare(Left.Text, Right.Text, StringComparison.OrdinalIgnoreCase)
             End If
@@ -143,12 +143,63 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Function
     End Class
 
+    ''' <summary>A place in the navigation history: either a folder or a search.</summary>
+    Private NotInheritable Class NavLocation
+        Private Sub New(IsSearch As Boolean, AnchorId As Long, Query As String)
+            Me.IsSearch = IsSearch
+            Me.AnchorId = AnchorId
+            Me.Query = Query
+        End Sub
+
+        Public ReadOnly Property IsSearch As Boolean
+        Public ReadOnly Property AnchorId As Long
+        Public ReadOnly Property Query As String
+
+        Public Shared Function Folder(AnchorId As Long) As NavLocation
+            Return New NavLocation(False, AnchorId, Nothing)
+        End Function
+
+        Public Shared Function Search(Query As String) As NavLocation
+            Return New NavLocation(True, 0, Query)
+        End Function
+
+        Public Function SameAs(Other As NavLocation) As Boolean
+            If Other Is Nothing OrElse IsSearch <> Other.IsSearch Then Return False
+            Return If(IsSearch, String.Equals(Query, Other.Query, StringComparison.OrdinalIgnoreCase), AnchorId = Other.AnchorId)
+        End Function
+    End Class
+
+    ''' <summary>One search match, with the anchor and display path of its containing folder.</summary>
+    Private NotInheritable Class SearchHit
+        Public Sub New(Entry As EmbeddedFileSystem.ContentListEntry, ParentAnchorId As Long, ParentPath As String)
+            Me.Entry = Entry
+            Me.ParentAnchorId = ParentAnchorId
+            Me.ParentPath = ParentPath
+        End Sub
+
+        Public ReadOnly Property Entry As EmbeddedFileSystem.ContentListEntry
+        Public ReadOnly Property ParentAnchorId As Long
+        Public ReadOnly Property ParentPath As String
+    End Class
+
     Private ReadOnly _FileSystem As EmbeddedFileSystem
     Private ReadOnly _IconProvider As New FileIconProvider()
     Private ReadOnly _ListSorter As New EntryListViewComparer()
     Private ReadOnly _ThumbnailCache As New Dictionary(Of Long, Bitmap)()
     Private ReadOnly _ThumbnailPending As New HashSet(Of Long)()
     Private ReadOnly _ThumbnailUnavailable As New HashSet(Of Long)()
+    Private ReadOnly _History As New List(Of NavLocation)()
+    Private ReadOnly _SearchResults As New List(Of SearchHit)()
+    Private ReadOnly _SearchItemInfo As New Dictionary(Of ListViewItem, SearchHit)()
+    Private ReadOnly _PathColumn As New ColumnHeader() With {.Text = "Path", .Width = 260}
+    Private WithEvents _SearchTimer As New System.Windows.Forms.Timer() With {.Interval = 250}
+    Private _HistoryIndex As Integer = -1
+    Private _ApplyingLocation As Boolean
+    Private _SearchActive As Boolean
+    Private _CompletedSearchGeneration As Integer = -1
+    Private _SearchQuery As String
+    Private _SearchGeneration As Integer
+    Private _SuppressSearchText As Boolean
     Private _CurrentDirectoryAnchorId As Long
     Private _ListDragStart As Point
     Private _TreeDragStart As Point
@@ -182,6 +233,10 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         RefreshFileSystemView()
         ApplySavedFileListView()
 
+        _History.Add(NavLocation.Folder(_FileSystem.RootAnchorId))
+        _HistoryIndex = 0
+        UpdateNavigationButtons()
+
     End Sub
 
     Public ReadOnly Property FileSystem As EmbeddedFileSystem
@@ -210,15 +265,25 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             PopulateDirectoryNodes(RootNode, _FileSystem.RootAnchorId, New HashSet(Of Long)())
             RootNode.Expand()
 
-            Dim NodeToSelect = FindDirectoryNode(SelectedAnchorId)
-            If NodeToSelect Is Nothing Then NodeToSelect = RootNode
-            tvFolders.SelectedNode = NodeToSelect
-            NodeToSelect.EnsureVisible()
+            _ApplyingLocation = True
+            If _SearchActive Then
+                tvFolders.SelectedNode = Nothing
+            Else
+                Dim NodeToSelect = FindDirectoryNode(SelectedAnchorId)
+                If NodeToSelect Is Nothing Then NodeToSelect = RootNode
+                tvFolders.SelectedNode = NodeToSelect
+                NodeToSelect.EnsureVisible()
+            End If
+            _ApplyingLocation = False
         Finally
             tvFolders.EndUpdate()
         End Try
 
-        RefreshCurrentDirectory()
+        If _SearchActive Then
+            PopulateSearchList()
+        Else
+            RefreshCurrentDirectory()
+        End If
 
 
         Dim Fragmentation = _FileSystem.ChunkedStream.GetFragmentation
@@ -296,6 +361,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Try
             lvFiles.ListViewItemSorter = Nothing
             lvFiles.Items.Clear()
+            _SearchItemInfo.Clear()
 
             For Each entry In Entries
                 Dim IsDirectory = entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory
@@ -397,10 +463,19 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub UpdateStatus()
-        Dim DirectoryName = If(tvFolders.SelectedNode Is Nothing, "Root", tvFolders.SelectedNode.Text)
         Dim SelectedCount = lvFiles.SelectedItems.Count
         Dim SelectionText = If(SelectedCount = 0, String.Empty, $", {SelectedCount:N0} selected")
-        StatusLabel.Text = $"{DirectoryName}: {lvFiles.Items.Count:N0} items{SelectionText}"
+
+        If _SearchActive Then
+            Dim ProgressText = If(_SearchGeneration = _CompletedSearchGeneration, String.Empty, " (searching...)")
+            StatusLabel.Text = $"Search '{_SearchQuery}': {lvFiles.Items.Count:N0} results{ProgressText}{SelectionText}"
+            ' Incremental result batches update this caption faster than the ToolStrip repaints
+            ' itself, so force it while a search is on screen.
+            StatusLabel.Owner?.Refresh()
+        Else
+            Dim DirectoryName = If(tvFolders.SelectedNode Is Nothing, "Root", tvFolders.SelectedNode.Text)
+            StatusLabel.Text = $"{DirectoryName}: {lvFiles.Items.Count:N0} items{SelectionText}"
+        End If
     End Sub
 
     Private Shared Function GetEntryStateText(EntryType As EmbeddedFileSystem.EntryTypes) As String
@@ -453,17 +528,319 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Function
 
     Private Sub NavigateToDirectory(DirectoryAnchorId As Long)
-        Dim Node = FindDirectoryNode(DirectoryAnchorId)
-        If Node Is Nothing Then Return
-        Node.EnsureVisible()
-        tvFolders.SelectedNode = Node
+        NavigateTo(NavLocation.Folder(DirectoryAnchorId))
     End Sub
 
     Private Sub tvFolders_AfterSelect(Sender As Object, EventArgs As TreeViewEventArgs) Handles tvFolders.AfterSelect
+        If _ApplyingLocation OrElse EventArgs.Node Is Nothing Then Return
         Dim Info = TryCast(EventArgs.Node.Tag, DirectoryNodeInfo)
         If Info Is Nothing Then Return
-        _CurrentDirectoryAnchorId = Info.AnchorId
+        NavigateTo(NavLocation.Folder(Info.AnchorId))
+    End Sub
+
+    ' ===================================================================================================
+    ' Navigation history (folders and searches) and the Back / Forward buttons
+    ' ===================================================================================================
+
+    ''' <summary>Navigates to <paramref name="Location"/>, appending it to the history (Explorer-style).</summary>
+    Private Sub NavigateTo(Location As NavLocation)
+        If _ApplyingLocation Then
+            ApplyLocation(Location)
+            Return
+        End If
+
+        If _HistoryIndex >= 0 AndAlso _History(_HistoryIndex).SameAs(Location) Then
+            ApplyLocation(Location)
+            Return
+        End If
+
+        If _HistoryIndex < _History.Count - 1 Then
+            _History.RemoveRange(_HistoryIndex + 1, _History.Count - _HistoryIndex - 1)
+        End If
+        _History.Add(Location)
+        _HistoryIndex = _History.Count - 1
+
+        ApplyLocation(Location)
+        UpdateNavigationButtons()
+    End Sub
+
+    Private Sub GoBack()
+        If _HistoryIndex <= 0 Then Return
+        _HistoryIndex -= 1
+        ApplyLocation(_History(_HistoryIndex))
+        UpdateNavigationButtons()
+    End Sub
+
+    Private Sub GoForward()
+        If _HistoryIndex >= _History.Count - 1 Then Return
+        _HistoryIndex += 1
+        ApplyLocation(_History(_HistoryIndex))
+        UpdateNavigationButtons()
+    End Sub
+
+    Private Sub UpdateNavigationButtons()
+        tsiBack.Enabled = _HistoryIndex > 0
+        tsiForward.Enabled = _HistoryIndex < _History.Count - 1
+    End Sub
+
+    Private Sub ApplyLocation(Location As NavLocation)
+        Dim WasApplying = _ApplyingLocation
+        _ApplyingLocation = True
+        Try
+            If Location.IsSearch Then
+                ShowSearchResults(Location.Query)
+            Else
+                ShowFolder(Location.AnchorId)
+            End If
+        Finally
+            _ApplyingLocation = WasApplying
+        End Try
+    End Sub
+
+    Private Sub ShowFolder(AnchorId As Long)
+        Dim WasSearching = _SearchActive
+        _SearchActive = False
+        _CurrentDirectoryAnchorId = AnchorId
+
+        RemovePathColumn()
+
+        Dim Node = FindDirectoryNode(AnchorId)
+        If Node IsNot Nothing Then
+            Node.EnsureVisible()
+            If tvFolders.SelectedNode IsNot Node Then tvFolders.SelectedNode = Node
+        End If
+
         RefreshCurrentDirectory()
+        If WasSearching Then ApplySavedFileListView()
+    End Sub
+
+    Private Sub tsiBack_Click(Sender As Object, EventArgs As EventArgs) Handles tsiBack.Click
+        GoBack()
+    End Sub
+
+    Private Sub tsiForward_Click(Sender As Object, EventArgs As EventArgs) Handles tsiForward.Click
+        GoForward()
+    End Sub
+
+    ' ===================================================================================================
+    ' Search
+    ' ===================================================================================================
+
+    Private Sub tsiSearch_TextChanged(Sender As Object, EventArgs As EventArgs) Handles tsiSearch.TextChanged
+        If _SuppressSearchText Then Return
+
+        _SearchTimer.Stop()
+        If tsiSearch.Text.Trim().Length = 0 Then
+            If _SearchActive Then NavigateTo(NavLocation.Folder(_CurrentDirectoryAnchorId))
+            Return
+        End If
+        _SearchTimer.Start()
+    End Sub
+
+    Private Sub SearchTimer_Tick(Sender As Object, EventArgs As EventArgs) Handles _SearchTimer.Tick
+        _SearchTimer.Stop()
+        Dim Query = tsiSearch.Text.Trim()
+        If Query.Length > 0 Then NavigateTo(NavLocation.Search(Query))
+    End Sub
+
+    ''' <summary>Focusing the search box with text in it returns to that (still-cached) search.</summary>
+    Private Sub tsiSearch_Enter(Sender As Object, EventArgs As EventArgs) Handles tsiSearch.Enter
+        If _SearchActive Then Return
+        Dim Query = tsiSearch.Text.Trim()
+        If Query.Length > 0 Then NavigateTo(NavLocation.Search(Query))
+    End Sub
+
+    Private Sub FocusSearchBox()
+        tsiSearch.Focus()
+        tsiSearch.SelectAll()
+    End Sub
+
+    ''' <summary>
+    ''' Shows the results for <paramref name="Query"/>. The folder tree stays visible but with nothing
+    ''' selected; the list switches to its own saved search view (a plain list by default) and gains a
+    ''' Path column. A new query starts a fresh background walk; an unchanged query just re-displays the
+    ''' cached results.
+    ''' </summary>
+    Private Sub ShowSearchResults(Query As String)
+        Dim IsNewQuery = String.Equals(_SearchQuery, Query, StringComparison.OrdinalIgnoreCase) = False
+        Dim WasSearching = _SearchActive
+
+        _SearchActive = True
+        _SearchQuery = Query
+
+        If String.Equals(tsiSearch.Text, Query, StringComparison.Ordinal) = False Then
+            _SuppressSearchText = True
+            tsiSearch.Text = Query
+            _SuppressSearchText = False
+        End If
+
+        If WasSearching = False Then ApplySavedSearchListView()
+        EnsurePathColumn()
+        If tvFolders.SelectedNode IsNot Nothing Then tvFolders.SelectedNode = Nothing
+
+        If IsNewQuery Then StartSearch(Query)
+        PopulateSearchList()
+        UpdateStatus()
+    End Sub
+
+    Private Sub StartSearch(Query As String)
+        _SearchGeneration += 1
+        _SearchResults.Clear()
+        Dim Generation = _SearchGeneration
+        Dim RootAnchorId = _FileSystem.RootAnchorId
+        System.Threading.ThreadPool.QueueUserWorkItem(Sub() RunSearch(Generation, Query, RootAnchorId))
+    End Sub
+
+    Private Sub RerunSearch()
+        If _SearchQuery Is Nothing Then Return
+        StartSearch(_SearchQuery)
+        PopulateSearchList()
+        UpdateStatus()
+    End Sub
+
+    Private Const SearchResultFlushIntervalMs As Integer = 80
+
+    Private Sub RunSearch(Generation As Integer, Query As String, RootAnchorId As Long)
+        Dim Pending As New Stack(Of KeyValuePair(Of Long, String))()
+        Pending.Push(New KeyValuePair(Of Long, String)(RootAnchorId, String.Empty))
+
+        Dim Accumulated As New List(Of SearchHit)()
+        Dim LastFlush = Environment.TickCount
+
+        While Pending.Count > 0
+            If Generation <> _SearchGeneration OrElse _Disposed Then Return
+            Dim Current = Pending.Pop()
+
+            Dim Entries As IReadOnlyList(Of EmbeddedFileSystem.ContentListEntry)
+            Try
+                Entries = _FileSystem.GetDirectoryEntries(Current.Key)
+            Catch
+                Continue While
+            End Try
+
+            Dim ContainingPath = If(Current.Value.Length = 0, "\", Current.Value)
+            For Each Entry In Entries
+                If Entry.Name.IndexOf(Query, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    Accumulated.Add(New SearchHit(Entry, Current.Key, ContainingPath))
+                End If
+                If Entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory Then
+                    Pending.Push(New KeyValuePair(Of Long, String)(Entry.ChildAnchorId, Current.Value & "\" & Entry.Name))
+                End If
+            Next
+
+            ' Coalesce hits into one UI update every SearchResultFlushIntervalMs so a fast walk
+            ' doesn't flood the UI thread with tiny batches (which starved the status repaint).
+            If Accumulated.Count > 0 AndAlso Environment.TickCount - LastFlush >= SearchResultFlushIntervalMs Then
+                If FlushSearchBatch(Generation, Accumulated) = False Then Return
+                Accumulated = New List(Of SearchHit)()
+                LastFlush = Environment.TickCount
+            End If
+        End While
+
+        If Accumulated.Count > 0 Then FlushSearchBatch(Generation, Accumulated)
+
+        Try
+            BeginInvoke(Sub() OnSearchComplete(Generation))
+        Catch ex As InvalidOperationException
+        End Try
+    End Sub
+
+    ''' <summary>Marshals a batch of hits to the UI thread. Returns False if the form is gone.</summary>
+    Private Function FlushSearchBatch(Generation As Integer, Batch As List(Of SearchHit)) As Boolean
+        Try
+            BeginInvoke(Sub() AddSearchBatch(Generation, Batch))
+            Return True
+        Catch ex As InvalidOperationException
+            Return False
+        End Try
+    End Function
+
+    Private Sub AddSearchBatch(Generation As Integer, Batch As List(Of SearchHit))
+        If Generation <> _SearchGeneration Then Return
+        _SearchResults.AddRange(Batch)
+        If _SearchActive = False Then Return
+
+        lvFiles.BeginUpdate()
+        Try
+            lvFiles.ListViewItemSorter = Nothing
+            For Each Hit In Batch
+                lvFiles.Items.Add(CreateSearchListItem(Hit))
+            Next
+            lvFiles.ListViewItemSorter = _ListSorter
+            lvFiles.Sort()
+        Finally
+            lvFiles.EndUpdate()
+        End Try
+        UpdateStatus()
+    End Sub
+
+    Private Sub OnSearchComplete(Generation As Integer)
+        If Generation <> _SearchGeneration Then Return
+        _CompletedSearchGeneration = Generation
+        UpdateStatus()
+    End Sub
+
+    Private Sub PopulateSearchList()
+        lvFiles.BeginUpdate()
+        Try
+            lvFiles.ListViewItemSorter = Nothing
+            lvFiles.Items.Clear()
+            _SearchItemInfo.Clear()
+            For Each Hit In _SearchResults
+                lvFiles.Items.Add(CreateSearchListItem(Hit))
+            Next
+            lvFiles.ListViewItemSorter = _ListSorter
+            lvFiles.Sort()
+        Finally
+            lvFiles.EndUpdate()
+        End Try
+    End Sub
+
+    Private Function CreateSearchListItem(Hit As SearchHit) As ListViewItem
+        Dim Entry = Hit.Entry
+        Dim IsDirectory = Entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory
+        Dim Item = New ListViewItem(Entry.Name) With {.Tag = Entry}
+        Item.SubItems.Add(If(IsDirectory, String.Empty, FormatByteLength(Entry.LengthOfDataAtEntry)))
+        Item.SubItems.Add(GetEntryStateText(Entry.EntryType))
+        Item.SubItems.Add(Hit.ParentPath)
+        If Entry.EntryType = EmbeddedFileSystem.EntryTypes.PendingFile Then Item.ForeColor = i00CodeLib.Drawing.BlendColor(lvFiles.ForeColor, Color.Red)
+        _SearchItemInfo(Item) = Hit
+        Return Item
+    End Function
+
+    Private Sub EnsurePathColumn()
+        If lvFiles.Columns.Contains(_PathColumn) = False Then lvFiles.Columns.Add(_PathColumn)
+    End Sub
+
+    Private Sub RemovePathColumn()
+        If lvFiles.Columns.Contains(_PathColumn) = False Then Return
+        lvFiles.Columns.Remove(_PathColumn)
+        If _ListSorter.Column >= lvFiles.Columns.Count Then
+            _ListSorter.Column = 0
+            _ListSorter.Order = SortOrder.Ascending
+        End If
+    End Sub
+
+    Private Sub OpenContainingFolder(Sender As Object, EventArgs As EventArgs)
+        If lvFiles.SelectedItems.Count <> 1 Then Return
+        Dim Hit As SearchHit = Nothing
+        If _SearchItemInfo.TryGetValue(lvFiles.SelectedItems(0), Hit) = False Then Return
+
+        Dim TargetName = Hit.Entry.Name
+        NavigateTo(NavLocation.Folder(Hit.ParentAnchorId))
+        SelectListItemByName(TargetName)
+    End Sub
+
+    Private Sub SelectListItemByName(Name As String)
+        For Each Item As ListViewItem In lvFiles.Items
+            If String.Equals(Item.Text, Name, StringComparison.Ordinal) Then
+                Item.Selected = True
+                Item.Focused = True
+                Item.EnsureVisible()
+                lvFiles.Select()
+                Return
+            End If
+        Next
     End Sub
 
     Private Sub tvFolders_NodeMouseClick(Sender As Object, EventArgs As TreeNodeMouseClickEventArgs) Handles tvFolders.NodeMouseClick
@@ -530,6 +907,24 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Return
         End If
 
+        If _SearchActive Then
+            If lvFiles.SelectedItems.Count = 1 Then
+                AddMenuItem(_FileContextMenu, "Open Folder", AddressOf OpenContainingFolder)
+                If IsDirectory(Entries(0)) Then AddMenuItem(_FileContextMenu, "Open", Sub() NavigateToDirectory(Entries(0).ChildAnchorId))
+            End If
+            If Entries.Count = 1 AndAlso IsDirectory(Entries(0)) Then
+                AddMenuItem(_FileContextMenu, "Save Folder As...", AddressOf SaveSelectedEntries)
+            ElseIf Entries.Count = 1 Then
+                AddMenuItem(_FileContextMenu, "Save As...", AddressOf SaveSelectedEntries)
+            Else
+                AddMenuItem(_FileContextMenu, "Save Selected To Folder...", AddressOf SaveSelectedEntries)
+            End If
+            AddMenuItem(_FileContextMenu, "Delete", AddressOf DeleteSelectedEntries)
+            _FileContextMenu.Items.Add(New ToolStripSeparator())
+            AddViewMenu(_FileContextMenu)
+            Return
+        End If
+
         If Entries.Count = 1 AndAlso IsDirectory(Entries(0)) Then
             AddMenuItem(_FileContextMenu, "Open", Sub() NavigateToDirectory(Entries(0).ChildAnchorId))
             AddMenuItem(_FileContextMenu, "Save Folder As...", AddressOf SaveSelectedEntries)
@@ -578,11 +973,18 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         ViewMenu.DropDownItems.Add(Item)
     End Sub
 
-    ''' <summary>Applies a file-list view and remembers it (view mode plus thumbnail cell size).</summary>
+    ''' <summary>
+    ''' Applies a file-list view and remembers it (view mode plus thumbnail cell size). A search has its
+    ''' own persisted view state (<see cref="My.MySettings.SearchListView"/>) separate from a folder's.
+    ''' </summary>
     Private Sub SelectFileListView(TargetView As View, ThumbnailCellSize As Integer)
         SetFileListView(TargetView, ThumbnailCellSize)
         Try
-            My.Settings.FileListView = SerializeFileListView(TargetView, ThumbnailCellSize)
+            If _SearchActive Then
+                My.Settings.SearchListView = SerializeFileListView(TargetView, ThumbnailCellSize)
+            Else
+                My.Settings.FileListView = SerializeFileListView(TargetView, ThumbnailCellSize)
+            End If
             My.Settings.Save()
         Catch
             ' A settings write failure must not break the view switch.
@@ -595,7 +997,20 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Saved = My.Settings.FileListView
         Catch
         End Try
+        ApplySavedListView(Saved, View.Details)
+    End Sub
 
+    ''' <summary>Applies the search result view, which defaults to a plain list.</summary>
+    Private Sub ApplySavedSearchListView()
+        Dim Saved As String = Nothing
+        Try
+            Saved = My.Settings.SearchListView
+        Catch
+        End Try
+        ApplySavedListView(Saved, View.List)
+    End Sub
+
+    Private Sub ApplySavedListView(Saved As String, Fallback As View)
         Select Case Saved
             Case "Thumbnail256" : SetFileListView(View.LargeIcon, 256)
             Case "Thumbnail128" : SetFileListView(View.LargeIcon, 128)
@@ -603,7 +1018,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Case "SmallIcon" : SetFileListView(View.SmallIcon, 0)
             Case "List" : SetFileListView(View.List, 0)
             Case "Tile" : SetFileListView(View.Tile, 0)
-            Case Else : SetFileListView(View.Details, 0)
+            Case "Details" : SetFileListView(View.Details, 0)
+            Case Else : SetFileListView(Fallback, 0)
         End Select
     End Sub
 
@@ -937,8 +1353,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private Sub OpenSelectedDirectory(Sender As Object, EventArgs As EventArgs)
         If tvFolders.SelectedNode Is Nothing Then Return
         tvFolders.SelectedNode.Expand()
-        _CurrentDirectoryAnchorId = GetSelectedDirectoryAnchorId()
-        RefreshCurrentDirectory()
+        NavigateTo(NavLocation.Folder(GetSelectedDirectoryAnchorId()))
     End Sub
 
     Private Sub CreateFolderFromPrompt(Sender As Object, EventArgs As EventArgs)
@@ -1313,16 +1728,27 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End If
         If i00CodeLib.MsgBox(Me, Prompt, MsgBoxStyle.YesNo Or MsgBoxStyle.Exclamation) <> MsgBoxResult.Yes Then Return
 
-        Dim DirectoryAnchorId = _CurrentDirectoryAnchorId
+        ' Resolve each item's parent on the UI thread (a search result lives outside the current folder).
+        Dim Deletions = lvFiles.SelectedItems.
+                                Cast(Of ListViewItem)().
+                                Select(Function(item)
+                                           Dim entry = TryCast(item.Tag, EmbeddedFileSystem.ContentListEntry)
+                                           Dim hit As SearchHit = Nothing
+                                           Dim parentId = If(_SearchItemInfo.TryGetValue(item, hit), hit.ParentAnchorId, _CurrentDirectoryAnchorId)
+                                           Return New KeyValuePair(Of Long, String)(parentId, If(entry Is Nothing, Nothing, entry.Name))
+                                       End Function).
+                                Where(Function(x) x.Value IsNot Nothing).
+                                ToList()
+
         ExecuteLongBlockingActionOnThread(
             Sub()
-                For Each entry In Entries
-                    _FileSystem.DeleteEntry(DirectoryAnchorId, entry.Name)
+                For Each deletion In Deletions
+                    _FileSystem.DeleteEntry(deletion.Key, deletion.Value)
                 Next
             End Sub,
             "One or more items could not be deleted.")
 
-        RefreshFileSystemView()
+        If _SearchActive Then RerunSearch() Else RefreshFileSystemView()
     End Sub
 
     Private Sub DeleteSelectedFolder(Sender As Object, EventArgs As EventArgs)
@@ -1349,7 +1775,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub RefreshMenuItem_Click(Sender As Object, EventArgs As EventArgs)
-        RefreshFileSystemView()
+        If _SearchActive Then RerunSearch() Else RefreshFileSystemView()
     End Sub
 
     Private Sub FileSystemControl_DragEnter(Sender As Object, EventArgs As DragEventArgs) Handles tvFolders.DragEnter, lvFiles.DragEnter
@@ -1533,6 +1959,26 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Return Candidate
     End Function
 
+    ''' <summary>
+    ''' Form-wide navigation shortcuts. Handled here rather than in <see cref="BrowserForm_KeyDown"/> so
+    ''' they still fire when focus is inside the tree, the list, or a toolbar control (which otherwise
+    ''' swallow Alt+Arrow and the arrow keys before <c>KeyDown</c> bubbles to the form).
+    ''' </summary>
+    Protected Overrides Function ProcessCmdKey(ByRef Msg As Message, KeyData As Keys) As Boolean
+        Select Case KeyData
+            Case Keys.Alt Or Keys.Left
+                GoBack()
+                Return True
+            Case Keys.Alt Or Keys.Right
+                GoForward()
+                Return True
+            Case Keys.Control Or Keys.F
+                FocusSearchBox()
+                Return True
+        End Select
+        Return MyBase.ProcessCmdKey(Msg, KeyData)
+    End Function
+
     Private Sub BrowserForm_KeyDown(Sender As Object, EventArgs As KeyEventArgs) Handles Me.KeyDown
         If EventArgs.KeyCode = Keys.F5 Then
             RefreshMenuItem_Click(Me, EventArgs)
@@ -1626,12 +2072,15 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Protected Overrides Sub Dispose(Disposing As Boolean)
         If _Disposed Then Return
 
-        ' Signals any executable-icon or thumbnail worker still in flight to drop its result.
+        ' Signals any executable-icon, thumbnail, or search worker still in flight to drop its result.
         _Disposed = True
         _ThumbnailGeneration += 1
+        _SearchGeneration += 1
 
         If Disposing Then
             If components IsNot Nothing Then components.Dispose()
+            _SearchTimer.Dispose()
+            _PathColumn.Dispose()
             _IconProvider.Dispose()
             For Each thumbnail In _ThumbnailCache.Values
                 thumbnail.Dispose()
