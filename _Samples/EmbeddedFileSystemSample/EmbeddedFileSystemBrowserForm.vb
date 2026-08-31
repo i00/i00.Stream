@@ -149,8 +149,10 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         InitializeComponent()
 
-        tvFolders.ImageList = _IconProvider.Images
-        lvFiles.SmallImageList = _IconProvider.Images
+        tvFolders.ImageList = _IconProvider.SmallImages
+        lvFiles.SmallImageList = _IconProvider.SmallImages
+        lvFiles.LargeImageList = _IconProvider.LargeImages
+        lvFiles.TileSize = New Size(260, (FileIconProvider.LargeIconSize * 3) \ 2)
         lvFiles.ListViewItemSorter = _ListSorter
 
         Try
@@ -330,25 +332,25 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 For Each entry In Executables
                     If Generation <> _IconGeneration OrElse _Disposed Then Return
 
-                    Dim ExtractedIcon As Icon = Nothing
+                    Dim ExtractedIcons As FileIconProvider.ExecutableIcons = Nothing
                     Try
                         Using Source = _FileSystem.OpenFile(entry.ChildAnchorId)
-                            ExtractedIcon = FileIconProvider.ExtractExecutableIcon(Source, Source.Length)
+                            ExtractedIcons = FileIconProvider.ExtractExecutableIcons(Source, Source.Length)
                         End Using
                     Catch
-                        ExtractedIcon = Nothing
+                        ExtractedIcons = Nothing
                     End Try
 
-                    If ExtractedIcon IsNot Nothing Then ApplyExecutableIcon(Generation, entry.ChildAnchorId, ExtractedIcon)
+                    If ExtractedIcons IsNot Nothing Then ApplyExecutableIcon(Generation, entry.ChildAnchorId, ExtractedIcons)
                 Next
             End Sub) With {.IsBackground = True, .Name = "EFS executable icons"}
         _ExecutableIconThread = Worker
         Worker.Start()
     End Sub
 
-    Private Sub ApplyExecutableIcon(Generation As Integer, AnchorId As Long, ExtractedIcon As Icon)
+    Private Sub ApplyExecutableIcon(Generation As Integer, AnchorId As Long, ExtractedIcons As FileIconProvider.ExecutableIcons)
         If _Disposed OrElse IsHandleCreated = False Then
-            ExtractedIcon.Dispose()
+            ExtractedIcons.Dispose()
             Return
         End If
 
@@ -357,12 +359,12 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             BeginInvoke(
                 Sub()
                     If Generation <> _IconGeneration OrElse _Disposed Then
-                        ExtractedIcon.Dispose()
+                        ExtractedIcons.Dispose()
                         Return
                     End If
 
-                    ' The provider takes ownership of the icon here; it must not be disposed elsewhere.
-                    _IconProvider.AddExecutableIcon(Key, ExtractedIcon)
+                    ' The provider takes ownership of the icons here; they must not be disposed elsewhere.
+                    _IconProvider.AddExecutableIcon(Key, ExtractedIcons)
 
                     For Each item As ListViewItem In lvFiles.Items
                         Dim ItemEntry = TryCast(item.Tag, EmbeddedFileSystem.ContentListEntry)
@@ -374,7 +376,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 End Sub)
         Catch ex As InvalidOperationException
             ' The form closed between the guard above and the marshalled call.
-            ExtractedIcon.Dispose()
+            ExtractedIcons.Dispose()
         End Try
     End Sub
 
@@ -525,16 +527,35 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         AddMenuItem(_FileContextMenu, "Upload File(s)...", AddressOf UploadFilesFromDialog)
         AddMenuItem(_FileContextMenu, "New Folder...", AddressOf CreateFolderFromPrompt)
         _FileContextMenu.Items.Add(New ToolStripSeparator())
+        AddViewMenu(_FileContextMenu)
         AddMenuItem(_FileContextMenu, "Refresh", AddressOf RefreshMenuItem_Click)
     End Sub
 
     Private Sub EmptyFileContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs) Handles _EmptyFileContextMenu.Opening
         _EmptyFileContextMenu.Items.Clear()
+        AddViewMenu(_EmptyFileContextMenu)
+        _EmptyFileContextMenu.Items.Add(New ToolStripSeparator())
         AddMenuItem(_EmptyFileContextMenu, "Upload File(s)...", AddressOf UploadFilesFromDialog)
         AddMenuItem(_EmptyFileContextMenu, "Upload Folder...", AddressOf UploadFolderFromDialog)
         AddMenuItem(_EmptyFileContextMenu, "New Folder...", AddressOf CreateFolderFromPrompt)
         _EmptyFileContextMenu.Items.Add(New ToolStripSeparator())
         AddMenuItem(_EmptyFileContextMenu, "Refresh", AddressOf RefreshMenuItem_Click)
+    End Sub
+
+    Private Sub AddViewMenu(Menu As ContextMenuStrip)
+        Dim ViewMenu = New ToolStripMenuItem("View")
+        AddViewOption(ViewMenu, "Large Icons", View.LargeIcon)
+        AddViewOption(ViewMenu, "Small Icons", View.SmallIcon)
+        AddViewOption(ViewMenu, "List", View.List)
+        AddViewOption(ViewMenu, "Details", View.Details)
+        AddViewOption(ViewMenu, "Tiles", View.Tile)
+        Menu.Items.Add(ViewMenu)
+    End Sub
+
+    Private Sub AddViewOption(ViewMenu As ToolStripMenuItem, Text As String, TargetView As View)
+        Dim Item = New ToolStripMenuItem(Text) With {.Checked = lvFiles.View = TargetView}
+        AddHandler Item.Click, Sub() lvFiles.View = TargetView
+        ViewMenu.DropDownItems.Add(Item)
     End Sub
 
     Private Shared Sub AddMenuItem(Menu As ContextMenuStrip, Text As String, ClickHandler As EventHandler)
