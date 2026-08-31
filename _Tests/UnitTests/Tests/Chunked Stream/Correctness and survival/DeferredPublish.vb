@@ -784,39 +784,6 @@ Namespace Tests
 
             End Sub
 
-            ''' <summary>
-            ''' An in-memory stream that throws on a chosen Write call, to exercise the
-            ''' backing-store failure paths.
-            ''' </summary>
-            Private NotInheritable Class FailingMemoryStream
-                Inherits MemoryStream
-
-                ''' <summary>1-based index of the Write call that should throw; 0 disables the failure.</summary>
-                Public Property FailOnWriteNumber As Integer
-
-                ''' <summary>1-based index from which every Write call should throw; 0 disables it.</summary>
-                Public Property FailFromWriteNumber As Integer
-
-                Public Property WriteCount As Integer
-
-                Public Overrides Sub Write(Buffer As Byte(), Offset As Integer, Count As Integer)
-
-                    WriteCount += 1
-
-                    If FailOnWriteNumber > 0 AndAlso WriteCount = FailOnWriteNumber Then
-                        Throw New IOException("Simulated backing-store write failure.")
-                    End If
-
-                    If FailFromWriteNumber > 0 AndAlso WriteCount >= FailFromWriteNumber Then
-                        Throw New IOException("Simulated backing-store write failure.")
-                    End If
-
-                    MyBase.Write(Buffer, Offset, Count)
-
-                End Sub
-
-            End Class
-
         End Class
 
     End Class

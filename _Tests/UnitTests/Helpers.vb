@@ -517,6 +517,70 @@ Namespace Tests
 
 #End Region
 
+#Region "Fault injection"
+
+        ''' <summary>
+        ''' An in-memory stream that throws on a chosen Write call, to drive the
+        ''' backing-store failure paths.
+        ''' </summary>
+        Friend NotInheritable Class FailingMemoryStream
+            Inherits MemoryStream
+
+            ''' <summary>1-based index of the Write call that should throw; 0 disables the failure.</summary>
+            Public Property FailOnWriteNumber As Integer
+
+            ''' <summary>1-based index from which every Write call should throw; 0 disables it.</summary>
+            Public Property FailFromWriteNumber As Integer
+
+            Public Property WriteCount As Integer
+
+            Public Overrides Sub Write(Buffer As Byte(), Offset As Integer, Count As Integer)
+
+                WriteCount += 1
+
+                If FailOnWriteNumber > 0 AndAlso WriteCount = FailOnWriteNumber Then
+                    Throw New IOException("Simulated backing-store write failure.")
+                End If
+
+                If FailFromWriteNumber > 0 AndAlso WriteCount >= FailFromWriteNumber Then
+                    Throw New IOException("Simulated backing-store write failure.")
+                End If
+
+                MyBase.Write(Buffer, Offset, Count)
+
+            End Sub
+
+        End Class
+
+        ''' <summary>
+        ''' Opens a ChunkedStream on a <see cref="FailingMemoryStream" />, writes a baseline,
+        ''' then forces one backing write to fail so the stream faults. Returns the faulted,
+        ''' still-open stream with failure injection disabled again.
+        ''' </summary>
+        Friend Function CreateFaultedChunkedStream(Seed As Integer) As ChunkedStream
+
+            Dim Backing As New FailingMemoryStream()
+
+            Dim Cs = ChunkedStream.Open(Backing)
+            Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * 4, Seed))
+            Cs.Flush()
+
+            Backing.FailOnWriteNumber = Backing.WriteCount + 1
+
+            Try
+                Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * 4, Seed + 1))
+                Throw New Exception("CreateFaultedChunkedStream expected the injected write failure to throw.")
+            Catch Ex As IOException
+            End Try
+
+            Backing.FailOnWriteNumber = 0
+
+            Return Cs
+
+        End Function
+
+#End Region
+
 #Region "Corruption"
 
         Friend Sub CorruptPhysicalRecordByteField(Stream As Stream,

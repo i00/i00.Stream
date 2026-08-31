@@ -703,6 +703,28 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Verifies that Defragment refuses to run once the stream has faulted, rather
+            ''' than snapshotting the half-mutated state as the "original" (C2-b).
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DefragmentIsRejectedOnAFaultedStream()
+
+                For Each DefragType As ChunkedStream.DefragTypes In
+                    [Enum].GetValues(GetType(ChunkedStream.DefragTypes))
+
+                    Using Cs = CreateFaultedChunkedStream(7300 + CInt(DefragType))
+
+                        AssertThrows(Of InvalidOperationException)(
+                            Sub() Cs.Defragment(DefragType),
+                            $"Defragment should be rejected on a faulted stream. DefragType={DefragType}")
+
+                    End Using
+
+                Next
+
+            End Sub
+
             ' ================================================================================
             ' Helpers
             ' ================================================================================

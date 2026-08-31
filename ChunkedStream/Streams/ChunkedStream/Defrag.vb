@@ -92,6 +92,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             If HasActiveCheckpoint Then
                 Throw New InvalidOperationException("Defragmentation cannot be performed while a checkpoint is active.")

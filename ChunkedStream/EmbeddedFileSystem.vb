@@ -548,7 +548,12 @@ Namespace Streams
             If _Disposed Then Throw New ObjectDisposedException(NameOf(EmbeddedFileSystem))
         End Sub
 
-        ''' <summary>Disposes this file system and optionally the backing ChunkedStream.</summary>
+        ''' <summary>
+        ''' Marks this file system disposed. The backing <see cref="ChunkedStream" /> is
+        ''' caller-owned and is deliberately left open - dispose it yourself once you are
+        ''' finished with the file system. Throws if any file stream opened from this file
+        ''' system is still open.
+        ''' </summary>
         Public Sub Dispose() Implements IDisposable.Dispose
             SyncLock _SyncRoot
                 If _Disposed Then Return

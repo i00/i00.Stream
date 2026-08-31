@@ -534,6 +534,77 @@ Namespace Tests
 
             End Sub
 
+            ' ================================================================================
+            ' ApplyOptions covers every selected category (D4b)
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Verifies that ApplyOptions does not stop after the chunk-size rewrite: the
+            ''' remaining categories are still processed in the same call.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ApplyOptionsAppliesRemainingCategoriesAfterAChunkSizeRewrite()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.None
+                    }
+
+                    Dim Expected As Byte()
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Expected = GenerateRandomData(Cs.Options.ChunkSize * 6, 7101)
+                        Cs.Write(0, Expected)
+
+                        Cs.Options.ChunkSize = Cs.Options.ChunkSize \ 2
+                        Cs.Options.CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate
+
+                        Dim Result = Cs.ApplyOptions(ChunkedStream.ApplyOptionTypes.All)
+
+                        AssertTrue(Result.ChunkSizeChanges > 0, "The chunk-size rewrite did not run.")
+                        AssertTrue(
+                            Result.ExaminedChunks > Result.ChunkSizeChanges,
+                            "ApplyOptions returned after the chunk-size rewrite without examining the other categories.")
+
+                        AssertBytesEqual(Expected, Cs.ToArray(), "ApplyOptions changed logical data.")
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+                        AssertBytesEqual(Expected, Reopened.ToArray(), "Data did not survive reopen after ApplyOptions(All).")
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ' ================================================================================
+            ' ApplyOptions is rejected on a faulted stream (C2-b)
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Verifies that ApplyOptions refuses to run once the stream has faulted, rather
+            ''' than snapshotting the half-mutated state as the "original".
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ApplyOptionsIsRejectedOnAFaultedStream()
+
+                Using Cs = CreateFaultedChunkedStream(7201)
+
+                    Cs.Options.CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate
+
+                    AssertThrows(Of InvalidOperationException)(
+                        Sub() Cs.ApplyOptions(ChunkedStream.ApplyOptionTypes.Compression),
+                        "ApplyOptions should be rejected on a faulted stream.")
+
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

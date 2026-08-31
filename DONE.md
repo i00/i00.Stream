@@ -30,6 +30,35 @@ only backing I/O is the batched publish; a persistent I/O failure *during* that 
 completed by `EndDeferPublish` on scope close rather than rolled back (pre-existing
 `HasUnpublishedWork` behaviour — TODO DeferPublish-c).
 
+### C2-b — `ApplyOptions` / `Defragment` now check `_Faulted` — FIXED
+`ApplyOptionsCore` (`Options.vb`) and `DefragmentCore` (`Defrag.vb`) gated on
+`_DeferPublishDepth` / an open checkpoint but not the fault flag, so on an already-faulted
+stream their own snapshot-and-restore captured the half-mutated state as the "original". Added
+`ThrowIfFaulted()` at entry to both — a refusal, they don't need the C2 trap. Tests:
+`ApplyOptionsIsRejectedOnAFaultedStream` (PolicyMigration.vb),
+`DefragmentIsRejectedOnAFaultedStream` (Defragmentation.vb), backed by a shared
+`Tests.Helpers.FailingMemoryStream` + `CreateFaultedChunkedStream` (the `FailingMemoryStream`
+added for C2-a moved out of DeferredPublish.vb into Helpers.vb).
+
+### D4a — `EmbeddedFileSystem.Dispose` doc corrected — FIXED
+The XML summary said it "optionally disposes the backing ChunkedStream"; it never touches the
+backing stream (caller-owned by design). Reworded to say so and to note it throws while any
+file stream opened from the file system is still open.
+
+### D4b — `ApplyOptions` no longer stops after the chunk-size rewrite — FIXED
+`ApplyOptionsCore` returned immediately after `ApplyChunkSizeOptions`, skipping the
+Sparseness / Compression / Encryption passes in that call. It now falls through: the
+mid-operation `PersistIndexAndHeader` and the duplicate `RemoveUnusedFileMasterKeyIfPossible`
+are gone, a `ChunkSizeRewritten` flag feeds the single tail publish, and the record loop runs
+on the rebuilt records. No behavioural change in normal use — the chunk-size rewrite already
+rebuilds every extent with the current policy — but the API is now honest and one call
+genuinely processes every selected category. `ApplyOptions(ChunkSize)` chunk-size rewrite has
+no recovery journal (only `Defragment(Rebuild)` does), so the shift from a mid-publish to one
+atomic tail publish keeps it consistent with the rest of `ApplyOptions`. Test:
+`ApplyOptionsAppliesRemainingCategoriesAfterAChunkSizeRewrite` (asserts
+`ExaminedChunks > ChunkSizeChanges`, i.e. the record loop ran).
+Suite 250 → 253.
+
 ---
 
 ## 2026-08-28 — review follow-through

@@ -496,6 +496,7 @@ Namespace Streams
 
 
             ThrowIfDisposed()
+            ThrowIfFaulted()
 
             If _DeferPublishDepth > 0 Then
                 Throw New InvalidOperationException("ApplyOptions cannot be performed while metadata publishing is deferred.")
@@ -513,6 +514,7 @@ Namespace Streams
             End If
 
             Dim CancellationToken As New CancellationToken()
+            Dim ChunkSizeRewritten = False
 
             If Types.HasFlag(ApplyOptionTypes.ChunkSize) AndAlso NeedsChunkSizeRewrite() Then
 
@@ -524,18 +526,13 @@ Namespace Streams
                     Return Result
                 End If
 
-                Dim RemovedFileMasterKeyAfterChunkSizeRewrite = False
-
-                If Types.HasFlag(ApplyOptionTypes.Encryption) Then
-                    RemovedFileMasterKeyAfterChunkSizeRewrite = RemoveUnusedFileMasterKeyIfPossible()
-                End If
-
-                If HasOpenCheckpoint = False Then
-                    PersistIndexAndHeader(_IndexOffset, Durable)
-                End If
-
-                Result.PhysicalLengthAfter = BaseStream.Length
-                Return Result
+                '
+                ' The rewrite rebuilds every extent with the current data policy, so any
+                ' Compression / Encryption / Sparseness categories also selected are
+                ' already satisfied. Fall through anyway - the record loop below verifies
+                ' them and the single publish at the end covers the whole operation.
+                '
+                ChunkSizeRewritten = True
 
             End If
 
@@ -594,7 +591,8 @@ Namespace Streams
                 RemovedFileMasterKey = RemoveUnusedFileMasterKeyIfPossible()
             End If
 
-            If HasOpenCheckpoint = False AndAlso (Result.RewrittenChunks > 0 OrElse RemovedFileMasterKey) Then
+            If HasOpenCheckpoint = False AndAlso
+               (ChunkSizeRewritten OrElse Result.RewrittenChunks > 0 OrElse RemovedFileMasterKey) Then
                 PersistIndexAndHeader(_IndexOffset, Durable)
             End If
 

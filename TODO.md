@@ -45,9 +45,6 @@ true byte count. Recover the real length from the anchor geometry
 
 ## C2 follow-ups (fault flag shipped; these tighten it)
 
-- **C2-b — `ApplyOptionsCore` / `DefragmentCore` don't check `_Faulted`.** On an
-  already-faulted stream their own snapshot-and-restore captures the half-mutated state as
-  "original". Add `ThrowIfFaulted()` at entry to both — a refusal, they don't need the trap.
 - **C2-c — dedup.** The `Try … Catch : _Faulted = True : Throw` block is copy-pasted into
   ~13 methods. A zero-alloc `FaultScope` value type used with `Using` (like `StateLockScope`,
   as a struct) removes the duplication.
@@ -77,16 +74,6 @@ true byte count. Recover the real length from the anchor geometry
 `DeleteCore` now brackets the whole recursive delete in one reference-counted `DeferPublish`
 scope (done). `RecoverPending` still recurses without a single outer scope — low risk, same
 one-scope treatment applies.
-
-### D4a — `EmbeddedFileSystem.Dispose` doc is wrong
-Its XML summary claims it "optionally disposes the backing ChunkedStream" — it never does.
-Fix the comment.
-
-### D4b — `ApplyOptions(All)` stops after ChunkSize
-When `ChunkSize` is among the flags it returns early and skips Compression / Encryption /
-Sparseness in that call. Change it to process every selected enum flag after the chunk-size
-rewrite. (Currently harmless because the rewrite re-applies current policy, but the doc
-implies one call does everything.)
 
 ### D4c — `Validate(Optional Deep As Boolean = False)`
 Only when `Deep` does it unwrap each payload (decrypt / decompress) and check the round-trip.
