@@ -30,10 +30,18 @@ Friend NotInheritable Class EmbeddedFileReadStream
     ''' anchor no longer exists.
     ''' </summary>
     Public Shared Function TryOpen(FileSystem As EmbeddedFileSystem, Entry As EmbeddedFileSystem.ContentListEntry) As EmbeddedFileReadStream
+        Return TryOpen(FileSystem, Entry.ChildAnchorId, Entry.LengthOfDataAtEntry)
+    End Function
+
+    ''' <summary>
+    ''' Opens a read-only view over the file at <paramref name="FileAnchorId"/>, or Nothing when that
+    ''' anchor no longer exists. <paramref name="Length"/> is the file's data length (its entry length).
+    ''' </summary>
+    Public Shared Function TryOpen(FileSystem As EmbeddedFileSystem, FileAnchorId As Long, Length As Long) As EmbeddedFileReadStream
         Dim Anchor As ChunkedStream.Anchor = Nothing
-        If FileSystem.ChunkedStream.TryGetAnchor(Entry.ChildAnchorId, Anchor) = False Then Return Nothing
+        If FileSystem.ChunkedStream.TryGetAnchor(FileAnchorId, Anchor) = False Then Return Nothing
         Try
-            Return New EmbeddedFileReadStream(FileSystem.ChunkedStream, Anchor.Offset + FileDataOffset, Entry.LengthOfDataAtEntry)
+            Return New EmbeddedFileReadStream(FileSystem.ChunkedStream, Anchor.Offset + FileDataOffset, Length)
         Catch ex As Collections.Generic.KeyNotFoundException
             ' The anchor was removed between the lookup and reading its offset.
             Return Nothing

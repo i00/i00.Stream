@@ -195,6 +195,28 @@ Namespace Streams
             End SyncLock
         End Sub
 
+        ''' <summary>
+        ''' Renames a named child. The child anchor and its contents are untouched - only the fixed-size
+        ''' name field of the parent's entry record is rewritten, so nothing in the stream moves. Changing
+        ''' only the letter case of the existing name is allowed.
+        ''' </summary>
+        Public Sub RenameEntry(ParentDirectoryAnchorId As Long, CurrentName As String, NewName As String)
+            SyncLock _SyncRoot
+                ThrowIfDisposed()
+                ValidateName(CurrentName)
+                ValidateName(NewName)
+                Dim Parent = GetDirectory(ParentDirectoryAnchorId)
+                Dim Location = FindByName(Parent, CurrentName)
+                If String.Equals(CurrentName, NewName, StringComparison.OrdinalIgnoreCase) = False Then
+                    EnsureNameAvailable(Parent, NewName)
+                End If
+                Using Scope = ChunkedStream.DeferPublish()
+                    SetEntryName(Location, NewName)
+                    Scope.Publish()
+                End Using
+            End SyncLock
+        End Sub
+
         ''' <summary>Recursively finalizes or removes abandoned PendingFile entries.</summary>
         ''' <remarks>This maintenance operation intentionally traverses the directory tree.</remarks>
         Public Function RecoverPendingFiles(Optional Action As PendingFileRecoveryActions = PendingFileRecoveryActions.Finalize) As Integer
@@ -402,6 +424,17 @@ Namespace Streams
         Private Sub SetEntryLength(Location As EntryLocation, Length As Long)
             WriteInt64(Location.Parent.Offset + DirectoryHeaderSize + (CLng(Location.Index) * EntrySize) + 16, Length)
             Location.Entry = New ContentListEntry(Location.Entry.EntryType, Location.Entry.ChildAnchorId, Length, Location.Entry.Name)
+        End Sub
+
+        Private Sub SetEntryName(Location As EntryLocation, Name As String)
+            ' The name occupies bytes 24..24+NameByteCapacity of the entry record; a full-width,
+            ' zero-filled write both stores the new name and clears any tail of the previous one.
+            Dim Buffer(NameByteCapacity - 1) As Byte
+            Dim Encoded = Encoding.Unicode.GetBytes(Name)
+            System.Buffer.BlockCopy(Encoded, 0, Buffer, 0, Encoded.Length)
+            ChunkedStream.Write(Location.Parent.Offset + DirectoryHeaderSize + (CLng(Location.Index) * EntrySize) + 24, Buffer)
+            Location.Entry = New ContentListEntry(Location.Entry.EntryType, Location.Entry.ChildAnchorId,
+                                                  Location.Entry.LengthOfDataAtEntry, Name)
         End Sub
 
         Private Shared Function EncodeEntry(Entry As ContentListEntry) As Byte()

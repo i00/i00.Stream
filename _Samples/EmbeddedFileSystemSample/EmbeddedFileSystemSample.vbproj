@@ -24,6 +24,7 @@
     <OutputPath>bin\Debug\</OutputPath>
     <DocumentationFile>EmbeddedFileSystemSample.xml</DocumentationFile>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
+    <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
     <PlatformTarget>AnyCPU</PlatformTarget>
@@ -48,10 +49,6 @@
     <OptionInfer>On</OptionInfer>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="i00CodeLib, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\..\..\GEKCo\i00CodeLib\bin\Debug\i00CodeLib.dll</HintPath>
-    </Reference>
     <Reference Include="System" />
     <Reference Include="System.Data" />
     <Reference Include="System.Deployment" />
@@ -86,8 +83,34 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="EmbeddedFileReadStream.vb" />
-    <Compile Include="Extensions.vb" />
+    <Compile Include="i00CodeLib\AlphaNumericSorter.vb" />
+    <Compile Include="i00CodeLib\Controls\MenuTextSeparator.vb" />
+    <Compile Include="i00CodeLib\Controls\NeroBar.vb" />
+    <Compile Include="i00CodeLib\Controls\SplitContainer.vb" />
+    <Compile Include="i00CodeLib\Controls\ToolStripSpringHelper.vb" />
+    <Compile Include="i00CodeLib\Controls\ToolStripSpringTextBox.vb" />
+    <Compile Include="i00CodeLib\Drawing.vb" />
+    <Compile Include="i00CodeLib\Extensions.vb" />
     <Compile Include="FileIconProvider.vb" />
+    <Compile Include="i00CodeLib\frmProgress.Designer.vb">
+      <DependentUpon>frmProgress.vb</DependentUpon>
+    </Compile>
+    <Compile Include="i00CodeLib\frmProgress.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="i00CodeLib\i00Debug.vb" />
+    <Compile Include="i00CodeLib\LockWindowUpdate.vb" />
+    <Compile Include="i00CodeLib\Maths.vb" />
+    <Compile Include="i00CodeLib\MessageBox.Designer.vb">
+      <DependentUpon>MessageBox.vb</DependentUpon>
+    </Compile>
+    <Compile Include="i00CodeLib\MessageBox.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="i00CodeLib\Shell\_Base.vb" />
+    <Compile Include="i00CodeLib\ToolStripAsMenu.vb" />
+    <Compile Include="i00CodeLib\UsingLambda.vb" />
+    <Compile Include="i00CodeLib\VirtualFileDragDrop.vb" />
     <Compile Include="PeIconReader.vb" />
     <Compile Include="My Project\AssemblyInfo.vb" />
     <Compile Include="My Project\Application.Designer.vb">
@@ -109,6 +132,12 @@
   <ItemGroup>
     <EmbeddedResource Include="EmbeddedFileSystemBrowserForm.resx">
       <DependentUpon>EmbeddedFileSystemBrowserForm.vb</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="i00CodeLib\frmProgress.resx">
+      <DependentUpon>frmProgress.vb</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="i00CodeLib\MessageBox.resx">
+      <DependentUpon>MessageBox.vb</DependentUpon>
     </EmbeddedResource>
     <EmbeddedResource Include="My Project\Resources.resx">
       <Generator>VbMyResourcesResXFileCodeGenerator</Generator>

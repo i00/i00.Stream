@@ -78,6 +78,7 @@ Friend NotInheritable Class FileIconProvider
     Private ReadOnly _ShellIcons As New Dictionary(Of String, Dictionary(Of Integer, Bitmap))(StringComparer.OrdinalIgnoreCase)
     Private ReadOnly _ExecutableIcons As New Dictionary(Of Long, Dictionary(Of Integer, Bitmap))()
     Private ReadOnly _ExecutablePending As New HashSet(Of Long)()
+    Private ReadOnly _ExecutableWithoutIcon As New HashSet(Of Long)()
     Private ReadOnly _TreeImages As New ImageList() With {
         .ColorDepth = ColorDepth.Depth32Bit,
         .ImageSize = New Size(SmallIconSize, SmallIconSize)
@@ -136,17 +137,26 @@ Friend NotInheritable Class FileIconProvider
         Return Result
     End Function
 
-    ''' <summary>Reserves an anchor for a background load. Returns False if already loaded or in flight.</summary>
+    ''' <summary>
+    ''' Reserves an anchor for a background load. Returns False if it is already loaded, already known to
+    ''' have no extractable icon, or a load is in flight - so a failed extraction is never retried and the
+    ''' paint path cannot spin re-requesting it.
+    ''' </summary>
     Public Function BeginExecutableLoad(AnchorId As Long) As Boolean
-        If _ExecutableIcons.ContainsKey(AnchorId) Then Return False
+        If _ExecutableIcons.ContainsKey(AnchorId) OrElse _ExecutableWithoutIcon.Contains(AnchorId) Then Return False
         Return _ExecutablePending.Add(AnchorId)
     End Function
 
     ''' <summary>Publishes background-rendered executable icons for an anchor. Ownership transfers here.</summary>
     Public Sub CompleteExecutableLoad(AnchorId As Long, BySize As Dictionary(Of Integer, Bitmap))
         _ExecutablePending.Remove(AnchorId)
-        If BySize Is Nothing OrElse _ExecutableIcons.ContainsKey(AnchorId) Then
+        If _ExecutableIcons.ContainsKey(AnchorId) Then
             DisposeAll(BySize)
+            Return
+        End If
+        If BySize Is Nothing OrElse BySize.Count = 0 Then
+            DisposeAll(BySize)
+            _ExecutableWithoutIcon.Add(AnchorId)
             Return
         End If
         _ExecutableIcons(AnchorId) = BySize

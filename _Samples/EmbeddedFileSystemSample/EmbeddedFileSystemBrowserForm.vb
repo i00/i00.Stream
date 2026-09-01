@@ -3,8 +3,9 @@ Imports System.ComponentModel
 Imports System.Drawing.Drawing2D
 Imports System.IO
 Imports System.Threading
-Imports i00CodeLib
 Imports System.Runtime.InteropServices
+Imports System.Text.RegularExpressions
+Imports EmbeddedFileSystemSample.VirtualDragCopyFiles
 
 Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
@@ -26,14 +27,36 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private Const MaximumThumbnailSourceBytes As Long = 40L * 1024L * 1024L
     Private Const ThumbnailRenderSize As Integer = 256
 
-    Private NotInheritable Class DirectoryNodeInfo
+    ''' <summary>The anchor id and name of one child directory - all the tree needs to know per child.</summary>
+    Private NotInheritable Class ChildDirectory
         Public Sub New(AnchorId As Long, Name As String)
             Me.AnchorId = AnchorId
             Me.Name = Name
         End Sub
 
         Public ReadOnly Property AnchorId As Long
-        Public ReadOnly Property Name As String
+        Public Property Name As String
+    End Class
+
+    ''' <summary>
+    ''' Backs a folder node in the tree. The tree is filled lazily: <see cref="ChildDirectories"/> is the
+    ''' one-time fetch of a folder's child directories (used to decide whether to show an expander and,
+    ''' later, to build the child nodes), and <see cref="ChildrenMaterialised"/> tracks whether those
+    ''' child nodes have actually been created yet.
+    ''' </summary>
+    Private NotInheritable Class DirectoryNodeInfo
+        Public Sub New(AnchorId As Long, Name As String)
+            Me.AnchorId = AnchorId
+            Me.Name = Name
+        End Sub
+
+        Public Property AnchorId As Long
+        Public Property Name As String
+        Public Property ChildDirectories As List(Of ChildDirectory)
+        Public Property ChildrenMaterialised As Boolean
+
+        ''' <summary>True while this is a not-yet-created folder whose label is being typed.</summary>
+        Public Property IsUncommitted As Boolean
     End Class
 
     Private NotInheritable Class DragExport
@@ -103,9 +126,14 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Property
     End Class
 
-    ''' <summary>Sorts the file list with directories always ahead of files.</summary>
+    ''' <summary>
+    ''' Sorts the file list with directories always ahead of files, and names ordered naturally
+    ''' ("File2" before "File10") via <see cref="AlphaNumericSorter"/>.
+    ''' </summary>
     Private NotInheritable Class EntryListViewComparer
         Implements IComparer
+
+        Private Shared ReadOnly NameComparer As New AlphaNumericSorter()
 
         Public Property Column As Integer
         Public Property Order As SortOrder = SortOrder.Ascending
@@ -124,12 +152,12 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             If Column = 1 Then
                 Result = EntryLength(LeftEntry).CompareTo(EntryLength(RightEntry))
             ElseIf Column >= 2 AndAlso Left.SubItems.Count > Column AndAlso Right.SubItems.Count > Column Then
-                Result = String.Compare(Left.SubItems(Column).Text, Right.SubItems(Column).Text, StringComparison.OrdinalIgnoreCase)
+                Result = NameComparer.Compare(Left.SubItems(Column).Text, Right.SubItems(Column).Text)
             Else
-                Result = String.Compare(Left.Text, Right.Text, StringComparison.OrdinalIgnoreCase)
+                Result = NameComparer.Compare(Left.Text, Right.Text)
             End If
 
-            If Result = 0 Then Result = String.Compare(Left.Text, Right.Text, StringComparison.OrdinalIgnoreCase)
+            If Result = 0 Then Result = NameComparer.Compare(Left.Text, Right.Text)
             If Order = SortOrder.Descending Then Result = -Result
             Return Result
         End Function
@@ -143,30 +171,28 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Function
     End Class
 
-    ''' <summary>A place in the navigation history: either a folder or a search.</summary>
-    Private NotInheritable Class NavLocation
-        Private Sub New(IsSearch As Boolean, AnchorId As Long, Query As String)
-            Me.IsSearch = IsSearch
-            Me.AnchorId = AnchorId
-            Me.Query = Query
+    ''' <summary>
+    ''' One '|'-separated piece of the address/search box: an optional folder path (the part up to the
+    ''' last backslash) plus a name pattern (the rest). <see cref="HasPath"/> records whether the piece
+    ''' actually contained a backslash.
+    ''' </summary>
+    Private NotInheritable Class QueryTerm
+        Public Sub New(PathSegments As String(), Pattern As String, HasPath As Boolean)
+            Me.PathSegments = PathSegments
+            Me.Pattern = Pattern
+            Me.HasPath = HasPath
         End Sub
 
-        Public ReadOnly Property IsSearch As Boolean
-        Public ReadOnly Property AnchorId As Long
-        Public ReadOnly Property Query As String
+        Public ReadOnly Property PathSegments As String()
+        Public ReadOnly Property Pattern As String
+        Public ReadOnly Property HasPath As Boolean
 
-        Public Shared Function Folder(AnchorId As Long) As NavLocation
-            Return New NavLocation(False, AnchorId, Nothing)
-        End Function
-
-        Public Shared Function Search(Query As String) As NavLocation
-            Return New NavLocation(True, 0, Query)
-        End Function
-
-        Public Function SameAs(Other As NavLocation) As Boolean
-            If Other Is Nothing OrElse IsSearch <> Other.IsSearch Then Return False
-            Return If(IsSearch, String.Equals(Query, Other.Query, StringComparison.OrdinalIgnoreCase), AnchorId = Other.AnchorId)
-        End Function
+        ''' <summary>An empty or bare "*" pattern lists a folder's direct contents; anything else searches.</summary>
+        Public ReadOnly Property ListsDirectContents As Boolean
+            Get
+                Return Pattern.Length = 0 OrElse Pattern = "*"
+            End Get
+        End Property
     End Class
 
     ''' <summary>One search match, with the anchor and display path of its containing folder.</summary>
@@ -185,19 +211,22 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private ReadOnly _FileSystem As EmbeddedFileSystem
     Private ReadOnly _IconProvider As New FileIconProvider()
     Private ReadOnly _ListSorter As New EntryListViewComparer()
+    Private ReadOnly _NameSorter As New AlphaNumericSorter()
     Private ReadOnly _ThumbnailCache As New Dictionary(Of Long, Bitmap)()
     Private ReadOnly _ThumbnailPending As New HashSet(Of Long)()
     Private ReadOnly _ThumbnailUnavailable As New HashSet(Of Long)()
-    Private ReadOnly _History As New List(Of NavLocation)()
+    Private ReadOnly _History As New List(Of String)()
     Private ReadOnly _SearchResults As New List(Of SearchHit)()
     Private ReadOnly _SearchItemInfo As New Dictionary(Of ListViewItem, SearchHit)()
     Private ReadOnly _PathColumn As New ColumnHeader() With {.Text = "Path", .Width = 260}
-    Private WithEvents _SearchTimer As New System.Windows.Forms.Timer() With {.Interval = 250}
+    Private WithEvents _SearchTimer As New System.Windows.Forms.Timer() With {.Interval = 400}
     Private _HistoryIndex As Integer = -1
     Private _ApplyingLocation As Boolean
     Private _SearchActive As Boolean
     Private _CompletedSearchGeneration As Integer = -1
-    Private _SearchQuery As String
+    Private _CurrentQueryText As String = String.Empty
+    Private _LastSearchedText As String
+    Private _LastPushWasTyped As Boolean
     Private _SearchGeneration As Integer
     Private _SuppressSearchText As Boolean
     Private _CurrentDirectoryAnchorId As Long
@@ -209,6 +238,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private _ThumbnailGeneration As Integer
     Private _ThumbnailCacheAnchorId As Long
     Private _ThumbnailCellSize As Integer
+    Private _EditingListItemIndex As Integer = -1
 
 
     Public Sub New(FileSystem As EmbeddedFileSystem)
@@ -220,7 +250,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         InitializeComponent()
 
         tvFolders.ImageList = _IconProvider.TreeImages
+        tvFolders.LabelEdit = True
         lvFiles.ListViewItemSorter = _ListSorter
+        lvFiles.LabelEdit = True
 
         Try
             SetWindowTheme(tvFolders.Handle, "Explorer", Nothing)
@@ -230,12 +262,10 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         End Try
 
-        RefreshFileSystemView()
         ApplySavedFileListView()
+        RefreshFileSystemView()
 
-        _History.Add(NavLocation.Folder(_FileSystem.RootAnchorId))
-        _HistoryIndex = 0
-        UpdateNavigationButtons()
+        SetAddressText(String.Empty)
 
     End Sub
 
@@ -247,100 +277,520 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
     Public Sub RefreshFileSystemView()
 
-        Dim SelectedAnchorId = GetSelectedDirectoryAnchorId()
-        If SelectedAnchorId <= 0 Then SelectedAnchorId = _CurrentDirectoryAnchorId
-        If SelectedAnchorId <= 0 Then SelectedAnchorId = _FileSystem.RootAnchorId
+        Dim ExpandedAnchors = CollectExpandedAnchors()
 
         tvFolders.BeginUpdate()
         Try
             tvFolders.Nodes.Clear()
-            Dim RootNode = New TreeNode("Root") With {
-                .Name = _FileSystem.RootAnchorId.ToString(),
-                .Tag = New DirectoryNodeInfo(_FileSystem.RootAnchorId, "Root"),
-                .ToolTipText = $"Anchor {_FileSystem.RootAnchorId}",
-                .ImageKey = FileIconProvider.FolderKey,
-                .SelectedImageKey = FileIconProvider.FolderKey
-            }
+            Dim RootNode = CreateDirectoryNode(_FileSystem.RootAnchorId, "Root")
             tvFolders.Nodes.Add(RootNode)
-            PopulateDirectoryNodes(RootNode, _FileSystem.RootAnchorId, New HashSet(Of Long)())
+            MaterialiseChildNodes(RootNode)
             RootNode.Expand()
-
-            _ApplyingLocation = True
-            If _SearchActive Then
-                tvFolders.SelectedNode = Nothing
-            Else
-                Dim NodeToSelect = FindDirectoryNode(SelectedAnchorId)
-                If NodeToSelect Is Nothing Then NodeToSelect = RootNode
-                tvFolders.SelectedNode = NodeToSelect
-                NodeToSelect.EnsureVisible()
-            End If
-            _ApplyingLocation = False
+            ReExpandAnchors(RootNode, ExpandedAnchors)
         Finally
             tvFolders.EndUpdate()
         End Try
 
-        If _SearchActive Then
-            PopulateSearchList()
-        Else
-            RefreshCurrentDirectory()
+        ' Re-apply the address so the tree selection and the list follow the box (no new history entry).
+        If tsiSearch IsNot Nothing Then
+            _LastSearchedText = Nothing
+            ApplyAddress(_CurrentQueryText)
         End If
 
+        'Dim Fragmentation = _FileSystem.ChunkedStream.GetFragmentation
+        Dim Struct = FileSystem.ChunkedStream.GetStructure()
 
-        Dim Fragmentation = _FileSystem.ChunkedStream.GetFragmentation
+        tsiFragmentation.Text = $"Fragmentation: {Struct.FragmentationRatio:P0}{vbCrLf}Click to defrag"
+        tsiCompression.Text = $"File size: {Struct.PhysicalLength.FormatFileSizeFromBytes()} " &
+                              $"Data size: {Struct.LogicalLength.FormatFileSizeFromBytes()} " &
+                              $"Fragmented waste: {Struct.FragmentedBytes.FormatFileSizeFromBytes()} "
 
-        If Fragmentation >= 0.1 Then
-            tsiCompression.Visible = True
-            tsiCompressionBar.Visible = False
-            tsiFragmentation.Visible = True
 
-            tsiCompression.Text = $"Fragmentation: {Fragmentation:P0}"
+        'If Fragmentation >= 0.1 Then
+        '    tsiCompression.Visible = True
+        '    tsiCompressionBar.Visible = False
+        '    tsiFragmentation.Visible = True
 
-        ElseIf _FileSystem.GetDirectoryEntries(_FileSystem.RootAnchorId).Any() = False Then
-            tsiCompression.Visible = True
-            tsiCompressionBar.Visible = False
-            tsiFragmentation.Visible = False
 
-            tsiCompression.Text = "No Data"
-        Else
-            tsiCompression.Visible = True
-            tsiCompressionBar.Visible = True
-            tsiFragmentation.Visible = False
+        'ElseIf _FileSystem.GetDirectoryEntries(_FileSystem.RootAnchorId).Any() = False Then
+        '    tsiCompression.Visible = True
+        '    tsiCompressionBar.Visible = False
+        '    tsiFragmentation.Visible = False
 
-            Dim Ratio = _FileSystem.ChunkedStream.Length / _FileSystem.ChunkedStream.BaseStream.Length
+        '    tsiCompression.Text = "No Data"
+        'Else
+        '    tsiCompression.Visible = True
+        '    tsiCompressionBar.Visible = True
+        '    tsiFragmentation.Visible = False
 
-            Dim CompressionPercent = Ratio * 100
-            tsiCompression.Text = $"Relative size: {Ratio:P0}"
-            tsiCompressionBar.MaxValue = Math.Max(CompressionPercent, 100)
-            tsiCompressionBar.Value = CompressionPercent
+        '    Dim Ratio = _FileSystem.ChunkedStream.Length / _FileSystem.ChunkedStream.BaseStream.Length
+
+        '    Dim CompressionPercent = Ratio * 100
+        '    tsiCompression.Text = $"Relative size: {Ratio:P0}"
+        '    tsiCompressionBar.MaxValue = Math.Max(CompressionPercent, 100)
+        '    tsiCompressionBar.Value = CompressionPercent
+        'End If
+    End Sub
+
+    ' ===================================================================================================
+    ' Lazily populated folder tree
+    ' ===================================================================================================
+
+    ''' <summary>
+    ''' Creates a folder node whose children are not built until it is expanded. A single empty
+    ''' placeholder child is added so the expander shows when (and only when) the folder actually
+    ''' contains sub-directories.
+    ''' </summary>
+    Private Function CreateDirectoryNode(AnchorId As Long, Name As String) As TreeNode
+        Dim Info As New DirectoryNodeInfo(AnchorId, Name)
+        Dim Node As New TreeNode(Name) With {
+            .Name = AnchorId.ToString(),
+            .Tag = Info,
+            .ToolTipText = $"Anchor {AnchorId}",
+            .ImageKey = FileIconProvider.FolderKey,
+            .SelectedImageKey = FileIconProvider.FolderKey
+        }
+        If GetChildDirectories(Info).Count > 0 Then Node.Nodes.Add(New TreeNode(String.Empty))
+        Return Node
+    End Function
+
+    ''' <summary>Creates a folder node already known to be empty, without touching the file system.</summary>
+    Private Shared Function CreateEmptyDirectoryNode(AnchorId As Long, Name As String) As TreeNode
+        Dim Info As New DirectoryNodeInfo(AnchorId, Name) With {
+            .ChildDirectories = New List(Of ChildDirectory)(),
+            .ChildrenMaterialised = True
+        }
+        Return New TreeNode(Name) With {
+            .Name = AnchorId.ToString(),
+            .Tag = Info,
+            .ToolTipText = $"Anchor {AnchorId}",
+            .ImageKey = FileIconProvider.FolderKey,
+            .SelectedImageKey = FileIconProvider.FolderKey
+        }
+    End Function
+
+    ''' <summary>A folder node's child directories, fetched from the file system once and then cached.</summary>
+    Private Function GetChildDirectories(Info As DirectoryNodeInfo) As List(Of ChildDirectory)
+        If Info.ChildDirectories Is Nothing Then
+            Dim Directories As New List(Of ChildDirectory)()
+            Try
+                For Each entry In _FileSystem.GetDirectoryEntries(Info.AnchorId)
+                    If entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory Then
+                        Directories.Add(New ChildDirectory(entry.ChildAnchorId, entry.Name))
+                    End If
+                Next
+            Catch
+                ' A folder removed under us simply has no children.
+            End Try
+            Info.ChildDirectories = Directories
+        End If
+        Return Info.ChildDirectories
+    End Function
+
+    ''' <summary>Builds a folder node's real child nodes from its cached directory list, once.</summary>
+    Private Sub MaterialiseChildNodes(Node As TreeNode)
+        Dim Info = TryCast(Node.Tag, DirectoryNodeInfo)
+        If Info Is Nothing OrElse Info.ChildrenMaterialised Then Return
+        Info.ChildrenMaterialised = True
+
+        tvFolders.BeginUpdate()
+        Try
+            Node.Nodes.Clear()
+            For Each child In GetChildDirectories(Info).OrderBy(Function(c) c.Name, _NameSorter)
+                If IsAncestorAnchor(Node, child.AnchorId) Then
+                    Node.Nodes.Add(New TreeNode("[directory cycle]") With {.ForeColor = Drawing.BlendColor(tvFolders.ForeColor, Color.Red)})
+                Else
+                    Node.Nodes.Add(CreateDirectoryNode(child.AnchorId, child.Name))
+                End If
+            Next
+        Finally
+            tvFolders.EndUpdate()
+        End Try
+    End Sub
+
+    Private Shared Function IsAncestorAnchor(Node As TreeNode, AnchorId As Long) As Boolean
+        Dim Current = Node
+        While Current IsNot Nothing
+            Dim Info = TryCast(Current.Tag, DirectoryNodeInfo)
+            If Info IsNot Nothing AndAlso Info.AnchorId = AnchorId Then Return True
+            Current = Current.Parent
+        End While
+        Return False
+    End Function
+
+    Private Sub tvFolders_BeforeExpand(Sender As Object, EventArgs As TreeViewCancelEventArgs) Handles tvFolders.BeforeExpand
+        MaterialiseChildNodes(EventArgs.Node)
+    End Sub
+
+    ''' <summary>
+    ''' Returns the tree node for <paramref name="AnchorId"/>, materialising every folder on the path
+    ''' from the root down so a target that has never been expanded still resolves.
+    ''' </summary>
+    Private Function EnsureDirectoryNode(AnchorId As Long) As TreeNode
+        If AnchorId <= 0 OrElse tvFolders.Nodes.Count = 0 Then Return Nothing
+        Dim RootNode = tvFolders.Nodes(0)
+        If AnchorId = _FileSystem.RootAnchorId Then Return RootNode
+
+        Dim Chain As New List(Of Long)()
+        Dim Current = AnchorId
+        Dim Guard = 0
+        While Current > 0 AndAlso Current <> _FileSystem.RootAnchorId
+            Chain.Add(Current)
+            Guard += 1
+            If Guard > 8192 Then Return Nothing
+            Try
+                Current = _FileSystem.GetParentAnchorId(Current)
+            Catch
+                Return Nothing
+            End Try
+        End While
+        If Current <> _FileSystem.RootAnchorId Then Return Nothing
+        Chain.Reverse()
+
+        Dim CursorNode = RootNode
+        For Each StepAnchor In Chain
+            MaterialiseChildNodes(CursorNode)
+            Dim NextNode As TreeNode = Nothing
+            For Each ChildNode As TreeNode In CursorNode.Nodes
+                Dim ChildInfo = TryCast(ChildNode.Tag, DirectoryNodeInfo)
+                If ChildInfo IsNot Nothing AndAlso ChildInfo.AnchorId = StepAnchor Then
+                    NextNode = ChildNode
+                    Exit For
+                End If
+            Next
+            If NextNode Is Nothing Then Return Nothing
+            CursorNode = NextNode
+        Next
+        Return CursorNode
+    End Function
+
+    Private Function CollectExpandedAnchors() As HashSet(Of Long)
+        Dim Result As New HashSet(Of Long)()
+        If tvFolders.Nodes.Count > 0 Then CollectExpandedAnchors(tvFolders.Nodes(0), Result)
+        Return Result
+    End Function
+
+    Private Shared Sub CollectExpandedAnchors(Node As TreeNode, Into As HashSet(Of Long))
+        If Node.IsExpanded = False Then Return
+        Dim Info = TryCast(Node.Tag, DirectoryNodeInfo)
+        If Info IsNot Nothing Then Into.Add(Info.AnchorId)
+        For Each ChildNode As TreeNode In Node.Nodes
+            CollectExpandedAnchors(ChildNode, Into)
+        Next
+    End Sub
+
+    Private Sub ReExpandAnchors(Node As TreeNode, Anchors As HashSet(Of Long))
+        Dim Info = TryCast(Node.Tag, DirectoryNodeInfo)
+        If Info Is Nothing OrElse Anchors.Contains(Info.AnchorId) = False Then Return
+        MaterialiseChildNodes(Node)
+        Node.Expand()
+        For Each ChildNode As TreeNode In Node.Nodes
+            ReExpandAnchors(ChildNode, Anchors)
+        Next
+    End Sub
+
+    ''' <summary>Re-reads one folder's children after its contents changed, rebuilding just that node.</summary>
+    Private Sub RefreshFolderNode(AnchorId As Long)
+        Dim Node = FindDirectoryNode(AnchorId)
+        If Node Is Nothing Then Return
+        Dim Info = TryCast(Node.Tag, DirectoryNodeInfo)
+        If Info Is Nothing Then Return
+
+        Dim WasExpanded = Node.IsExpanded
+        Info.ChildDirectories = Nothing
+        Info.ChildrenMaterialised = False
+        tvFolders.BeginUpdate()
+        Try
+            Node.Nodes.Clear()
+            If GetChildDirectories(Info).Count > 0 Then Node.Nodes.Add(New TreeNode(String.Empty))
+            If WasExpanded Then
+                MaterialiseChildNodes(Node)
+                Node.Expand()
+            End If
+        Finally
+            tvFolders.EndUpdate()
+        End Try
+    End Sub
+
+    ''' <summary>Re-orders one tree node's immediate children by name without a file-system read.</summary>
+    Private Sub ResortChildNodes(ParentNode As TreeNode)
+        If ParentNode Is Nothing OrElse ParentNode.Nodes.Count < 2 Then Return
+        Dim Ordered = ParentNode.Nodes.Cast(Of TreeNode)().OrderBy(Function(n) n.Text, _NameSorter).ToArray()
+        Dim Selected = tvFolders.SelectedNode
+        Dim WasApplying = _ApplyingLocation
+        _ApplyingLocation = True
+        tvFolders.BeginUpdate()
+        Try
+            ParentNode.Nodes.Clear()
+            ParentNode.Nodes.AddRange(Ordered)
+            If Selected IsNot Nothing Then tvFolders.SelectedNode = Selected
+        Finally
+            tvFolders.EndUpdate()
+            _ApplyingLocation = WasApplying
+        End Try
+    End Sub
+
+    ''' <summary>Adds a node for a just-created directory to its parent node, without a file-system read.</summary>
+    Private Sub AddDirectoryToTree(ParentAnchorId As Long, NewAnchorId As Long, Name As String)
+        Dim ParentNode = FindDirectoryNode(ParentAnchorId)
+        If ParentNode Is Nothing Then Return
+        Dim ParentInfo = TryCast(ParentNode.Tag, DirectoryNodeInfo)
+        If ParentInfo Is Nothing Then Return
+
+        If ParentInfo.ChildDirectories IsNot Nothing AndAlso
+           ParentInfo.ChildDirectories.Any(Function(c) c.AnchorId = NewAnchorId) = False Then
+            ParentInfo.ChildDirectories.Add(New ChildDirectory(NewAnchorId, Name))
+        End If
+
+        If ParentInfo.ChildrenMaterialised Then
+            ' The [+] placeholder (if any) can go now that there is a real child.
+            Dim Placeholder = ParentNode.Nodes.Cast(Of TreeNode)().FirstOrDefault(Function(n) n.Tag Is Nothing)
+            If Placeholder IsNot Nothing Then ParentNode.Nodes.Remove(Placeholder)
+            If ParentNode.Nodes.Cast(Of TreeNode)().Any(Function(n) NodeAnchorId(n) = NewAnchorId) = False Then
+                ParentNode.Nodes.Add(CreateEmptyDirectoryNode(NewAnchorId, Name))
+                ResortChildNodes(ParentNode)
+            End If
+        ElseIf ParentNode.Nodes.Count = 0 Then
+            ParentNode.Nodes.Add(New TreeNode(String.Empty))
         End If
     End Sub
 
-    Private Sub PopulateDirectoryNodes(ParentNode As TreeNode,
-                                       DirectoryAnchorId As Long,
-                                       VisitedDirectories As HashSet(Of Long))
-        If VisitedDirectories.Add(DirectoryAnchorId) = False Then
-            ParentNode.Nodes.Add(New TreeNode("[Directory cycle]") With {.ForeColor = i00CodeLib.Drawing.BlendColor(tvFolders.ForeColor, Color.Red)})
+    ''' <summary>Removes a directory's node from the tree and its parent's cached child list.</summary>
+    Private Sub RemoveDirectoryFromTree(ParentAnchorId As Long, ChildAnchorId As Long)
+        Dim ParentNode = FindDirectoryNode(ParentAnchorId)
+        If ParentNode Is Nothing Then Return
+        Dim ParentInfo = TryCast(ParentNode.Tag, DirectoryNodeInfo)
+        If ParentInfo?.ChildDirectories IsNot Nothing Then
+            ParentInfo.ChildDirectories.RemoveAll(Function(c) c.AnchorId = ChildAnchorId)
+        End If
+        Dim ChildNode = ParentNode.Nodes.Cast(Of TreeNode)().FirstOrDefault(Function(n) NodeAnchorId(n) = ChildAnchorId)
+        If ChildNode IsNot Nothing Then ParentNode.Nodes.Remove(ChildNode)
+    End Sub
+
+    Private Shared Function NodeAnchorId(Node As TreeNode) As Long
+        Dim Info = TryCast(Node.Tag, DirectoryNodeInfo)
+        Return If(Info Is Nothing, 0L, Info.AnchorId)
+    End Function
+
+    ' ===================================================================================================
+    ' In-place folder creation and label editing (rename)
+    ' ===================================================================================================
+
+    ''' <summary>
+    ''' Starts a new folder in the current directory as an uncommitted tree node whose name is typed in
+    ''' place. Pressing Escape (or leaving it blank) drops the node; a name creates the folder for real.
+    ''' </summary>
+    Private Sub BeginNewFolderInline(Sender As Object, EventArgs As EventArgs)
+        If _SearchActive Then Return
+        Dim ParentAnchorId = _CurrentDirectoryAnchorId
+        If ParentAnchorId <= 0 Then Return
+
+        Dim ParentNode = EnsureDirectoryNode(ParentAnchorId)
+        If ParentNode Is Nothing Then Return
+        MaterialiseChildNodes(ParentNode)
+        ParentNode.Expand()
+
+        Dim Info As New DirectoryNodeInfo(0, "New folder") With {
+            .ChildDirectories = New List(Of ChildDirectory)(),
+            .ChildrenMaterialised = True,
+            .IsUncommitted = True
+        }
+        Dim NewNode As New TreeNode("New folder") With {
+            .Tag = Info,
+            .ImageKey = FileIconProvider.FolderKey,
+            .SelectedImageKey = FileIconProvider.FolderKey
+        }
+        ParentNode.Nodes.Add(NewNode)
+
+        Dim WasApplying = _ApplyingLocation
+        _ApplyingLocation = True
+        Try
+            tvFolders.SelectedNode = NewNode
+        Finally
+            _ApplyingLocation = WasApplying
+        End Try
+        NewNode.EnsureVisible()
+        tvFolders.Focus()
+        NewNode.BeginEdit()
+    End Sub
+
+    Private Sub RenameSelectedFolder(Sender As Object, EventArgs As EventArgs)
+        If tvFolders.SelectedNode Is Nothing Then Return
+        tvFolders.Focus()
+        tvFolders.SelectedNode.BeginEdit()
+    End Sub
+
+    Private Sub tvFolders_BeforeLabelEdit(Sender As Object, EventArgs As NodeLabelEditEventArgs) Handles tvFolders.BeforeLabelEdit
+        Dim Info = TryCast(EventArgs.Node.Tag, DirectoryNodeInfo)
+        If Info Is Nothing OrElse (Info.IsUncommitted = False AndAlso Info.AnchorId = _FileSystem.RootAnchorId) Then
+            EventArgs.CancelEdit = True
+        End If
+    End Sub
+
+    Private Sub tvFolders_AfterLabelEdit(Sender As Object, EventArgs As NodeLabelEditEventArgs) Handles tvFolders.AfterLabelEdit
+        Dim Node = EventArgs.Node
+        Dim Info = TryCast(Node.Tag, DirectoryNodeInfo)
+        If Info Is Nothing Then Return
+
+        ' We always apply the final text ourselves so the siblings can be re-sorted afterwards.
+        EventArgs.CancelEdit = True
+        Dim NewName = If(EventArgs.Label, String.Empty).Trim()
+
+        If Info.IsUncommitted Then
+            If EventArgs.Label Is Nothing OrElse NewName.Length = 0 Then
+                RemoveUncommittedNode(Node)
+                Return
+            End If
+            CommitNewFolder(Node, Info, NewName)
             Return
         End If
 
-        Dim Entries = _FileSystem.GetDirectoryEntries(DirectoryAnchorId).
-                                  Where(Function(x) x.EntryType = EmbeddedFileSystem.EntryTypes.Directory).
-                                  OrderBy(Function(x) x.Name, StringComparer.OrdinalIgnoreCase).
-                                  ToList()
+        If EventArgs.Label Is Nothing OrElse NewName.Length = 0 Then Return
+        If String.Equals(NewName, Node.Text, StringComparison.Ordinal) Then Return
 
-        For Each entry In Entries
-            Dim ChildNode = New TreeNode(entry.Name) With {
-                .Name = entry.ChildAnchorId.ToString(),
-                .Tag = New DirectoryNodeInfo(entry.ChildAnchorId, entry.Name),
-                .ToolTipText = $"Anchor {entry.ChildAnchorId}, {FormatByteLength(entry.LengthOfDataAtEntry)} stored",
-                .ImageKey = FileIconProvider.FolderKey,
-                .SelectedImageKey = FileIconProvider.FolderKey
-            }
-            ParentNode.Nodes.Add(ChildNode)
-            PopulateDirectoryNodes(ChildNode, entry.ChildAnchorId, VisitedDirectories)
+        Dim ParentNode = Node.Parent
+        Dim ParentInfo = TryCast(ParentNode?.Tag, DirectoryNodeInfo)
+        If ParentInfo Is Nothing Then Return
+
+        Try
+            _FileSystem.RenameEntry(ParentInfo.AnchorId, Node.Text, NewName)
+        Catch ex As Exception
+            MsgBox(Me, $"Could not rename '{Node.Text}'.{Environment.NewLine}{ex.Message}", MsgBoxStyle.Critical)
+            Return
+        End Try
+
+        Info.Name = NewName
+        Node.Text = NewName
+        UpdateCachedChildName(ParentInfo, Info.AnchorId, NewName)
+        UpdateListItemName(Info.AnchorId, NewName)
+        ResortChildNodes(ParentNode)
+    End Sub
+
+    Private Sub RemoveUncommittedNode(Node As TreeNode)
+        Dim Parent = Node.Parent
+        Node.Remove()
+        If Parent IsNot Nothing Then
+            Dim WasApplying = _ApplyingLocation
+            _ApplyingLocation = True
+            Try
+                tvFolders.SelectedNode = Parent
+            Finally
+                _ApplyingLocation = WasApplying
+            End Try
+        End If
+    End Sub
+
+    Private Sub CommitNewFolder(Node As TreeNode, Info As DirectoryNodeInfo, Name As String)
+        Dim ParentNode = Node.Parent
+        Dim ParentInfo = TryCast(ParentNode?.Tag, DirectoryNodeInfo)
+        If ParentInfo Is Nothing Then
+            RemoveUncommittedNode(Node)
+            Return
+        End If
+
+        Dim NewId As Long
+        Try
+            NewId = _FileSystem.CreateDirectory(ParentInfo.AnchorId, Name)
+        Catch ex As Exception
+            MsgBox(Me, $"Could not create the folder.{Environment.NewLine}{ex.Message}", MsgBoxStyle.Critical)
+            RemoveUncommittedNode(Node)
+            Return
+        End Try
+
+        Info.AnchorId = NewId
+        Info.Name = Name
+        Info.IsUncommitted = False
+        Node.Text = Name
+        Node.Name = NewId.ToString()
+        Node.ToolTipText = $"Anchor {NewId}"
+
+        If ParentInfo.ChildDirectories IsNot Nothing Then ParentInfo.ChildDirectories.Add(New ChildDirectory(NewId, Name))
+        ResortChildNodes(ParentNode)
+
+        Dim WasApplying = _ApplyingLocation
+        _ApplyingLocation = True
+        Try
+            tvFolders.SelectedNode = Node
+        Finally
+            _ApplyingLocation = WasApplying
+        End Try
+
+        If _CurrentDirectoryAnchorId = ParentInfo.AnchorId AndAlso _SearchActive = False Then RefreshCurrentDirectory()
+    End Sub
+
+    Private Shared Sub UpdateCachedChildName(ParentInfo As DirectoryNodeInfo, ChildAnchorId As Long, NewName As String)
+        If ParentInfo.ChildDirectories Is Nothing Then Return
+        Dim Cached = ParentInfo.ChildDirectories.FirstOrDefault(Function(c) c.AnchorId = ChildAnchorId)
+        If Cached IsNot Nothing Then Cached.Name = NewName
+    End Sub
+
+    ''' <summary>Updates the file-list row for an entry after a rename, if that folder's contents are shown.</summary>
+    Private Sub UpdateListItemName(ChildAnchorId As Long, NewName As String)
+        For Each Item As ListViewItem In lvFiles.Items
+            Dim Entry = TryCast(Item.Tag, EmbeddedFileSystem.ContentListEntry)
+            If Entry IsNot Nothing AndAlso Entry.ChildAnchorId = ChildAnchorId Then
+                Item.Text = NewName
+                lvFiles.Sort()
+                Return
+            End If
         Next
+    End Sub
 
-        VisitedDirectories.Remove(DirectoryAnchorId)
+    ' ---- File list label editing -------------------------------------------------------------------
+
+    Private Sub RenameSelectedListEntry(Sender As Object, EventArgs As EventArgs)
+        If lvFiles.SelectedItems.Count <> 1 Then Return
+        lvFiles.Select()
+        lvFiles.SelectedItems(0).BeginEdit()
+    End Sub
+
+    Private Sub lvFiles_BeforeLabelEdit(Sender As Object, EventArgs As LabelEditEventArgs) Handles lvFiles.BeforeLabelEdit
+        _EditingListItemIndex = EventArgs.Item
+    End Sub
+
+    Private Sub lvFiles_AfterLabelEdit(Sender As Object, EventArgs As LabelEditEventArgs) Handles lvFiles.AfterLabelEdit
+        _EditingListItemIndex = -1
+        Dim Item = lvFiles.Items(EventArgs.Item)
+        Dim Entry = TryCast(Item.Tag, EmbeddedFileSystem.ContentListEntry)
+        If Entry Is Nothing Then
+            EventArgs.CancelEdit = True
+            Return
+        End If
+
+        Dim NewName = If(EventArgs.Label, String.Empty).Trim()
+        If EventArgs.Label Is Nothing OrElse NewName.Length = 0 OrElse String.Equals(NewName, Item.Text, StringComparison.Ordinal) Then
+            EventArgs.CancelEdit = True
+            Return
+        End If
+
+        Dim Hit As SearchHit = Nothing
+        Dim ParentAnchorId = If(_SearchItemInfo.TryGetValue(Item, Hit), Hit.ParentAnchorId, _CurrentDirectoryAnchorId)
+
+        Try
+            _FileSystem.RenameEntry(ParentAnchorId, Item.Text, NewName)
+        Catch ex As Exception
+            EventArgs.CancelEdit = True
+            MsgBox(Me, $"Could not rename '{Item.Text}'.{Environment.NewLine}{ex.Message}", MsgBoxStyle.Critical)
+            Return
+        End Try
+
+        If IsDirectory(Entry) Then
+            Dim Node = FindDirectoryNode(Entry.ChildAnchorId)
+            If Node IsNot Nothing Then
+                Node.Text = NewName
+                Dim Info = TryCast(Node.Tag, DirectoryNodeInfo)
+                If Info IsNot Nothing Then Info.Name = NewName
+                Dim ParentInfo = TryCast(Node.Parent?.Tag, DirectoryNodeInfo)
+                If ParentInfo IsNot Nothing Then UpdateCachedChildName(ParentInfo, Entry.ChildAnchorId, NewName)
+                ResortChildNodes(Node.Parent)
+            End If
+        End If
+
+        ' The list keeps the accepted label; just re-sort so it lands in the right place.
+        lvFiles.BeginInvoke(Sub()
+                                Item.Text = NewName
+                                lvFiles.Sort()
+                            End Sub)
     End Sub
 
     Private Sub RefreshCurrentDirectory()
@@ -368,7 +818,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 Dim Item = New ListViewItem(entry.Name) With {.Tag = entry}
                 Item.SubItems.Add(If(IsDirectory, String.Empty, FormatByteLength(entry.LengthOfDataAtEntry)))
                 Item.SubItems.Add(GetEntryStateText(entry.EntryType))
-                If entry.EntryType = EmbeddedFileSystem.EntryTypes.PendingFile Then Item.ForeColor = i00CodeLib.Drawing.BlendColor(lvFiles.ForeColor, Color.Red)
+                If entry.EntryType = EmbeddedFileSystem.EntryTypes.PendingFile Then Item.ForeColor = Drawing.BlendColor(lvFiles.ForeColor, Color.Red)
                 lvFiles.Items.Add(Item)
             Next
 
@@ -468,7 +918,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         If _SearchActive Then
             Dim ProgressText = If(_SearchGeneration = _CompletedSearchGeneration, String.Empty, " (searching...)")
-            StatusLabel.Text = $"Search '{_SearchQuery}': {lvFiles.Items.Count:N0} results{ProgressText}{SelectionText}"
+            StatusLabel.Text = $"'{_CurrentQueryText}': {lvFiles.Items.Count:N0} result{If(lvFiles.Items.Count = 1, "", "s")}{ProgressText}{SelectionText}"
             ' Incremental result batches update this caption faster than the ToolStrip repaints
             ' itself, so force it while a search is on screen.
             StatusLabel.Owner?.Refresh()
@@ -528,90 +978,82 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Function
 
     Private Sub NavigateToDirectory(DirectoryAnchorId As Long)
-        NavigateTo(NavLocation.Folder(DirectoryAnchorId))
+        SetAddressText(BuildPathForAnchor(DirectoryAnchorId))
     End Sub
 
     Private Sub tvFolders_AfterSelect(Sender As Object, EventArgs As TreeViewEventArgs) Handles tvFolders.AfterSelect
         If _ApplyingLocation OrElse EventArgs.Node Is Nothing Then Return
-        Dim Info = TryCast(EventArgs.Node.Tag, DirectoryNodeInfo)
-        If Info Is Nothing Then Return
-        NavigateTo(NavLocation.Folder(Info.AnchorId))
+        If TryCast(EventArgs.Node.Tag, DirectoryNodeInfo) Is Nothing Then Return
+        SetAddressText(BuildNodePath(EventArgs.Node))
     End Sub
 
     ' ===================================================================================================
-    ' Navigation history (folders and searches) and the Back / Forward buttons
+    ' Address / search box - the single input that drives the tree selection and the file list
     ' ===================================================================================================
+    '
+    ' The box text is the source of truth. It is one or more '|'-separated pieces; each piece is an
+    ' optional folder path (up to the last '\') plus a name pattern:
+    '   \A\B\                a plain folder path -> navigate, show that folder's contents
+    '   exe                  a bare pattern -> recursive "contains" search from the root
+    '   *.exe                wildcards (* = one or more chars, ? = one char) -> recursive glob from root
+    '   \A\B\*.exe           a pattern under a path -> recursive glob within \A\B
+    '   \A\*  or  \A\        list \A's direct contents
+    '   \A\*|\B\*            union of two folders' direct contents
+    '
+    ' Programmatic changes (tree click, Back/Forward, "Open Folder", Ctrl+F) go through SetAddressText
+    ' and apply immediately; only user typing is debounced.
 
-    ''' <summary>Navigates to <paramref name="Location"/>, appending it to the history (Explorer-style).</summary>
-    Private Sub NavigateTo(Location As NavLocation)
-        If _ApplyingLocation Then
-            ApplyLocation(Location)
-            Return
-        End If
-
-        If _HistoryIndex >= 0 AndAlso _History(_HistoryIndex).SameAs(Location) Then
-            ApplyLocation(Location)
-            Return
-        End If
-
-        If _HistoryIndex < _History.Count - 1 Then
-            _History.RemoveRange(_HistoryIndex + 1, _History.Count - _HistoryIndex - 1)
-        End If
-        _History.Add(Location)
-        _HistoryIndex = _History.Count - 1
-
-        ApplyLocation(Location)
+    ''' <summary>Sets the box text from code and applies it at once, pushing a history entry.</summary>
+    Private Sub SetAddressText(Text As String)
+        _SearchTimer.Stop()
+        _LastPushWasTyped = False
+        _SuppressSearchText = True
+        Try
+            tsiSearch.Text = Text
+        Finally
+            _SuppressSearchText = False
+        End Try
+        PushAddressHistory(Text)
+        ApplyAddress(Text)
         UpdateNavigationButtons()
+    End Sub
+
+    Private Sub PushAddressHistory(Text As String)
+        If _HistoryIndex >= 0 AndAlso String.Equals(_History(_HistoryIndex), Text, StringComparison.OrdinalIgnoreCase) Then Return
+        If _HistoryIndex < _History.Count - 1 Then _History.RemoveRange(_HistoryIndex + 1, _History.Count - _HistoryIndex - 1)
+        _History.Add(Text)
+        _HistoryIndex = _History.Count - 1
     End Sub
 
     Private Sub GoBack()
         If _HistoryIndex <= 0 Then Return
         _HistoryIndex -= 1
-        ApplyLocation(_History(_HistoryIndex))
-        UpdateNavigationButtons()
+        ApplyHistoryEntry()
     End Sub
 
     Private Sub GoForward()
         If _HistoryIndex >= _History.Count - 1 Then Return
         _HistoryIndex += 1
-        ApplyLocation(_History(_HistoryIndex))
+        ApplyHistoryEntry()
+    End Sub
+
+    Private Sub ApplyHistoryEntry()
+        _SearchTimer.Stop()
+        _LastPushWasTyped = False
+        Dim Text = _History(_HistoryIndex)
+        _SuppressSearchText = True
+        Try
+            tsiSearch.Text = Text
+        Finally
+            _SuppressSearchText = False
+        End Try
+        ApplyAddress(Text)
         UpdateNavigationButtons()
     End Sub
 
     Private Sub UpdateNavigationButtons()
         tsiBack.Enabled = _HistoryIndex > 0
         tsiForward.Enabled = _HistoryIndex < _History.Count - 1
-    End Sub
-
-    Private Sub ApplyLocation(Location As NavLocation)
-        Dim WasApplying = _ApplyingLocation
-        _ApplyingLocation = True
-        Try
-            If Location.IsSearch Then
-                ShowSearchResults(Location.Query)
-            Else
-                ShowFolder(Location.AnchorId)
-            End If
-        Finally
-            _ApplyingLocation = WasApplying
-        End Try
-    End Sub
-
-    Private Sub ShowFolder(AnchorId As Long)
-        Dim WasSearching = _SearchActive
-        _SearchActive = False
-        _CurrentDirectoryAnchorId = AnchorId
-
-        RemovePathColumn()
-
-        Dim Node = FindDirectoryNode(AnchorId)
-        If Node IsNot Nothing Then
-            Node.EnsureVisible()
-            If tvFolders.SelectedNode IsNot Node Then tvFolders.SelectedNode = Node
-        End If
-
-        RefreshCurrentDirectory()
-        If WasSearching Then ApplySavedFileListView()
     End Sub
 
     Private Sub tsiBack_Click(Sender As Object, EventArgs As EventArgs) Handles tsiBack.Click
@@ -622,120 +1064,317 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         GoForward()
     End Sub
 
-    ' ===================================================================================================
-    ' Search
-    ' ===================================================================================================
-
     Private Sub tsiSearch_TextChanged(Sender As Object, EventArgs As EventArgs) Handles tsiSearch.TextChanged
         If _SuppressSearchText Then Return
-
         _SearchTimer.Stop()
-        If tsiSearch.Text.Trim().Length = 0 Then
-            If _SearchActive Then NavigateTo(NavLocation.Folder(_CurrentDirectoryAnchorId))
-            Return
-        End If
         _SearchTimer.Start()
     End Sub
 
     Private Sub SearchTimer_Tick(Sender As Object, EventArgs As EventArgs) Handles _SearchTimer.Tick
         _SearchTimer.Stop()
-        Dim Query = tsiSearch.Text.Trim()
-        If Query.Length > 0 Then NavigateTo(NavLocation.Search(Query))
+        CommitTypedAddress()
     End Sub
 
-    ''' <summary>Focusing the search box with text in it returns to that (still-cached) search.</summary>
-    Private Sub tsiSearch_Enter(Sender As Object, EventArgs As EventArgs) Handles tsiSearch.Enter
-        If _SearchActive Then Return
-        Dim Query = tsiSearch.Text.Trim()
-        If Query.Length > 0 Then NavigateTo(NavLocation.Search(Query))
+    ''' <summary>Enter applies the typed text at once instead of waiting out the debounce.</summary>
+    Private Sub tsiSearch_KeyDown(Sender As Object, EventArgs As KeyEventArgs) Handles tsiSearch.KeyDown
+        If EventArgs.KeyCode <> Keys.Enter AndAlso EventArgs.KeyCode <> Keys.Return Then Return
+        _SearchTimer.Stop()
+        CommitTypedAddress()
+        EventArgs.Handled = True
+        EventArgs.SuppressKeyPress = True
     End Sub
 
+    ''' <summary>Applies text the user typed. Consecutive typed edits collapse into one history entry.</summary>
+    Private Sub CommitTypedAddress()
+        _SearchTimer.Stop()
+        Dim Text = tsiSearch.Text
+        If _LastPushWasTyped AndAlso _HistoryIndex >= 0 Then
+            _History(_HistoryIndex) = Text
+        Else
+            PushAddressHistory(Text)
+        End If
+        _LastPushWasTyped = True
+        ApplyAddress(Text)
+        UpdateNavigationButtons()
+    End Sub
+
+    ''' <summary>Ctrl+F: focus the box, prefilled with the current folder path and the cursor at the end.</summary>
     Private Sub FocusSearchBox()
         tsiSearch.Focus()
-        tsiSearch.SelectAll()
+        If _SearchActive Then
+            tsiSearch.SelectAll()
+            Return
+        End If
+        Dim Path = CurrentFolderPath()
+        If String.Equals(tsiSearch.Text, Path, StringComparison.Ordinal) = False Then
+            _SuppressSearchText = True
+            Try
+                tsiSearch.Text = Path
+            Finally
+                _SuppressSearchText = False
+            End Try
+        End If
+        _SearchTimer.Stop()
+        tsiSearch.SelectionStart = tsiSearch.Text.Length
+        tsiSearch.SelectionLength = 0
     End Sub
 
-    ''' <summary>
-    ''' Shows the results for <paramref name="Query"/>. The folder tree stays visible but with nothing
-    ''' selected; the list switches to its own saved search view (a plain list by default) and gains a
-    ''' Path column. A new query starts a fresh background walk; an unchanged query just re-displays the
-    ''' cached results.
-    ''' </summary>
-    Private Sub ShowSearchResults(Query As String)
-        Dim IsNewQuery = String.Equals(_SearchQuery, Query, StringComparison.OrdinalIgnoreCase) = False
-        Dim WasSearching = _SearchActive
+    ' ---- Parsing and dispatch ---------------------------------------------------------------------------
 
-        _SearchActive = True
-        _SearchQuery = Query
+    Private Sub ApplyAddress(Text As String)
+        _CurrentQueryText = If(Text, String.Empty)
+        Dim Terms = ParseAddress(_CurrentQueryText)
 
-        If String.Equals(tsiSearch.Text, Query, StringComparison.Ordinal) = False Then
-            _SuppressSearchText = True
-            tsiSearch.Text = Query
-            _SuppressSearchText = False
+        If Terms.Count = 0 OrElse (Terms.Count = 1 AndAlso Terms(0).Pattern.Length = 0) Then
+            Dim Segments = If(Terms.Count = 0, Array.Empty(Of String)(), Terms(0).PathSegments)
+            ShowFolderContents(Segments)
+        Else
+            ShowSearchResults(Terms)
         End If
+    End Sub
+
+    Private Shared Function ParseAddress(Text As String) As List(Of QueryTerm)
+        Dim Result As New List(Of QueryTerm)()
+        For Each Raw In Text.Split("|"c)
+            Dim Piece = Raw.Trim()
+            Dim BackslashIndex = Piece.LastIndexOf("\"c)
+            If BackslashIndex < 0 Then
+                If Piece.Length > 0 Then Result.Add(New QueryTerm(Array.Empty(Of String)(), Piece, False))
+            Else
+                Dim Segments = Piece.Substring(0, BackslashIndex).Split("\"c).Where(Function(s) s.Length > 0).ToArray()
+                Result.Add(New QueryTerm(Segments, Piece.Substring(BackslashIndex + 1), True))
+            End If
+        Next
+        Return Result
+    End Function
+
+    ' ---- Folder navigation ---------------------------------------------------------------------------
+
+    Private Sub ShowFolderContents(Segments As String())
+        Dim WasSearching = _SearchActive
+        _SearchActive = False
+        RemovePathColumn()
+
+        Dim Node = EnsureNodeForPath(Segments)
+        If Node Is Nothing Then
+            _CurrentDirectoryAnchorId = 0
+            lvFiles.BeginUpdate()
+            Try
+                lvFiles.Items.Clear()
+                _SearchItemInfo.Clear()
+            Finally
+                lvFiles.EndUpdate()
+            End Try
+            If WasSearching Then ApplySavedFileListView()
+            StatusLabel.Text = $"Path not found: \{String.Join("\", Segments)}\"
+            StatusLabel.Owner?.Refresh()
+            Return
+        End If
+
+        _CurrentDirectoryAnchorId = NodeAnchorId(Node)
+
+        Dim WasApplying = _ApplyingLocation
+        _ApplyingLocation = True
+        Try
+            Node.EnsureVisible()
+            If tvFolders.SelectedNode IsNot Node Then tvFolders.SelectedNode = Node
+        Finally
+            _ApplyingLocation = WasApplying
+        End Try
+
+        ' Snap the box to the folder's real path + casing, but not mid-edit (only a case/format tidy-up).
+        Dim Canonical = BuildNodePath(Node)
+        If tsiSearch.Focused = False AndAlso String.Equals(tsiSearch.Text, Canonical, StringComparison.Ordinal) = False Then
+            _SuppressSearchText = True
+            Try
+                tsiSearch.Text = Canonical
+            Finally
+                _SuppressSearchText = False
+            End Try
+        End If
+
+        RefreshCurrentDirectory()
+        If WasSearching Then ApplySavedFileListView()
+    End Sub
+
+    ''' <summary>Resolves a folder path against the loaded tree (materialising as needed), or Nothing.</summary>
+    Private Function EnsureNodeForPath(Segments As String()) As TreeNode
+        If tvFolders.Nodes.Count = 0 Then Return Nothing
+        Dim Node = tvFolders.Nodes(0)
+        For Each Segment In Segments
+            MaterialiseChildNodes(Node)
+            Dim NextNode As TreeNode = Nothing
+            For Each Child As TreeNode In Node.Nodes
+                If String.Equals(Child.Text, Segment, StringComparison.OrdinalIgnoreCase) Then
+                    NextNode = Child
+                    Exit For
+                End If
+            Next
+            If NextNode Is Nothing Then Return Nothing
+            Node = NextNode
+        Next
+        Return Node
+    End Function
+
+    ''' <summary>The '\A\B\' path of a folder node. The root is the empty string.</summary>
+    Private Shared Function BuildNodePath(Node As TreeNode) As String
+        If Node Is Nothing Then Return String.Empty
+        Dim Parts As New List(Of String)()
+        Dim Current = Node
+        While Current IsNot Nothing AndAlso Current.Parent IsNot Nothing
+            Parts.Add(Current.Text)
+            Current = Current.Parent
+        End While
+        If Parts.Count = 0 Then Return String.Empty
+        Parts.Reverse()
+        Return "\" & String.Join("\", Parts) & "\"
+    End Function
+
+    Private Function BuildPathForAnchor(AnchorId As Long) As String
+        If AnchorId = _FileSystem.RootAnchorId Then Return String.Empty
+        Return BuildNodePath(EnsureDirectoryNode(AnchorId))
+    End Function
+
+    Private Function CurrentFolderPath() As String
+        If _CurrentDirectoryAnchorId > 0 Then Return BuildPathForAnchor(_CurrentDirectoryAnchorId)
+        Return BuildNodePath(tvFolders.SelectedNode)
+    End Function
+
+    ' ---- Search ------------------------------------------------------------------------------------
+
+    Private NotInheritable Class SearchScope
+        Public Sub New(AnchorId As Long, Path As String, Matcher As Func(Of String, Boolean), Recursive As Boolean)
+            Me.AnchorId = AnchorId
+            Me.Path = Path
+            Me.Matcher = Matcher
+            Me.Recursive = Recursive
+        End Sub
+
+        Public ReadOnly Property AnchorId As Long
+        Public ReadOnly Property Path As String
+        Public ReadOnly Property Matcher As Func(Of String, Boolean)
+        Public ReadOnly Property Recursive As Boolean
+    End Class
+
+    Private Sub ShowSearchResults(Terms As List(Of QueryTerm))
+        Dim WasSearching = _SearchActive
+        _SearchActive = True
 
         If WasSearching = False Then ApplySavedSearchListView()
         EnsurePathColumn()
-        If tvFolders.SelectedNode IsNot Nothing Then tvFolders.SelectedNode = Nothing
 
-        If IsNewQuery Then StartSearch(Query)
+        Dim ScopeSegments = SharedScopeSegments(Terms)
+        Dim WasApplying = _ApplyingLocation
+        _ApplyingLocation = True
+        Try
+            If ScopeSegments Is Nothing Then
+                If tvFolders.SelectedNode IsNot Nothing Then tvFolders.SelectedNode = Nothing
+            Else
+                Dim ScopeNode = EnsureNodeForPath(ScopeSegments)
+                tvFolders.SelectedNode = ScopeNode
+                ScopeNode?.EnsureVisible()
+            End If
+        Finally
+            _ApplyingLocation = WasApplying
+        End Try
+
+        If String.Equals(_LastSearchedText, _CurrentQueryText, StringComparison.OrdinalIgnoreCase) = False Then
+            StartSearch(Terms)
+        End If
         PopulateSearchList()
         UpdateStatus()
     End Sub
 
-    Private Sub StartSearch(Query As String)
+    ''' <summary>The path shared by every term, if they are all scoped to the same one folder; else Nothing.</summary>
+    Private Shared Function SharedScopeSegments(Terms As List(Of QueryTerm)) As String()
+        Dim WithPath = Terms.Where(Function(t) t.HasPath).ToList()
+        If WithPath.Count = 0 OrElse WithPath.Count <> Terms.Count Then Return Nothing
+        Dim First = WithPath(0).PathSegments
+        For Each Term In WithPath
+            If Term.PathSegments.SequenceEqual(First, StringComparer.OrdinalIgnoreCase) = False Then Return Nothing
+        Next
+        Return If(First.Length = 0, Nothing, First)
+    End Function
+
+    Private Sub StartSearch(Terms As List(Of QueryTerm))
         _SearchGeneration += 1
         _SearchResults.Clear()
+        _LastSearchedText = _CurrentQueryText
         Dim Generation = _SearchGeneration
-        Dim RootAnchorId = _FileSystem.RootAnchorId
-        System.Threading.ThreadPool.QueueUserWorkItem(Sub() RunSearch(Generation, Query, RootAnchorId))
+
+        Dim Scopes As New List(Of SearchScope)()
+        For Each Term In Terms
+            Dim Node = EnsureNodeForPath(Term.PathSegments)
+            If Node Is Nothing Then Continue For
+            Dim ScopeAnchor = NodeAnchorId(Node)
+            If ScopeAnchor <= 0 Then ScopeAnchor = _FileSystem.RootAnchorId
+            Dim Recursive = (Term.HasPath = False) OrElse (Term.ListsDirectContents = False)
+            Scopes.Add(New SearchScope(ScopeAnchor, BuildNodePath(Node).TrimEnd("\"c), BuildNameMatcher(Term.Pattern), Recursive))
+        Next
+
+        If Scopes.Count = 0 Then
+            _CompletedSearchGeneration = Generation
+            Return
+        End If
+        System.Threading.ThreadPool.QueueUserWorkItem(Sub() RunSearch(Generation, Scopes))
     End Sub
 
     Private Sub RerunSearch()
-        If _SearchQuery Is Nothing Then Return
-        StartSearch(_SearchQuery)
-        PopulateSearchList()
-        UpdateStatus()
+        _LastSearchedText = Nothing
+        ApplyAddress(_CurrentQueryText)
     End Sub
+
+    ''' <summary>Compiles a name pattern: empty/"*" matches all, plain text is "contains", else an anchored glob.</summary>
+    Private Shared Function BuildNameMatcher(Pattern As String) As Func(Of String, Boolean)
+        If Pattern.Length = 0 OrElse Pattern = "*" Then Return Function(Name) True
+        If Pattern.IndexOfAny({"*"c, "?"c}) < 0 Then
+            Dim Needle = Pattern
+            Return Function(Name) Name.IndexOf(Needle, StringComparison.OrdinalIgnoreCase) >= 0
+        End If
+        Dim RegexText = "^" & Regex.Escape(Pattern).Replace("\*", ".+").Replace("\?", ".") & "$"
+        Dim Compiled As New Regex(RegexText, RegexOptions.IgnoreCase Or RegexOptions.CultureInvariant)
+        Return Function(Name) Compiled.IsMatch(Name)
+    End Function
 
     Private Const SearchResultFlushIntervalMs As Integer = 80
 
-    Private Sub RunSearch(Generation As Integer, Query As String, RootAnchorId As Long)
-        Dim Pending As New Stack(Of KeyValuePair(Of Long, String))()
-        Pending.Push(New KeyValuePair(Of Long, String)(RootAnchorId, String.Empty))
-
+    Private Sub RunSearch(Generation As Integer, Scopes As List(Of SearchScope))
+        Dim Seen As New HashSet(Of Long)()
         Dim Accumulated As New List(Of SearchHit)()
         Dim LastFlush = Environment.TickCount
 
-        While Pending.Count > 0
-            If Generation <> _SearchGeneration OrElse _Disposed Then Return
-            Dim Current = Pending.Pop()
+        For Each Scope In Scopes
+            Dim Pending As New Stack(Of KeyValuePair(Of Long, String))()
+            Pending.Push(New KeyValuePair(Of Long, String)(Scope.AnchorId, Scope.Path))
 
-            Dim Entries As IReadOnlyList(Of EmbeddedFileSystem.ContentListEntry)
-            Try
-                Entries = _FileSystem.GetDirectoryEntries(Current.Key)
-            Catch
-                Continue While
-            End Try
+            While Pending.Count > 0
+                If Generation <> _SearchGeneration OrElse _Disposed Then Return
+                Dim Current = Pending.Pop()
 
-            Dim ContainingPath = If(Current.Value.Length = 0, "\", Current.Value)
-            For Each Entry In Entries
-                If Entry.Name.IndexOf(Query, StringComparison.OrdinalIgnoreCase) >= 0 Then
-                    Accumulated.Add(New SearchHit(Entry, Current.Key, ContainingPath))
+                Dim Entries As IReadOnlyList(Of EmbeddedFileSystem.ContentListEntry)
+                Try
+                    Entries = _FileSystem.GetDirectoryEntries(Current.Key)
+                Catch
+                    Continue While
+                End Try
+
+                Dim ContainingPath = If(Current.Value.Length = 0, "\", Current.Value)
+                For Each Entry In Entries
+                    If Scope.Matcher(Entry.Name) AndAlso Seen.Add(Entry.ChildAnchorId) Then
+                        Accumulated.Add(New SearchHit(Entry, Current.Key, ContainingPath))
+                    End If
+                    If Scope.Recursive AndAlso Entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory Then
+                        Pending.Push(New KeyValuePair(Of Long, String)(Entry.ChildAnchorId, Current.Value & "\" & Entry.Name))
+                    End If
+                Next
+
+                If Accumulated.Count > 0 AndAlso Environment.TickCount - LastFlush >= SearchResultFlushIntervalMs Then
+                    If FlushSearchBatch(Generation, Accumulated) = False Then Return
+                    Accumulated = New List(Of SearchHit)()
+                    LastFlush = Environment.TickCount
                 End If
-                If Entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory Then
-                    Pending.Push(New KeyValuePair(Of Long, String)(Entry.ChildAnchorId, Current.Value & "\" & Entry.Name))
-                End If
-            Next
-
-            ' Coalesce hits into one UI update every SearchResultFlushIntervalMs so a fast walk
-            ' doesn't flood the UI thread with tiny batches (which starved the status repaint).
-            If Accumulated.Count > 0 AndAlso Environment.TickCount - LastFlush >= SearchResultFlushIntervalMs Then
-                If FlushSearchBatch(Generation, Accumulated) = False Then Return
-                Accumulated = New List(Of SearchHit)()
-                LastFlush = Environment.TickCount
-            End If
-        End While
+            End While
+        Next
 
         If Accumulated.Count > 0 Then FlushSearchBatch(Generation, Accumulated)
 
@@ -803,7 +1442,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Item.SubItems.Add(If(IsDirectory, String.Empty, FormatByteLength(Entry.LengthOfDataAtEntry)))
         Item.SubItems.Add(GetEntryStateText(Entry.EntryType))
         Item.SubItems.Add(Hit.ParentPath)
-        If Entry.EntryType = EmbeddedFileSystem.EntryTypes.PendingFile Then Item.ForeColor = i00CodeLib.Drawing.BlendColor(lvFiles.ForeColor, Color.Red)
+        If Entry.EntryType = EmbeddedFileSystem.EntryTypes.PendingFile Then Item.ForeColor = Drawing.BlendColor(lvFiles.ForeColor, Color.Red)
         _SearchItemInfo(Item) = Hit
         Return Item
     End Function
@@ -827,7 +1466,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If _SearchItemInfo.TryGetValue(lvFiles.SelectedItems(0), Hit) = False Then Return
 
         Dim TargetName = Hit.Entry.Name
-        NavigateTo(NavLocation.Folder(Hit.ParentAnchorId))
+        SetAddressText(BuildPathForAnchor(Hit.ParentAnchorId))
         SelectListItemByName(TargetName)
     End Sub
 
@@ -881,17 +1520,19 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Return
         End If
 
+        Dim IsRoot = GetSelectedDirectoryAnchorId() = _FileSystem.RootAnchorId
+
         AddMenuItem(_FolderContextMenu, "Open", AddressOf OpenSelectedDirectory)
         _FolderContextMenu.Items.Add(New ToolStripSeparator())
         AddMenuItem(_FolderContextMenu, "Upload File(s)...", AddressOf UploadFilesFromDialog)
         AddMenuItem(_FolderContextMenu, "Upload Folder...", AddressOf UploadFolderFromDialog)
-        AddMenuItem(_FolderContextMenu, "New Folder...", AddressOf CreateFolderFromPrompt)
+        AddMenuItem(_FolderContextMenu, "New Folder", AddressOf BeginNewFolderInline)
         _FolderContextMenu.Items.Add(New ToolStripSeparator())
         AddMenuItem(_FolderContextMenu, "Save Folder As...", AddressOf SaveSelectedFolder)
 
-        Dim IsRoot = GetSelectedDirectoryAnchorId() = _FileSystem.RootAnchorId
         If IsRoot = False Then
             _FolderContextMenu.Items.Add(New ToolStripSeparator())
+            AddMenuItem(_FolderContextMenu, "Rename", AddressOf RenameSelectedFolder)
             AddMenuItem(_FolderContextMenu, "Delete Folder", AddressOf DeleteSelectedFolder)
         End If
 
@@ -933,10 +1574,11 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Else
             AddMenuItem(_FileContextMenu, "Save Selected To Folder...", AddressOf SaveSelectedEntries)
         End If
+        If lvFiles.SelectedItems.Count = 1 Then AddMenuItem(_FileContextMenu, "Rename", AddressOf RenameSelectedListEntry)
         AddMenuItem(_FileContextMenu, "Delete", AddressOf DeleteSelectedEntries)
         _FileContextMenu.Items.Add(New ToolStripSeparator())
         AddMenuItem(_FileContextMenu, "Upload File(s)...", AddressOf UploadFilesFromDialog)
-        AddMenuItem(_FileContextMenu, "New Folder...", AddressOf CreateFolderFromPrompt)
+        AddMenuItem(_FileContextMenu, "New Folder", AddressOf BeginNewFolderInline)
         _FileContextMenu.Items.Add(New ToolStripSeparator())
         AddViewMenu(_FileContextMenu)
         AddMenuItem(_FileContextMenu, "Refresh", AddressOf RefreshMenuItem_Click)
@@ -948,7 +1590,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         _EmptyFileContextMenu.Items.Add(New ToolStripSeparator())
         AddMenuItem(_EmptyFileContextMenu, "Upload File(s)...", AddressOf UploadFilesFromDialog)
         AddMenuItem(_EmptyFileContextMenu, "Upload Folder...", AddressOf UploadFolderFromDialog)
-        AddMenuItem(_EmptyFileContextMenu, "New Folder...", AddressOf CreateFolderFromPrompt)
+        AddMenuItem(_EmptyFileContextMenu, "New Folder", AddressOf BeginNewFolderInline)
         _EmptyFileContextMenu.Items.Add(New ToolStripSeparator())
         AddMenuItem(_EmptyFileContextMenu, "Refresh", AddressOf RefreshMenuItem_Click)
     End Sub
@@ -1070,6 +1712,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         ' In Details view every column is painted by DrawSubItem instead.
         If lvFiles.View = View.Details Then Return
 
+        Debug.Print($"{Now.Second}")
+
         If _ThumbnailCellSize <> 0 Then
             DrawThumbnailItem(EventArgs)
         Else
@@ -1100,6 +1744,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             DrawEntryIcon(Canvas, Entry, IconRectangle)
             TextBounds = Rectangle.FromLTRB(IconRectangle.Right + 4, Bounds.Top, Bounds.Right, Bounds.Bottom)
         End If
+
+        If EventArgs.ColumnIndex = 0 AndAlso IsListItemBeingEdited(EventArgs.Item) Then Return
 
         Dim Flags = TextFormatFlags.VerticalCenter Or TextFormatFlags.EndEllipsis Or TextFormatFlags.NoPrefix
         If EventArgs.Header IsNot Nothing AndAlso EventArgs.Header.TextAlign = HorizontalAlignment.Right Then
@@ -1136,7 +1782,13 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If EventArgs.Item.Focused Then EventArgs.DrawFocusRectangle()
     End Sub
 
+    ''' <summary>True while the native rename box is open over this row, so owner-draw leaves its label alone.</summary>
+    Private Function IsListItemBeingEdited(Item As ListViewItem) As Boolean
+        Return _EditingListItemIndex >= 0 AndAlso Item IsNot Nothing AndAlso Item.Index = _EditingListItemIndex
+    End Function
+
     Private Sub DrawIconViewLabel(Canvas As Graphics, Item As ListViewItem, LabelArea As Rectangle, Flags As TextFormatFlags)
+        If IsListItemBeingEdited(Item) Then Return
         Dim Selected = Item.Selected
         Dim ForeColour = If(Selected, SystemColors.HighlightText, Item.ForeColor)
 
@@ -1174,7 +1826,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 Canvas.FillRectangle(Fill, Bounds)
             End Using
             Using Border As New Pen(SystemColors.Highlight)
-                Canvas.DrawRectangle(Border, Bounds.X, Bounds.Y, Bounds.Width - 1, Bounds.Height - 1)
+                Canvas.DrawRectangle(Border, Bounds.X + 1, Bounds.Y + 1, Bounds.Width - 2, Bounds.Height - 2)
             End Using
         End If
 
@@ -1196,10 +1848,17 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End If
 
         Dim LabelArea = New Rectangle(Bounds.X + 2, IconArea.Bottom + 2, Bounds.Width - 4, Bounds.Bottom - IconArea.Bottom - 4)
-        TextRenderer.DrawText(Canvas, EventArgs.Item.Text, lvFiles.Font, LabelArea, lvFiles.ForeColor,
-                              TextFormatFlags.HorizontalCenter Or TextFormatFlags.WordEllipsis Or TextFormatFlags.NoPrefix)
+        If IsListItemBeingEdited(EventArgs.Item) = False Then
+            TextRenderer.DrawText(Canvas, EventArgs.Item.Text, lvFiles.Font, LabelArea, lvFiles.ForeColor,
+                                  TextFormatFlags.HorizontalCenter Or TextFormatFlags.WordEllipsis Or TextFormatFlags.NoPrefix)
+        End If
 
-        If EventArgs.Item.Focused Then EventArgs.DrawFocusRectangle()
+        If EventArgs.Item.Focused Then
+            'EventArgs.DrawFocusRectangle()
+            Using Border As New Pen(SystemColors.Highlight)
+                Canvas.DrawRectangle(Border, Bounds.X + 1, Bounds.Y + 1, Bounds.Width - 2, Bounds.Height - 2)
+            End Using
+        End If
     End Sub
 
     Private Shared Function FitCentered(ImageSize As Size, Area As Rectangle, MaximumEdge As Integer) As Rectangle
@@ -1214,11 +1873,11 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim Badge = GetEntryIcon(Entry, FileIconProvider.SmallIconSize)
         If Badge Is Nothing Then Return
 
-        Dim X = ThumbnailRectangle.Right - Badge.Width
-        Dim Y = ThumbnailRectangle.Bottom - Badge.Height
-        Using Backing As New SolidBrush(Color.FromArgb(210, Color.White))
-            Canvas.FillRectangle(Backing, X - 1, Y - 1, Badge.Width + 2, Badge.Height + 2)
-        End Using
+        Dim X = ThumbnailRectangle.Right - Badge.Width - 2
+        Dim Y = ThumbnailRectangle.Bottom - Badge.Height - 2
+        'Using Backing As New SolidBrush(Color.FromArgb(210, Color.White))
+        '    Canvas.FillRectangle(Backing, X - 1, Y - 1, Badge.Width + 2, Badge.Height + 2)
+        'End Using
         Canvas.DrawImage(Badge, X, Y, Badge.Width, Badge.Height)
     End Sub
 
@@ -1353,16 +2012,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private Sub OpenSelectedDirectory(Sender As Object, EventArgs As EventArgs)
         If tvFolders.SelectedNode Is Nothing Then Return
         tvFolders.SelectedNode.Expand()
-        NavigateTo(NavLocation.Folder(GetSelectedDirectoryAnchorId()))
-    End Sub
-
-    Private Sub CreateFolderFromPrompt(Sender As Object, EventArgs As EventArgs)
-        Dim FolderName = PromptForText("New Folder", "Folder name:")
-        If FolderName Is Nothing Then Return
-
-        _FileSystem.CreateDirectory(_CurrentDirectoryAnchorId, FolderName)
-
-        RefreshFileSystemView()
+        SetAddressText(BuildNodePath(tvFolders.SelectedNode))
     End Sub
 
     Private Sub UploadFilesFromDialog(Sender As Object, EventArgs As EventArgs)
@@ -1458,7 +2108,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub CopyUploadWorkList(WorkItems As List(Of UploadWorkItem), TargetDirectoryAnchorId As Long,
-                                   TotalSize As TotalSizeBox, Report As i00CodeLib.frmProgress.ProgressReport)
+                                   TotalSize As TotalSizeBox, Report As frmProgress.ProgressReport)
         Dim FolderAnchors As New Dictionary(Of String, Long)() From {{String.Empty, TargetDirectoryAnchorId}}
         Dim Resolution As ConflictChoice = ConflictChoice.Cancel
         Dim Resolved As Boolean = False
@@ -1544,7 +2194,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     ''' Pushes the current byte/file counts to the progress dialog. Throttled to ~10 updates a second
     ''' unless <paramref name="Force"/> is set (file finished, or an item was skipped).
     ''' </summary>
-    Private Shared Sub ReportUploadProgress(Report As i00CodeLib.frmProgress.ProgressReport, TotalSize As TotalSizeBox,
+    Private Shared Sub ReportUploadProgress(Report As frmProgress.ProgressReport, TotalSize As TotalSizeBox,
                                             CopiedBytes As Long, CopiedFiles As Integer, FileCount As Integer, Name As String,
                                             ByRef LastReport As Date, Force As Boolean)
         Dim Timestamp = Date.UtcNow
@@ -1605,14 +2255,14 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Return Anchor
     End Function
 
-    Private Shared Function PromptForConflictChoice(Report As i00CodeLib.frmProgress.ProgressReport, Name As String) As ConflictChoice
+    Private Shared Function PromptForConflictChoice(Report As frmProgress.ProgressReport, Name As String) As ConflictChoice
         Dim Choice As ConflictChoice = ConflictChoice.Cancel
-        Dim Buttons As New List(Of i00CodeLib.MessageBox.MsgBoxButton) From {
-            New i00CodeLib.MessageBox.MsgBoxButton("Skip", Sub() Choice = ConflictChoice.Skip),
-            New i00CodeLib.MessageBox.MsgBoxButton("Skip All", Sub() Choice = ConflictChoice.SkipAll),
-            New i00CodeLib.MessageBox.MsgBoxButton("Replace", Sub() Choice = ConflictChoice.Replace),
-            New i00CodeLib.MessageBox.MsgBoxButton("Replace All", Sub() Choice = ConflictChoice.ReplaceAll),
-            New i00CodeLib.MessageBox.MsgBoxButton("Cancel", Sub() Choice = ConflictChoice.Cancel)
+        Dim Buttons As New List(Of MessageBox.MsgBoxButton) From {
+            New MessageBox.MsgBoxButton("Skip", Sub() Choice = ConflictChoice.Skip),
+            New MessageBox.MsgBoxButton("Skip All", Sub() Choice = ConflictChoice.SkipAll),
+            New MessageBox.MsgBoxButton("Replace", Sub() Choice = ConflictChoice.Replace),
+            New MessageBox.MsgBoxButton("Replace All", Sub() Choice = ConflictChoice.ReplaceAll),
+            New MessageBox.MsgBoxButton("Cancel", Sub() Choice = ConflictChoice.Cancel)
         }
 
         Report.ShowMessageBox($"'{Name}' already exists in the destination folder.{Environment.NewLine}What would you like to do?",
@@ -1726,7 +2376,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                         $"Delete the {Entries.Count:N0} selected items, including all folder contents?",
                         $"Delete the {Entries.Count:N0} selected files?")
         End If
-        If i00CodeLib.MsgBox(Me, Prompt, MsgBoxStyle.YesNo Or MsgBoxStyle.Exclamation) <> MsgBoxResult.Yes Then Return
+        If MsgBox(Me, Prompt, MsgBoxStyle.YesNo Or MsgBoxStyle.Exclamation) <> MsgBoxResult.Yes Then Return
 
         ' Resolve each item's parent on the UI thread (a search result lives outside the current folder).
         Dim Deletions = lvFiles.SelectedItems.
@@ -1764,14 +2414,15 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                   MsgBoxStyle.YesNo Or MsgBoxStyle.Exclamation
                   ) <> MsgBoxResult.Yes Then Return
 
+        Dim DeletedAnchorId = Info.AnchorId
+        Dim ParentAnchorId = ParentInfo.AnchorId
+
         ExecuteLongBlockingActionOnThread(
-            Sub()
-                _FileSystem.DeleteEntry(ParentInfo.AnchorId, Info.Name)
-                _CurrentDirectoryAnchorId = ParentInfo.AnchorId
-            End Sub,
+            Sub() _FileSystem.DeleteEntry(ParentAnchorId, Info.Name),
             "The folder could not be deleted.")
 
-        RefreshFileSystemView()
+        RemoveDirectoryFromTree(ParentAnchorId, DeletedAnchorId)
+        SetAddressText(BuildPathForAnchor(ParentAnchorId))
     End Sub
 
     Private Sub RefreshMenuItem_Click(Sender As Object, EventArgs As EventArgs)
@@ -1877,26 +2528,143 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Return DragRectangle.Contains(CurrentPoint) = False
     End Function
 
+    ''' <summary>One file or folder being dragged out, plus what a Move needs in order to delete it.</summary>
+    Private NotInheritable Class DraggedEntry
+        Public Sub New(Name As String, IsDirectory As Boolean, ContentAnchorId As Long, Length As Long, ParentAnchorId As Long)
+            Me.Name = Name
+            Me.IsDirectory = IsDirectory
+            Me.ContentAnchorId = ContentAnchorId
+            Me.Length = Length
+            Me.ParentAnchorId = ParentAnchorId
+        End Sub
+
+        Public ReadOnly Property Name As String
+        Public ReadOnly Property IsDirectory As Boolean
+        Public ReadOnly Property ContentAnchorId As Long
+        Public ReadOnly Property Length As Long
+        Public ReadOnly Property ParentAnchorId As Long
+    End Class
+
     Private Sub BeginExternalFileDrag(Entries As IList(Of EmbeddedFileSystem.ContentListEntry))
-        ExecuteLongBlockingActionOnThread(
-            Sub()
-                Using Export = CreateTemporaryFileExport(Entries)
-                    Dim Data = New DataObject(DataFormats.FileDrop, Export.Paths)
-                    lvFiles.DoDragDrop(Data, DragDropEffects.Copy)
-                End Using
-            End Sub,
-            "The selected files could not be prepared for drag-and-drop.")
+        If Entries.Count = 0 Then Return
+        Dim Dragged = Entries.Select(Function(e) New DraggedEntry(e.Name, IsDirectory(e), e.ChildAnchorId,
+                                                                 e.LengthOfDataAtEntry, ResolveParentAnchor(e))).ToList()
+        StartStreamedDrag(Dragged)
     End Sub
 
     Private Sub BeginExternalDirectoryDrag(Info As DirectoryNodeInfo)
+        Dim Node = FindDirectoryNode(Info.AnchorId)
+        Dim ParentInfo = TryCast(Node?.Parent?.Tag, DirectoryNodeInfo)
+        Dim Dragged As New List(Of DraggedEntry) From {
+            New DraggedEntry(Info.Name, True, Info.AnchorId, 0, If(ParentInfo IsNot Nothing, ParentInfo.AnchorId, 0L))
+        }
+        StartStreamedDrag(Dragged)
+    End Sub
+
+    ''' <summary>The parent directory anchor for a listed entry - the containing folder during a search.</summary>
+    Private Function ResolveParentAnchor(Entry As EmbeddedFileSystem.ContentListEntry) As Long
+        If _SearchActive Then
+            Dim Hit = _SearchResults.FirstOrDefault(Function(h) h.Entry.ChildAnchorId = Entry.ChildAnchorId)
+            If Hit IsNot Nothing Then Return Hit.ParentAnchorId
+        End If
+        Return _CurrentDirectoryAnchorId
+    End Function
+
+    ''' <summary>
+    ''' Drags <paramref name="Dragged"/> out to the drop target, streaming each file's bytes straight
+    ''' from the embedded stream on demand - no temp files, no whole-file buffering. Dropping copies;
+    ''' dropping with Shift held moves (the entries are removed once the transfer finishes).
+    ''' </summary>
+    ''' <remarks>
+    ''' The shell pulls the file contents on its own thread after the drop; if you set a breakpoint inside
+    ''' <see cref="StreamEmbeddedContent"/> or the completion callbacks while debugging, the transfer can
+    ''' stall. Otherwise it works fine with the debugger attached.
+    ''' </remarks>
+    Private Sub StartStreamedDrag(Dragged As List(Of DraggedEntry))
+        If Dragged.Count = 0 Then Return
+
+        Dim Descriptors As New List(Of VirtualFileDataObject.FileDescriptor)()
+        For Each Item In Dragged
+            If Item.IsDirectory Then
+                AppendDirectoryDescriptors(Item.ContentAnchorId, Item.Name, Descriptors)
+            Else
+                Descriptors.Add(BuildFileDescriptor(Item.Name, Item.ContentAnchorId, Item.Length))
+            End If
+        Next
+        If Descriptors.Count = 0 Then Return
+
+        Dim CapturedSources = Dragged
+        Dim Data As New VirtualFileDataObject(Sub(o)
+                                              End Sub,
+                                              Sub(o) OnStreamedDragFinished(o, CapturedSources))
+        Data.SetData(Descriptors)
+
+        Try
+            VirtualFileDataObject.DoDragDrop(Data, DragDropEffects.Copy Or DragDropEffects.Move)
+        Catch ex As Exception
+            MsgBox(Me, $"The drag could not be started.{Environment.NewLine}{ex.Message}", MsgBoxStyle.Critical)
+        End Try
+    End Sub
+
+    Private Function BuildFileDescriptor(RelativeName As String, ContentAnchorId As Long, Length As Long) As VirtualFileDataObject.FileDescriptor
+        Return New VirtualFileDataObject.FileDescriptor With {
+            .Name = RelativeName,
+            .Length = Length,
+            .StreamContents = Sub(Output) StreamEmbeddedContent(ContentAnchorId, Length, Output)
+        }
+    End Function
+
+    ''' <summary>Recursively emits a descriptor per contained file, keyed by its path within the folder.</summary>
+    Private Sub AppendDirectoryDescriptors(DirectoryAnchorId As Long, RelativePath As String,
+                                           Descriptors As List(Of VirtualFileDataObject.FileDescriptor))
+        Dim Entries As IReadOnlyList(Of EmbeddedFileSystem.ContentListEntry)
+        Try
+            Entries = _FileSystem.GetDirectoryEntries(DirectoryAnchorId)
+        Catch
+            Return
+        End Try
+
+        For Each Entry In Entries
+            Dim ChildPath = $"{RelativePath}\{Entry.Name}"
+            If Entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory Then
+                AppendDirectoryDescriptors(Entry.ChildAnchorId, ChildPath, Descriptors)
+            ElseIf Entry.EntryType = EmbeddedFileSystem.EntryTypes.File Then
+                Descriptors.Add(BuildFileDescriptor(ChildPath, Entry.ChildAnchorId, Entry.LengthOfDataAtEntry))
+            End If
+        Next
+    End Sub
+
+    ''' <summary>Feeds one embedded file's bytes into the drop target's stream. Runs on the shell's thread.</summary>
+    Private Sub StreamEmbeddedContent(ContentAnchorId As Long, Length As Long, Output As Stream)
+        Using Source = EmbeddedFileReadStream.TryOpen(_FileSystem, ContentAnchorId, Length)
+            If Source Is Nothing Then Return
+            Source.CopyTo(Output, 1024 * 1024)
+        End Using
+    End Sub
+
+    Private Sub OnStreamedDragFinished(Data As VirtualFileDataObject, Dragged As List(Of DraggedEntry))
+        If Data.PerformedDropEffect.GetValueOrDefault() <> DragDropEffects.Move Then Return
+        Try
+            BeginInvoke(Sub() CompleteStreamedDragMove(Dragged))
+        Catch
+            ' The form is gone; nothing to remove.
+        End Try
+    End Sub
+
+    Private Sub CompleteStreamedDragMove(Dragged As List(Of DraggedEntry))
         ExecuteLongBlockingActionOnThread(
             Sub()
-                Using Export = CreateTemporaryDirectoryExport(Info)
-                    Dim Data = New DataObject(DataFormats.FileDrop, Export.Paths)
-                    tvFolders.DoDragDrop(Data, DragDropEffects.Copy)
-                End Using
+                For Each Item In Dragged
+                    Try
+                        _FileSystem.DeleteEntry(Item.ParentAnchorId, Item.Name)
+                    Catch
+                        ' Already gone, or its folder changed since the drag - leave it.
+                    End Try
+                Next
             End Sub,
-            "The selected folder could not be prepared for drag-and-drop.")
+            "The moved items could not all be removed from the embedded file system.")
+
+        If _SearchActive Then RerunSearch() Else RefreshFileSystemView()
     End Sub
 
     Private Function CreateTemporaryFileExport(Entries As IList(Of EmbeddedFileSystem.ContentListEntry)) As DragExport
@@ -1986,6 +2754,17 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Return
         End If
 
+        If EventArgs.KeyCode = Keys.F2 Then
+            If tvFolders.Focused AndAlso tvFolders.SelectedNode IsNot Nothing Then
+                RenameSelectedFolder(Me, EventArgs)
+                EventArgs.Handled = True
+            ElseIf lvFiles.Focused AndAlso lvFiles.SelectedItems.Count = 1 AndAlso _SearchActive = False Then
+                RenameSelectedListEntry(Me, EventArgs)
+                EventArgs.Handled = True
+            End If
+            Return
+        End If
+
         If EventArgs.KeyCode = Keys.Delete Then
             If lvFiles.Focused AndAlso lvFiles.SelectedItems.Count > 0 Then
                 DeleteSelectedEntries(Me, EventArgs)
@@ -2001,8 +2780,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         ExecuteLongBlockingActionOnThread(Sub(Report) Operation(), ErrorMessage)
     End Sub
 
-    Private Sub ExecuteLongBlockingActionOnThread(Operation As Action(Of i00CodeLib.frmProgress.ProgressReport), ErrorMessage As String)
-        Using ProgressForm As New i00CodeLib.frmProgress(
+    Private Sub ExecuteLongBlockingActionOnThread(Operation As Action(Of frmProgress.ProgressReport), ErrorMessage As String)
+        Using ProgressForm As New frmProgress(
                 Sub(Parameter, ProgressReport)
                     Try
                         Operation(ProgressReport)
@@ -2110,7 +2889,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub tsiScan_Click(sender As Object, e As EventArgs) Handles tsiScan.Click
-        Using frmProgress As New i00CodeLib.frmProgress(
+        Using frmProgress As New frmProgress(
                 Sub(Parameter, ProgressReport)
                     ProgressReport.SetText("Scanning Files...")
 
@@ -2129,7 +2908,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                         ValidationException = ex
                     End Try
                     Dim Icon = If(ValidationException Is Nothing, MsgBoxStyle.Information, MsgBoxStyle.Critical)
-                    i00CodeLib.MsgBox(ProgressReport.frmProgress, $"Partial Files Removed: {Removed}{Environment.NewLine}Validation: {If(ValidationException Is Nothing, "Pass", $"{ValidationException.GetType.Name}: {ValidationException.Message}")}", Icon)
+                    MsgBox(ProgressReport.frmProgress, $"Partial Files Removed: {Removed}{Environment.NewLine}Validation: {If(ValidationException Is Nothing, "Pass", $"{ValidationException.GetType.Name}: {ValidationException.Message}")}", Icon)
                 End Sub, Nothing)
 
             frmProgress.ShowInTaskbar = True
@@ -2146,7 +2925,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub Defrag()
-        Using frmProgress As New i00CodeLib.frmProgress(
+        Using frmProgress As New frmProgress(
                 Sub(Parameter, ProgressReport)
                     ProgressReport.SetText("Defragmenting...")
 
@@ -2172,9 +2951,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
                             Dim CurrentTime = Now()
                             Dim Done = ProcessedUnits = TotalUnits
-                            If CurrentTime.Subtract(LastUpdate).TotalMilliseconds >= 250 OrElse Done Then
-                                Dim S = FileSystem.ChunkedStream.GetStructure()
+                            If CurrentTime.Subtract(LastUpdate).TotalSeconds >= 2.5 OrElse Done Then
                                 LastUpdate = CurrentTime
+                                Dim S = FileSystem.ChunkedStream.GetStructure()
                                 pnlDefrag.BackgroundImage = S.GenerateFragmentationBitmap(pnlDefrag.ClientSize.Width, 1)
                             End If
                         End Sub)
@@ -2185,7 +2964,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                     'Next
                     'Dim Hc = Struct.Regions.Where(Function(x) x.RegionType = ChunkedStreamStructure.RegionTypes.Hole).Count
 
-                    i00CodeLib.MsgBox(ProgressReport.frmProgress, $"Saved: {Saved.FormatFileSizeFromBytes}{Environment.NewLine}Fragmentation: {OldFragmentation:P0} > {FileSystem.ChunkedStream.GetFragmentation():P0}", MsgBoxStyle.Information)
+                    MsgBox(ProgressReport.frmProgress, $"Saved: {Saved.FormatFileSizeFromBytes}{Environment.NewLine}Fragmentation: {OldFragmentation:P0} > {FileSystem.ChunkedStream.GetFragmentation():P0}", MsgBoxStyle.Information)
                 End Sub, Nothing)
 
             frmProgress.ShowInTaskbar = True
@@ -2194,5 +2973,13 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Using
 
         RefreshFileSystemView()
+    End Sub
+
+    Private Sub EmbeddedFileSystemBrowserForm_Load(sender As Object, e As EventArgs) Handles Me.Load
+        Dim tsam As New ToolStripAsMenu(tsMain)
+    End Sub
+
+    Private Sub tsiSearch_Click(sender As Object, e As EventArgs) Handles tsiSearch.Click
+
     End Sub
 End Class
