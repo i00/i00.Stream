@@ -869,6 +869,12 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     ''' PendingFile, and the result is cached by anchor ID for the session.
     ''' </summary>
     Private Sub RequestExecutableIcon(Entry As EmbeddedFileSystem.ContentListEntry)
+        ' Don't start a load the form can't finish. The read is fast, so a load queued during
+        ' construction / early Load can complete before the window handle exists; LoadExecutableIcon
+        ' then discards the result (IsHandleCreated = False) but the anchor stays marked "pending"
+        ' forever in BeginExecutableLoad, so it is never retried. A later paint - once the handle
+        ' exists - requests it normally.
+        If IsHandleCreated = False Then Return
         If _IconProvider.BeginExecutableLoad(Entry.ChildAnchorId) = False Then Return
         Dim RequestedEntry = Entry
         System.Threading.ThreadPool.QueueUserWorkItem(Sub() LoadExecutableIcon(RequestedEntry))
@@ -1925,6 +1931,10 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim Cached As Bitmap = Nothing
         If _ThumbnailCache.TryGetValue(AnchorId, Cached) Then Return Cached
         If _ThumbnailUnavailable.Contains(AnchorId) OrElse _ThumbnailPending.Contains(AnchorId) Then Return Nothing
+
+        ' See RequestExecutableIcon: GenerateThumbnail discards its result and leaves the anchor
+        ' pending if the handle is not up yet, so don't queue it before then.
+        If IsHandleCreated = False Then Return Nothing
 
         _ThumbnailPending.Add(AnchorId)
         Dim Generation = _ThumbnailGeneration

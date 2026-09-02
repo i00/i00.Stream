@@ -15,13 +15,13 @@ Friend NotInheritable Class EmbeddedFileReadStream
     Private Const FileDataOffset As Integer = 16
 
     Private ReadOnly _Chunked As ChunkedStream
-    Private ReadOnly _BaseOffset As Long
+    Private ReadOnly _Anchor As ChunkedStream.Anchor
     Private ReadOnly _Length As Long
     Private _Position As Long
 
-    Private Sub New(Chunked As ChunkedStream, BaseOffset As Long, Length As Long)
+    Private Sub New(Chunked As ChunkedStream, Anchor As ChunkedStream.Anchor, Length As Long)
         _Chunked = Chunked
-        _BaseOffset = BaseOffset
+        _Anchor = Anchor
         _Length = Length
     End Sub
 
@@ -40,12 +40,7 @@ Friend NotInheritable Class EmbeddedFileReadStream
     Public Shared Function TryOpen(FileSystem As EmbeddedFileSystem, FileAnchorId As Long, Length As Long) As EmbeddedFileReadStream
         Dim Anchor As ChunkedStream.Anchor = Nothing
         If FileSystem.ChunkedStream.TryGetAnchor(FileAnchorId, Anchor) = False Then Return Nothing
-        Try
-            Return New EmbeddedFileReadStream(FileSystem.ChunkedStream, Anchor.Offset + FileDataOffset, Length)
-        Catch ex As Collections.Generic.KeyNotFoundException
-            ' The anchor was removed between the lookup and reading its offset.
-            Return Nothing
-        End Try
+        Return New EmbeddedFileReadStream(FileSystem.ChunkedStream, Anchor, Length)
     End Function
 
     Public Overrides ReadOnly Property CanRead As Boolean
@@ -85,7 +80,17 @@ Friend NotInheritable Class EmbeddedFileReadStream
     Public Overrides Function Read(Buffer As Byte(), Offset As Integer, Count As Integer) As Integer
         If _Position >= _Length OrElse Count <= 0 Then Return 0
         Dim ToRead = CInt(Math.Min(CLng(Count), _Length - _Position))
-        Dim BytesRead = _Chunked.Read(_BaseOffset + _Position, Buffer, Offset, ToRead)
+        ' Resolve the anchor's current offset on every read: a concurrent file-system
+        ' mutation can shift the file's logical position while a long read is in flight
+        ' (a large executable's icon load can take seconds), and a cached base offset
+        ' would then read the wrong bytes.
+        Dim BaseOffset As Long
+        Try
+            BaseOffset = _Anchor.Offset + FileDataOffset
+        Catch ex As Collections.Generic.KeyNotFoundException
+            Return 0 ' the anchor was removed
+        End Try
+        Dim BytesRead = _Chunked.Read(BaseOffset + _Position, Buffer, Offset, ToRead)
         _Position += BytesRead
         Return BytesRead
     End Function
