@@ -8,6 +8,7 @@
             Dim Options = New i00.Streams.ChunkedStream.ChunkedStreamOptions() With {
                 .CompressionMethod = i00.Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4
             }
+            '.EncryptionInfo = New i00.Streams.ChunkedStream.EncryptionInfo("HelloWorld", System.Text.Encoding.UTF8.GetBytes("HelloWorld"))
             Using cs = i00.Streams.ChunkedStream.Open(fs, Options)
                 'cs.Defragment(i00.Streams.ChunkedStream.DefragTypes.Rebuild,
                 '              Sub(ProcessedUnits, TotalUnits, UnitType, CancellationToken)

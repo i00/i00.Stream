@@ -230,15 +230,18 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private _SearchGeneration As Integer
     Private _SuppressSearchText As Boolean
     Private _CurrentDirectoryAnchorId As Long
-    Private _ListDragStart As Point
-    Private _TreeDragStart As Point
-    Private _ListDragArmed As Boolean
-    Private _TreeDragArmed As Boolean
     Private _Disposed As Boolean
     Private _ThumbnailGeneration As Integer
     Private _ThumbnailCacheAnchorId As Long
     Private _ThumbnailCellSize As Integer
     Private _EditingListItemIndex As Integer = -1
+
+    ''' <summary>
+    ''' Set immediately before a deliberate <c>BeginEdit</c> (F2, the Rename item, or a new folder). Any
+    ''' label edit the tree or list tries to start on its own - the slow second click on a selected item -
+    ''' is refused so it can never swallow a drag or a right-click.
+    ''' </summary>
+    Private _LabelEditRequested As Boolean
 
 
     Public Sub New(FileSystem As EmbeddedFileSystem)
@@ -253,6 +256,10 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         tvFolders.LabelEdit = True
         lvFiles.ListViewItemSorter = _ListSorter
         lvFiles.LabelEdit = True
+
+        ' The menus (defined in the designer) are shown explicitly from the MouseDown handlers.
+        lvFiles.ContextMenuStrip = Nothing
+        tvFolders.ContextMenuStrip = Nothing
 
         Try
             SetWindowTheme(tvFolders.Handle, "Explorer", Nothing)
@@ -580,7 +587,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     ''' Starts a new folder in the current directory as an uncommitted tree node whose name is typed in
     ''' place. Pressing Escape (or leaving it blank) drops the node; a name creates the folder for real.
     ''' </summary>
-    Private Sub BeginNewFolderInline(Sender As Object, EventArgs As EventArgs)
+    Private Sub BeginNewFolderInline(Sender As Object, EventArgs As EventArgs) Handles tsiNewFolder.Click, tsiFolderNewFolder.Click
         If _SearchActive Then Return
         Dim ParentAnchorId = _CurrentDirectoryAnchorId
         If ParentAnchorId <= 0 Then Return
@@ -614,15 +621,20 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         NewNode.BeginEdit()
     End Sub
 
-    Private Sub RenameSelectedFolder(Sender As Object, EventArgs As EventArgs)
+    Private Sub RenameSelectedFolder(Sender As Object, EventArgs As EventArgs) Handles tsiFolderRename.Click
         If tvFolders.SelectedNode Is Nothing Then Return
         tvFolders.Focus()
+        _LabelEditRequested = True
         tvFolders.SelectedNode.BeginEdit()
     End Sub
 
     Private Sub tvFolders_BeforeLabelEdit(Sender As Object, EventArgs As NodeLabelEditEventArgs) Handles tvFolders.BeforeLabelEdit
+        Dim WasRequested = _LabelEditRequested
+        _LabelEditRequested = False
+
         Dim Info = TryCast(EventArgs.Node.Tag, DirectoryNodeInfo)
-        If Info Is Nothing OrElse (Info.IsUncommitted = False AndAlso Info.AnchorId = _FileSystem.RootAnchorId) Then
+        If WasRequested = False OrElse Info Is Nothing OrElse
+           (Info.IsUncommitted = False AndAlso Info.AnchorId = _FileSystem.RootAnchorId) Then
             EventArgs.CancelEdit = True
         End If
     End Sub
@@ -738,7 +750,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
     ' ---- File list label editing -------------------------------------------------------------------
 
-    Private Sub RenameSelectedListEntry(Sender As Object, EventArgs As EventArgs)
+    Private Sub RenameSelectedListEntry(Sender As Object, EventArgs As EventArgs) Handles tsiRename.Click
         If lvFiles.SelectedItems.Count <> 1 Then Return
         lvFiles.Select()
         lvFiles.SelectedItems(0).BeginEdit()
@@ -1460,7 +1472,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End If
     End Sub
 
-    Private Sub OpenContainingFolder(Sender As Object, EventArgs As EventArgs)
+    Private Sub OpenContainingFolder(Sender As Object, EventArgs As EventArgs) Handles tsiOpenContainingFolder.Click
         If lvFiles.SelectedItems.Count <> 1 Then Return
         Dim Hit As SearchHit = Nothing
         If _SearchItemInfo.TryGetValue(lvFiles.SelectedItems(0), Hit) = False Then Return
@@ -1482,12 +1494,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Next
     End Sub
 
-    Private Sub tvFolders_NodeMouseClick(Sender As Object, EventArgs As TreeNodeMouseClickEventArgs) Handles tvFolders.NodeMouseClick
-        If EventArgs.Button = MouseButtons.Right Then tvFolders.SelectedNode = EventArgs.Node
-    End Sub
-
     Private Sub lvFiles_SelectedIndexChanged(Sender As Object, EventArgs As EventArgs) Handles lvFiles.SelectedIndexChanged
-        lvFiles.ContextMenuStrip = If(lvFiles.SelectedItems.Count > 0, _FileContextMenu, _EmptyFileContextMenu)
         UpdateStatus()
     End Sub
 
@@ -1513,106 +1520,128 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         lvFiles.Sort()
     End Sub
 
-    Private Sub FolderContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs) Handles _FolderContextMenu.Opening
-        _FolderContextMenu.Items.Clear()
+    ' ===================================================================================================
+    ' Context menus - built once so a menu is never momentarily empty (an empty ContextMenuStrip refuses
+    ' to open at all, even for the gesture that emptied it), then shown with only the relevant items.
+    ' ===================================================================================================
+
+    Private Sub FileMenu_Open(Sender As Object, EventArgs As EventArgs) Handles tsiOpen.Click
+        Dim Entries = GetSelectedEntries()
+        If Entries.Count = 1 AndAlso IsDirectory(Entries(0)) Then NavigateToDirectory(Entries(0).ChildAnchorId)
+    End Sub
+
+    Private Sub MiViewXlThumb_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewXlThumb.Click
+        SelectFileListView(View.LargeIcon, 256)
+    End Sub
+
+    Private Sub MiViewLgThumb_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewLgThumb.Click
+        SelectFileListView(View.LargeIcon, 128)
+    End Sub
+
+    Private Sub MiViewLgIcon_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewLgIcon.Click
+        SelectFileListView(View.LargeIcon, 0)
+    End Sub
+
+    Private Sub MiViewSmIcon_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewSmIcon.Click
+        SelectFileListView(View.SmallIcon, 0)
+    End Sub
+
+    Private Sub MiViewList_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewList.Click
+        SelectFileListView(View.List, 0)
+    End Sub
+
+    Private Sub MiViewDetails_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewDetails.Click
+        SelectFileListView(View.Details, 0)
+    End Sub
+
+    Private Sub MiViewTiles_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewTiles.Click
+        SelectFileListView(View.Tile, 0)
+    End Sub
+
+    Private Sub FileContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs) Handles FileContextMenu.Opening
+        Dim Entries = GetSelectedEntries()
+        Dim One = Entries.Count = 1
+        Dim OneDir = One AndAlso IsDirectory(Entries(0))
+        Dim Any = Entries.Count > 0
+
+        tsiOpen.Available = OneDir
+        tsiOpenContainingFolder.Available = _SearchActive AndAlso One
+        tsiSaveAs.Available = Any
+        tsiSaveAs.Text = If(OneDir, "Save Folder As...", If(One, "Save As...", "Save Selected To Folder..."))
+        tsiRename.Available = One AndAlso _SearchActive = False
+        tsiDelete.Available = Any
+        tsiUploadFiles.Available = _SearchActive = False
+        tsiUploadFolder.Available = _SearchActive = False
+        tsiNewFolder.Available = _SearchActive = False
+        tsiRefresh.Available = True
+        tsiView.Available = True
+        UpdateViewMenuChecks()
+
+        TidySeparators(FileContextMenu)
+    End Sub
+
+    Private Sub FolderContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs) Handles FolderContextMenu.Opening
         If tvFolders.SelectedNode Is Nothing Then
             EventArgs.Cancel = True
             Return
         End If
-
         Dim IsRoot = GetSelectedDirectoryAnchorId() = _FileSystem.RootAnchorId
 
-        AddMenuItem(_FolderContextMenu, "Open", AddressOf OpenSelectedDirectory)
-        _FolderContextMenu.Items.Add(New ToolStripSeparator())
-        AddMenuItem(_FolderContextMenu, "Upload File(s)...", AddressOf UploadFilesFromDialog)
-        AddMenuItem(_FolderContextMenu, "Upload Folder...", AddressOf UploadFolderFromDialog)
-        AddMenuItem(_FolderContextMenu, "New Folder", AddressOf BeginNewFolderInline)
-        _FolderContextMenu.Items.Add(New ToolStripSeparator())
-        AddMenuItem(_FolderContextMenu, "Save Folder As...", AddressOf SaveSelectedFolder)
+        tsiFolderOpen.Available = True
+        tsiFolderUploadFiles.Available = True
+        tsiFolderUploadFolder.Available = True
+        tsiFolderNewFolder.Available = True
+        tsiSaveFolderAs.Available = True
+        tsiFolderRename.Available = IsRoot = False
+        tsiDeleteFolder.Available = IsRoot = False
+        tsiFolderRefresh.Available = True
 
-        If IsRoot = False Then
-            _FolderContextMenu.Items.Add(New ToolStripSeparator())
-            AddMenuItem(_FolderContextMenu, "Rename", AddressOf RenameSelectedFolder)
-            AddMenuItem(_FolderContextMenu, "Delete Folder", AddressOf DeleteSelectedFolder)
-        End If
-
-        _FolderContextMenu.Items.Add(New ToolStripSeparator())
-        AddMenuItem(_FolderContextMenu, "Refresh", AddressOf RefreshMenuItem_Click)
+        TidySeparators(FolderContextMenu)
     End Sub
 
-    Private Sub FileContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs) Handles _FileContextMenu.Opening
-        _FileContextMenu.Items.Clear()
-        Dim Entries = GetSelectedEntries()
-        If Entries.Count = 0 Then
-            EventArgs.Cancel = True
-            Return
-        End If
+    Private Sub ContextMenu_Closed(Sender As Object, EventArgs As ToolStripDropDownClosedEventArgs) _
+            Handles FileContextMenu.Closed, FolderContextMenu.Closed
+        Dim Menu = TryCast(Sender, ContextMenuStrip)
+        If Menu IsNot Nothing Then MakeAllItemsAvailable(Menu.Items)
+    End Sub
 
-        If _SearchActive Then
-            If lvFiles.SelectedItems.Count = 1 Then
-                AddMenuItem(_FileContextMenu, "Open Folder", AddressOf OpenContainingFolder)
-                If IsDirectory(Entries(0)) Then AddMenuItem(_FileContextMenu, "Open", Sub() NavigateToDirectory(Entries(0).ChildAnchorId))
+    ''' <summary>Restores every item so the menu is never queried while empty on the next gesture.</summary>
+    Private Shared Sub MakeAllItemsAvailable(Items As ToolStripItemCollection)
+        For Each Item As ToolStripItem In Items
+            Item.Available = True
+            Dim Parent = TryCast(Item, ToolStripMenuItem)
+            If Parent IsNot Nothing AndAlso Parent.HasDropDownItems Then MakeAllItemsAvailable(Parent.DropDownItems)
+        Next
+    End Sub
+
+    ''' <summary>Hides leading, trailing and doubled-up separators for the currently visible items.</summary>
+    Private Shared Sub TidySeparators(Menu As ContextMenuStrip)
+        Dim PreviousWasContent = False
+        Dim LastSeparator As ToolStripSeparator = Nothing
+        For Each Item As ToolStripItem In Menu.Items
+            Dim Separator = TryCast(Item, ToolStripSeparator)
+            If Separator IsNot Nothing Then
+                Separator.Available = PreviousWasContent
+                If Separator.Available Then
+                    LastSeparator = Separator
+                    PreviousWasContent = False
+                End If
+            ElseIf Item.Available Then
+                PreviousWasContent = True
+                LastSeparator = Nothing
             End If
-            If Entries.Count = 1 AndAlso IsDirectory(Entries(0)) Then
-                AddMenuItem(_FileContextMenu, "Save Folder As...", AddressOf SaveSelectedEntries)
-            ElseIf Entries.Count = 1 Then
-                AddMenuItem(_FileContextMenu, "Save As...", AddressOf SaveSelectedEntries)
-            Else
-                AddMenuItem(_FileContextMenu, "Save Selected To Folder...", AddressOf SaveSelectedEntries)
-            End If
-            AddMenuItem(_FileContextMenu, "Delete", AddressOf DeleteSelectedEntries)
-            _FileContextMenu.Items.Add(New ToolStripSeparator())
-            AddViewMenu(_FileContextMenu)
-            Return
-        End If
-
-        If Entries.Count = 1 AndAlso IsDirectory(Entries(0)) Then
-            AddMenuItem(_FileContextMenu, "Open", Sub() NavigateToDirectory(Entries(0).ChildAnchorId))
-            AddMenuItem(_FileContextMenu, "Save Folder As...", AddressOf SaveSelectedEntries)
-        ElseIf Entries.Count = 1 Then
-            AddMenuItem(_FileContextMenu, "Save As...", AddressOf SaveSelectedEntries)
-        Else
-            AddMenuItem(_FileContextMenu, "Save Selected To Folder...", AddressOf SaveSelectedEntries)
-        End If
-        If lvFiles.SelectedItems.Count = 1 Then AddMenuItem(_FileContextMenu, "Rename", AddressOf RenameSelectedListEntry)
-        AddMenuItem(_FileContextMenu, "Delete", AddressOf DeleteSelectedEntries)
-        _FileContextMenu.Items.Add(New ToolStripSeparator())
-        AddMenuItem(_FileContextMenu, "Upload File(s)...", AddressOf UploadFilesFromDialog)
-        AddMenuItem(_FileContextMenu, "New Folder", AddressOf BeginNewFolderInline)
-        _FileContextMenu.Items.Add(New ToolStripSeparator())
-        AddViewMenu(_FileContextMenu)
-        AddMenuItem(_FileContextMenu, "Refresh", AddressOf RefreshMenuItem_Click)
+        Next
+        If LastSeparator IsNot Nothing Then LastSeparator.Available = False
     End Sub
 
-    Private Sub EmptyFileContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs) Handles _EmptyFileContextMenu.Opening
-        _EmptyFileContextMenu.Items.Clear()
-        AddViewMenu(_EmptyFileContextMenu)
-        _EmptyFileContextMenu.Items.Add(New ToolStripSeparator())
-        AddMenuItem(_EmptyFileContextMenu, "Upload File(s)...", AddressOf UploadFilesFromDialog)
-        AddMenuItem(_EmptyFileContextMenu, "Upload Folder...", AddressOf UploadFolderFromDialog)
-        AddMenuItem(_EmptyFileContextMenu, "New Folder", AddressOf BeginNewFolderInline)
-        _EmptyFileContextMenu.Items.Add(New ToolStripSeparator())
-        AddMenuItem(_EmptyFileContextMenu, "Refresh", AddressOf RefreshMenuItem_Click)
-    End Sub
-
-    Private Sub AddViewMenu(Menu As ContextMenuStrip)
-        Dim ViewMenu = New ToolStripMenuItem("View")
-        AddViewOption(ViewMenu, "Extra Large Thumbnails", View.LargeIcon, 256)
-        AddViewOption(ViewMenu, "Large Thumbnails", View.LargeIcon, 128)
-        AddViewOption(ViewMenu, "Large Icons", View.LargeIcon, 0)
-        AddViewOption(ViewMenu, "Small Icons", View.SmallIcon, 0)
-        AddViewOption(ViewMenu, "List", View.List, 0)
-        AddViewOption(ViewMenu, "Details", View.Details, 0)
-        AddViewOption(ViewMenu, "Tiles", View.Tile, 0)
-        Menu.Items.Add(ViewMenu)
-    End Sub
-
-    Private Sub AddViewOption(ViewMenu As ToolStripMenuItem, Text As String, TargetView As View, ThumbnailCellSize As Integer)
-        Dim IsCurrent = _ThumbnailCellSize = ThumbnailCellSize AndAlso
-                        (ThumbnailCellSize <> 0 OrElse lvFiles.View = TargetView)
-        Dim Item = New ToolStripMenuItem(Text) With {.Checked = IsCurrent}
-        AddHandler Item.Click, Sub() SelectFileListView(TargetView, ThumbnailCellSize)
-        ViewMenu.DropDownItems.Add(Item)
+    Private Sub UpdateViewMenuChecks()
+        tsiViewXlThumb.Checked = _ThumbnailCellSize = 256
+        tsiViewLgThumb.Checked = _ThumbnailCellSize = 128
+        tsiViewLgIcon.Checked = _ThumbnailCellSize = 0 AndAlso lvFiles.View = View.LargeIcon
+        tsiViewSmIcon.Checked = _ThumbnailCellSize = 0 AndAlso lvFiles.View = View.SmallIcon
+        tsiViewList.Checked = _ThumbnailCellSize = 0 AndAlso lvFiles.View = View.List
+        tsiViewDetails.Checked = _ThumbnailCellSize = 0 AndAlso lvFiles.View = View.Details
+        tsiViewTiles.Checked = _ThumbnailCellSize = 0 AndAlso lvFiles.View = View.Tile
     End Sub
 
     ''' <summary>
@@ -1680,11 +1709,11 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         lvFiles.BeginUpdate()
         Try
             If ThumbnailCellSize >= 256 Then
-                lvFiles.LargeImageList = _Thumbnail256Sizer
+                lvFiles.LargeImageList = Thumbnail256Sizer
             ElseIf ThumbnailCellSize > 0 Then
-                lvFiles.LargeImageList = _Thumbnail128Sizer
+                lvFiles.LargeImageList = Thumbnail128Sizer
             Else
-                lvFiles.LargeImageList = _Large32Sizer
+                lvFiles.LargeImageList = Large32Sizer
             End If
             lvFiles.View = If(ThumbnailCellSize > 0, View.LargeIcon, TargetView)
         Finally
@@ -1711,8 +1740,6 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private Sub lvFiles_DrawItem(Sender As Object, EventArgs As DrawListViewItemEventArgs) Handles lvFiles.DrawItem
         ' In Details view every column is painted by DrawSubItem instead.
         If lvFiles.View = View.Details Then Return
-
-        Debug.Print($"{Now.Second}")
 
         If _ThumbnailCellSize <> 0 Then
             DrawThumbnailItem(EventArgs)
@@ -2003,19 +2030,13 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         _ThumbnailUnavailable.Clear()
     End Sub
 
-    Private Shared Sub AddMenuItem(Menu As ContextMenuStrip, Text As String, ClickHandler As EventHandler)
-        Dim Item = New ToolStripMenuItem(Text)
-        AddHandler Item.Click, ClickHandler
-        Menu.Items.Add(Item)
-    End Sub
-
-    Private Sub OpenSelectedDirectory(Sender As Object, EventArgs As EventArgs)
+    Private Sub OpenSelectedDirectory(Sender As Object, EventArgs As EventArgs) Handles tsiFolderOpen.Click
         If tvFolders.SelectedNode Is Nothing Then Return
         tvFolders.SelectedNode.Expand()
         SetAddressText(BuildNodePath(tvFolders.SelectedNode))
     End Sub
 
-    Private Sub UploadFilesFromDialog(Sender As Object, EventArgs As EventArgs)
+    Private Sub UploadFilesFromDialog(Sender As Object, EventArgs As EventArgs) Handles tsiUploadFiles.Click, tsiFolderUploadFiles.Click
         Using Dialog As New OpenFileDialog With {
             .Title = "Upload files",
             .Filter = "All files (*.*)|*.*",
@@ -2027,7 +2048,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Using
     End Sub
 
-    Private Sub UploadFolderFromDialog(Sender As Object, EventArgs As EventArgs)
+    Private Sub UploadFolderFromDialog(Sender As Object, EventArgs As EventArgs) Handles tsiUploadFolder.Click, tsiFolderUploadFolder.Click
         Using Dialog As New FolderBrowserDialog With {.Description = "Select a folder to upload"}
             If Dialog.ShowDialog(Me) <> DialogResult.OK Then Return
             UploadPaths(New String() {Dialog.SelectedPath}, _CurrentDirectoryAnchorId)
@@ -2270,7 +2291,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Return Choice
     End Function
 
-    Private Sub SaveSelectedEntries(Sender As Object, EventArgs As EventArgs)
+    Private Sub SaveSelectedEntries(Sender As Object, EventArgs As EventArgs) Handles tsiSaveAs.Click
         Dim Entries = GetSelectedEntries()
         If Entries.Count = 0 Then Return
 
@@ -2307,7 +2328,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Using
     End Sub
 
-    Private Sub SaveSelectedFolder(Sender As Object, EventArgs As EventArgs)
+    Private Sub SaveSelectedFolder(Sender As Object, EventArgs As EventArgs) Handles tsiSaveFolderAs.Click
         Dim SelectedNode = tvFolders.SelectedNode
         If SelectedNode Is Nothing Then Return
         Dim Info = TryCast(SelectedNode.Tag, DirectoryNodeInfo)
@@ -2361,7 +2382,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Return Result
     End Function
 
-    Private Sub DeleteSelectedEntries(Sender As Object, EventArgs As EventArgs)
+    Private Sub DeleteSelectedEntries(Sender As Object, EventArgs As EventArgs) Handles tsiDelete.Click
         Dim Entries = GetSelectedEntries()
         If Entries.Count = 0 Then Return
 
@@ -2401,7 +2422,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If _SearchActive Then RerunSearch() Else RefreshFileSystemView()
     End Sub
 
-    Private Sub DeleteSelectedFolder(Sender As Object, EventArgs As EventArgs)
+    Private Sub DeleteSelectedFolder(Sender As Object, EventArgs As EventArgs) Handles tsiDeleteFolder.Click
         Dim SelectedNode = tvFolders.SelectedNode
         If SelectedNode Is Nothing OrElse SelectedNode.Parent Is Nothing Then Return
 
@@ -2425,7 +2446,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         SetAddressText(BuildPathForAnchor(ParentAnchorId))
     End Sub
 
-    Private Sub RefreshMenuItem_Click(Sender As Object, EventArgs As EventArgs)
+    Private Sub RefreshMenuItem_Click(Sender As Object, EventArgs As EventArgs) Handles tsiRefresh.Click, tsiFolderRefresh.Click
         If _SearchActive Then RerunSearch() Else RefreshFileSystemView()
     End Sub
 
@@ -2478,55 +2499,54 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         BeginInvoke(Sub() UploadPaths(DroppedPaths, TargetDirectoryAnchorId))
     End Sub
 
+    ' On right-click the menu is shown explicitly (a ContextMenuStrip that opens itself can be beaten by a
+    ' still-empty menu); dragging goes through the ItemDrag event, which fires after the control has done
+    ' its own selection so "nothing selected yet" is no longer a problem.
+
     Private Sub lvFiles_MouseDown(Sender As Object, EventArgs As MouseEventArgs) Handles lvFiles.MouseDown
-        _ListDragStart = EventArgs.Location
-        _ListDragArmed = EventArgs.Button = MouseButtons.Left AndAlso lvFiles.SelectedItems.Count > 0
+        If EventArgs.Button <> MouseButtons.Right Then Return
+
+        Dim HitItem = lvFiles.GetItemAt(EventArgs.X, EventArgs.Y)
+        If HitItem IsNot Nothing Then
+            If HitItem.Selected = False Then
+                lvFiles.SelectedItems.Clear()
+                HitItem.Selected = True
+                HitItem.Focused = True
+            End If
+        Else
+            lvFiles.SelectedItems.Clear()
+        End If
+        FileContextMenu.Show(lvFiles, EventArgs.Location)
     End Sub
 
-    Private Sub lvFiles_MouseMove(Sender As Object, EventArgs As MouseEventArgs) Handles lvFiles.MouseMove
-        If _ListDragArmed = False OrElse EventArgs.Button <> MouseButtons.Left Then Return
-        If IsDragThresholdExceeded(_ListDragStart, EventArgs.Location) = False Then Return
-        _ListDragArmed = False
-
+    Private Sub lvFiles_ItemDrag(Sender As Object, EventArgs As ItemDragEventArgs) Handles lvFiles.ItemDrag
+        If EventArgs.Button <> MouseButtons.Left Then Return
+        Dim Item = TryCast(EventArgs.Item, ListViewItem)
+        If Item IsNot Nothing AndAlso Item.Selected = False Then
+            lvFiles.SelectedItems.Clear()
+            Item.Selected = True
+        End If
         Dim Entries = GetSelectedEntries()
         If Entries.Count = 0 Then Return
         BeginExternalFileDrag(Entries)
     End Sub
 
-    Private Sub lvFiles_MouseUp(Sender As Object, EventArgs As MouseEventArgs) Handles lvFiles.MouseUp
-        _ListDragArmed = False
-    End Sub
-
     Private Sub tvFolders_MouseDown(Sender As Object, EventArgs As MouseEventArgs) Handles tvFolders.MouseDown
-        _TreeDragStart = EventArgs.Location
-        _TreeDragArmed = EventArgs.Button = MouseButtons.Left AndAlso tvFolders.GetNodeAt(EventArgs.Location) IsNot Nothing
-    End Sub
-
-    Private Sub tvFolders_MouseMove(Sender As Object, EventArgs As MouseEventArgs) Handles tvFolders.MouseMove
-        If _TreeDragArmed = False OrElse EventArgs.Button <> MouseButtons.Left Then Return
-        If IsDragThresholdExceeded(_TreeDragStart, EventArgs.Location) = False Then Return
-        _TreeDragArmed = False
-
-        Dim Node = tvFolders.GetNodeAt(_TreeDragStart)
+        If EventArgs.Button <> MouseButtons.Right Then Return
+        Dim Node = tvFolders.GetNodeAt(EventArgs.Location)
         If Node Is Nothing Then Return
         tvFolders.SelectedNode = Node
-        Dim Info = TryCast(Node.Tag, DirectoryNodeInfo)
+        FolderContextMenu.Show(tvFolders, EventArgs.Location)
+    End Sub
+
+    Private Sub tvFolders_ItemDrag(Sender As Object, EventArgs As ItemDragEventArgs) Handles tvFolders.ItemDrag
+        If EventArgs.Button <> MouseButtons.Left Then Return
+        Dim Node = TryCast(EventArgs.Item, TreeNode)
+        Dim Info = TryCast(Node?.Tag, DirectoryNodeInfo)
         If Info Is Nothing Then Return
+        tvFolders.SelectedNode = Node
         BeginExternalDirectoryDrag(Info)
     End Sub
-
-    Private Sub tvFolders_MouseUp(Sender As Object, EventArgs As MouseEventArgs) Handles tvFolders.MouseUp
-        _TreeDragArmed = False
-    End Sub
-
-    Private Shared Function IsDragThresholdExceeded(StartPoint As Point, CurrentPoint As Point) As Boolean
-        Dim DragSize = SystemInformation.DragSize
-        Dim DragRectangle = New Rectangle(StartPoint.X - (DragSize.Width \ 2),
-                                          StartPoint.Y - (DragSize.Height \ 2),
-                                          DragSize.Width,
-                                          DragSize.Height)
-        Return DragRectangle.Contains(CurrentPoint) = False
-    End Function
 
     ''' <summary>One file or folder being dragged out, plus what a Move needs in order to delete it.</summary>
     Private NotInheritable Class DraggedEntry
