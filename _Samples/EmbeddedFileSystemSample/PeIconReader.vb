@@ -23,12 +23,24 @@ Friend NotInheritable Class PeIconReader
         Public ReadOnly Property Images As Dictionary(Of Integer, Byte())
     End Class
 
-    Private ReadOnly _Resource As Byte()
-    Private ReadOnly _ResourceRva As UInteger
+    ''' <summary>Just enough of a section header to map a resource RVA back to a file offset.</summary>
+    Private Structure SectionSpan
+        Public VirtualAddress As UInteger
+        Public VirtualSize As UInteger
+        Public RawPointer As UInteger
+        Public RawSize As UInteger
+    End Structure
 
-    Private Sub New(Resource As Byte(), ResourceRva As UInteger)
+    Private ReadOnly _Resource As Byte()
+    Private ReadOnly _Content As Stream
+    Private ReadOnly _ContentLength As Long
+    Private ReadOnly _Sections As List(Of SectionSpan)
+
+    Private Sub New(Resource As Byte(), Content As Stream, ContentLength As Long, Sections As List(Of SectionSpan))
         _Resource = Resource
-        _ResourceRva = ResourceRva
+        _Content = Content
+        _ContentLength = ContentLength
+        _Sections = Sections
     End Sub
 
     ''' <summary>
@@ -68,19 +80,28 @@ Friend NotInheritable Class PeIconReader
             Dim ResourceSize = ReadUInt32(Headers, ResourceDirectoryEntryOffset + 4)
             If ResourceRva = 0UI OrElse ResourceSize = 0UI Then Return Nothing
 
+            Dim Sections As New List(Of SectionSpan)(SectionCount)
             For Index = 0 To SectionCount - 1
                 Dim SectionOffset = SectionTableOffset + (Index * 40)
-                Dim VirtualAddress = ReadUInt32(Headers, SectionOffset + 12)
-                Dim VirtualSize = ReadUInt32(Headers, SectionOffset + 8)
-                Dim RawPointer = ReadUInt32(Headers, SectionOffset + 20)
-                Dim RawSize = ReadUInt32(Headers, SectionOffset + 16)
-                Dim SectionSpan = Math.Max(VirtualSize, RawSize)
-                If ResourceRva < VirtualAddress OrElse CLng(ResourceRva) >= CLng(VirtualAddress) + SectionSpan Then Continue For
+                Sections.Add(New SectionSpan With {
+                    .VirtualSize = ReadUInt32(Headers, SectionOffset + 8),
+                    .VirtualAddress = ReadUInt32(Headers, SectionOffset + 12),
+                    .RawSize = ReadUInt32(Headers, SectionOffset + 16),
+                    .RawPointer = ReadUInt32(Headers, SectionOffset + 20)
+                })
+            Next
 
-                Dim Available = CInt(Math.Min(Math.Min(CLng(RawSize), CLng(MaximumResourceSectionBytes)), Length - RawPointer))
+            ' The resource directory tree itself lives in the section named by the data directory; a
+            ' packed executable (ASPack, ...) keeps the tree there but relocates the leaf data - icons,
+            ' the group directory - into another section, which ReadResourceData resolves per RVA.
+            For Each Section In Sections
+                Dim Span = Math.Max(Section.VirtualSize, Section.RawSize)
+                If ResourceRva < Section.VirtualAddress OrElse CLng(ResourceRva) >= CLng(Section.VirtualAddress) + Span Then Continue For
+
+                Dim Available = CInt(Math.Min(Math.Min(CLng(Section.RawSize), CLng(MaximumResourceSectionBytes)), Length - Section.RawPointer))
                 If Available <= 16 Then Return Nothing
-                Dim Resource = ReadBlock(Content, RawPointer, Available)
-                Return New PeIconReader(Resource, VirtualAddress).ExtractDefaultGroup()
+                Dim Resource = ReadBlock(Content, Section.RawPointer, Available)
+                Return New PeIconReader(Resource, Content, Length, Sections).ExtractDefaultGroup()
             Next
             Return Nothing
         Catch
@@ -152,14 +173,29 @@ Friend NotInheritable Class PeIconReader
 
         Dim DataEntryOffset = CInt(OffsetToData)
         If DataEntryOffset < 0 OrElse DataEntryOffset + 16 > _Resource.Length Then Return Nothing
-        Dim DataRva = ReadUInt32(_Resource, DataEntryOffset)
-        Dim DataSize = CLng(ReadUInt32(_Resource, DataEntryOffset + 4))
-        Dim Start = CLng(DataRva) - CLng(_ResourceRva)
-        If Start < 0 OrElse DataSize <= 0 OrElse Start + DataSize > _Resource.Length Then Return Nothing
+        Return ReadResourceData(ReadUInt32(_Resource, DataEntryOffset), CLng(ReadUInt32(_Resource, DataEntryOffset + 4)))
+    End Function
 
-        Dim Result(CInt(DataSize) - 1) As Byte
-        System.Buffer.BlockCopy(_Resource, CInt(Start), Result, 0, CInt(DataSize))
-        Return Result
+    ''' <summary>
+    ''' Reads a resource leaf's bytes given its RVA, mapping the RVA to a file offset through whichever
+    ''' section actually contains it - not assuming it sits inside the resource directory's own section.
+    ''' </summary>
+    Private Function ReadResourceData(DataRva As UInteger, DataSize As Long) As Byte()
+        If DataSize <= 0 OrElse DataSize > MaximumResourceSectionBytes Then Return Nothing
+
+        For Each Section In _Sections
+            Dim SectionEnd = CLng(Section.VirtualAddress) + Math.Max(Section.VirtualSize, Section.RawSize)
+            If DataRva < Section.VirtualAddress OrElse CLng(DataRva) >= SectionEnd Then Continue For
+
+            Dim Delta = CLng(DataRva) - CLng(Section.VirtualAddress)
+            If Delta >= Section.RawSize Then Return Nothing   ' lives only in the section's uninitialised tail
+            Dim FileOffset = CLng(Section.RawPointer) + Delta
+            If FileOffset < 0 OrElse FileOffset + DataSize > _ContentLength Then Return Nothing
+
+            Dim Result = ReadBlock(_Content, FileOffset, CInt(DataSize))
+            Return If(Result.Length = CInt(DataSize), Result, Nothing)
+        Next
+        Return Nothing
     End Function
 
     Private Shared Function ReadBlock(Content As Stream, Position As Long, Count As Integer) As Byte()
