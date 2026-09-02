@@ -659,7 +659,8 @@ Namespace Streams
                                                        CompressionMethodToUse As ChunkedStreamOptions.CompressionMethods,
                                                        CompressionRatioThreshold As Double,
                                                        ForceCompression As Boolean,
-                                                       EncryptionMethod As ChunkEncryptionMethods) As PhysicalRecordEntry
+                                                       EncryptionMethod As ChunkEncryptionMethods,
+                                                       Optional EvaluateFully As Boolean = False) As PhysicalRecordEntry
 
             Return WritePhysicalRecordWithPolicyAsync(Plain,
                                                       PlainLength,
@@ -667,6 +668,7 @@ Namespace Streams
                                                       CompressionRatioThreshold,
                                                       ForceCompression,
                                                       EncryptionMethod,
+                                                      EvaluateFully,
                                                       RunAsync:=False,
                                                       CancellationToken:=Nothing).GetAwaiter().GetResult()
 
@@ -688,17 +690,24 @@ Namespace Streams
                                                       Options.CompressionRatioThreshold,
                                                       False,
                                                       EncryptionMethod,
-                                                      RunAsync,
-                                                      CancellationToken)
+                                                      EvaluateFully:=False,
+                                                      RunAsync:=RunAsync,
+                                                      CancellationToken:=CancellationToken)
 
         End Function
 
+        '
+        ' EvaluateFully forces a full-plaintext compression evaluation even when
+        ' Options.CompressionEvaluation is Sampled - used by ApplyOptions so a chunk it
+        ' rewrites always ends up with an exact, non-estimated evaluation.
+        '
         Private Async Function WritePhysicalRecordWithPolicyAsync(Plain As Byte(),
                                                                   PlainLength As Integer,
                                                                   CompressionMethodToUse As ChunkedStreamOptions.CompressionMethods,
                                                                   CompressionRatioThreshold As Double,
                                                                   ForceCompression As Boolean,
                                                                   EncryptionMethod As ChunkEncryptionMethods,
+                                                                  EvaluateFully As Boolean,
                                                                   RunAsync As Boolean,
                                                                   CancellationToken As Threading.CancellationToken) As Task(Of PhysicalRecordEntry)
 
@@ -713,23 +722,56 @@ Namespace Streams
             Dim StoredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None
             Dim CompressionEvaluatedMethod = ChunkedStreamOptions.CompressionMethods.None
             Dim CompressionEvaluatedPercent As Byte = 100
+            Dim Flags = ChunkFlags.None
 
             If CompressionMethodToUse <> ChunkedStreamOptions.CompressionMethods.None AndAlso PlainLength > 0 Then
 
-                Dim Compressed = CompressPayload(CompressionMethodToUse, Plain, PlainLength)
+                Dim SampledEvaluation =
+                    EvaluateFully = False AndAlso
+                    ForceCompression = False AndAlso
+                    Options.CompressionEvaluation = ChunkedStreamOptions.CompressionEvaluationStates.Sampled AndAlso
+                    PlainLength >= CompressionSampleMinimumChunkBytes
 
-                CompressionEvaluatedMethod = CompressionMethodToUse
-                CompressionEvaluatedPercent =
-                    GetCompressionEvaluatedPercent(PlainLength, Compressed.Length)
+                Dim SkipFullCompression = False
 
-                If ForceCompression OrElse
-                   CompressionEvaluatedPercent / 100.0R <= CompressionRatioThreshold Then
+                If SampledEvaluation Then
 
-                    Payload = Compressed
-                    PayloadLength = Compressed.Length
-                    StoredCompressionMethod = CompressionMethodToUse
+                    Dim SampleLength = Math.Min(PlainLength, CompressionSampleBytes)
+                    Dim SampleCompressed = CompressPayload(CompressionMethodToUse, Plain, SampleLength)
+                    Dim SamplePercent = GetCompressionEvaluatedPercent(SampleLength, SampleCompressed.Length)
 
-                    MarkCompressionFlag(StoredCompressionMethod)
+                    If SamplePercent / 100.0R > CompressionRatioThreshold Then
+                        '
+                        ' The sample failed the threshold, so the full chunk almost certainly
+                        ' would too. Skip the full compression, store the sample estimate and
+                        ' flag the chunk so ApplyOptions re-evaluates it exactly.
+                        '
+                        SkipFullCompression = True
+                        CompressionEvaluatedMethod = CompressionMethodToUse
+                        CompressionEvaluatedPercent = SamplePercent
+                        Flags = Flags Or ChunkFlags.CompressionEstimated
+                    End If
+
+                End If
+
+                If SkipFullCompression = False Then
+
+                    Dim Compressed = CompressPayload(CompressionMethodToUse, Plain, PlainLength)
+
+                    CompressionEvaluatedMethod = CompressionMethodToUse
+                    CompressionEvaluatedPercent =
+                        GetCompressionEvaluatedPercent(PlainLength, Compressed.Length)
+
+                    If ForceCompression OrElse
+                       CompressionEvaluatedPercent / 100.0R <= CompressionRatioThreshold Then
+
+                        Payload = Compressed
+                        PayloadLength = Compressed.Length
+                        StoredCompressionMethod = CompressionMethodToUse
+
+                        MarkCompressionFlag(StoredCompressionMethod)
+
+                    End If
 
                 End If
 
@@ -737,8 +779,6 @@ Namespace Streams
 
             Dim PlaintextAllZero =
                 PlainLength = 0 OrElse IsAllZero(Plain, PlainLength)
-
-            Dim Flags = ChunkFlags.None
 
             If PlaintextAllZero Then
                 Flags = Flags Or ChunkFlags.PlaintextAllZero
@@ -790,8 +830,7 @@ Namespace Streams
                                  0,
                                  PayloadLength,
                                  StoredRecord,
-                                 ChunkRecordDataOffset,
-                                 _ChunkEncryptionKey)
+                                 ChunkRecordDataOffset)
 
                 Case Else
 

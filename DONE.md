@@ -6,6 +6,36 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ## 2026-09-02
 
+### AES-CTR keystream is now batched — DONE
+`CryptPayload` (`Crypto.vb`) used to reassign `Aes.Key`, call `CreateEncryptor()`, and issue
+one 16-byte `TransformBlock` per block (~4096 interop calls per 64 KB chunk), XORing
+byte-by-byte.
+Now: the cached AES-ECB encryptor (`_ChunkCipherTransform`, rebuilt only in
+`DeriveFileMasterKeys` / `RemoveUnusedFileMasterKeyIfPossible`) encrypts a whole buffer of
+successive big-endian counter blocks in one `TransformBlock` into `_CtrKeyStreamScratch`,
+then that is XORed into the output. Byte-for-byte identical keystream, so existing encrypted
+records still decrypt (verified by the encryption round-trip / reopen / migration / defrag
+tests). `_KeyStream` field removed; `_CtrCounterScratch` / `_CtrKeyStreamScratch` grow to the
+largest payload and are reused. `CryptPayload`'s dead `Key` parameter dropped.
+`IncrementCounter` gained a `(Buffer, Offset)` overload.
+
+### `Options.CompressionEvaluation` (Always | Sampled) — DONE
+Previously every chunk with a compression method set was fully compressed even when the
+result lost to `CompressionRatioThreshold` and was discarded — full compression cost for
+incompressible data, for nothing.
+`Sampled` compresses only a leading sample (`CompressionSampleBytes` = 8 KB, chunks
+≥ `CompressionSampleMinimumChunkBytes` = 24 KB only). If the sample fails the threshold the
+full compression is skipped, the chunk is stored as plaintext, its evaluation is recorded as
+the sample estimate, and `ChunkFlags.CompressionEstimated` (new, `1 << 1`) is set. Otherwise
+the full chunk is compressed and evaluated exactly as `Always`.
+`ApplyOptions(Compression)` treats an estimated chunk as always needing a rewrite, and its
+rewrite path (`ReplacePhysicalRecordWithNewRecord` → `WritePhysicalRecordWithPolicy(...,
+EvaluateFully:=True)`) forces a full evaluation, so after ApplyOptions no estimated chunk
+remains and the "chunks can be re-applied from their stored evaluation" property is restored.
+Default is `Always` (unchanged behaviour). Diagnostics expose
+`ChunkedStreamStructure...IsCompressionEvaluationEstimated`.
+Tests: `Storage representation policies/Compression.vb` (+2), suite 269 → 271.
+
 ### Async support — DONE
 `ChunkedStream` gained a full asynchronous API on .NET Framework 4.8 / VB (no new deps).
 

@@ -310,6 +310,51 @@ Namespace Streams
             Public Property CompressionMethod As CompressionMethods = CompressionMethods.None
 
             ''' <summary>
+            ''' How the compression benefit of a newly written chunk is evaluated.
+            ''' </summary>
+            Public Enum CompressionEvaluationStates As Integer
+
+                ''' <summary>
+                ''' Compress the whole chunk plaintext and measure the exact result, even when
+                ''' the compressed payload is then discarded because it does not beat
+                ''' <see cref="CompressionRatioThreshold" />. Every chunk stores an exact
+                ''' evaluation, which <see cref="ChunkedStream.ApplyOptions" /> can rely on
+                ''' without decompressing anything.
+                ''' </summary>
+                Always = 0
+
+                ''' <summary>
+                ''' Compress only a leading sample of the chunk first. If the sample clearly
+                ''' fails <see cref="CompressionRatioThreshold" /> the full compression is
+                ''' skipped, the chunk is stored as plaintext, and its evaluation is recorded
+                ''' as an estimate (<see cref="ChunkedStream.ChunkFlags.CompressionEstimated" />).
+                ''' Otherwise the full chunk is compressed and evaluated exactly as with
+                ''' <see cref="Always" />.
+                '''
+                ''' This avoids paying full compression cost for data that will not compress,
+                ''' at the cost of a small extra sample compression for data that will, and a
+                ''' slightly approximate stored evaluation for the skipped chunks.
+                ''' <see cref="ChunkedStream.ApplyOptions" /> re-evaluates every estimated
+                ''' chunk in full, so running it (with any settings) restores exact
+                ''' evaluations throughout; running it while this is set to <see cref="Always" />
+                ''' guarantees no estimated chunk remains.
+                '''
+                ''' The benefit depends on the codec: LZ4 and Snappy are fast enough that a
+                ''' discarded full compression costs little, so the advantage of Sampled is
+                ''' largest for the slower Deflate and GZip methods.
+                ''' </summary>
+                Sampled = 1
+
+            End Enum
+
+            ''' <summary>
+            ''' How the compression benefit of a newly written chunk is evaluated. Has no
+            ''' effect when <see cref="CompressionMethod" /> is
+            ''' <see cref="CompressionMethods.None" />.
+            ''' </summary>
+            Public Property CompressionEvaluation As CompressionEvaluationStates = CompressionEvaluationStates.Always
+
+            ''' <summary>
             ''' Maximum compressed-size ratio allowed before a chunk is stored compressed.
             ''' </summary>
             ''' <remarks>
@@ -742,6 +787,15 @@ Namespace Streams
 
         Private Function NeedsCompressionRewrite(Header As ChunkHeaderSnapshot) As Boolean
 
+            '
+            ' A sampled evaluation is only an estimate. Always rewrite the chunk so it is
+            ' re-evaluated on the full plaintext (ReplacePhysicalRecordWithNewRecord passes
+            ' EvaluateFully), which also clears the estimated flag.
+            '
+            If Header.ChunkFlags.HasFlag(ChunkFlags.CompressionEstimated) Then
+                Return True
+            End If
+
             Dim DesiredCompressionMethod = Options.CompressionMethod
 
             If DesiredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None Then
@@ -1125,7 +1179,8 @@ Namespace Streams
                                                           CompressionMethod,
                                                           CompressionRatioThreshold,
                                                           ForceCompression,
-                                                          EncryptionMethod)
+                                                          EncryptionMethod,
+                                                          EvaluateFully:=True)
 
             NewRecord.RefCount = OldRecord.RefCount
             _PhysicalRecords(NewRecord.RecordId) = NewRecord

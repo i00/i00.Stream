@@ -433,6 +433,116 @@ Namespace Tests
 
             End Sub
 
+            ' ================================================================================
+            ' Sampled compression evaluation
+            ' ================================================================================
+
+            ''' <summary>
+            ''' With Sampled evaluation, incompressible chunks are stored as plaintext with an
+            ''' estimated evaluation flag, and compressible chunks are still compressed with an
+            ''' exact evaluation. Everything round-trips and survives reopen.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub SampledEvaluationFlagsSkippedChunksAndStillRoundTrips()
+
+                Dim ChunkSize = 64 * 1024
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = ChunkSize,
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                        .CompressionRatioThreshold = 0.8R,
+                        .CompressionEvaluation = ChunkedStream.ChunkedStreamOptions.CompressionEvaluationStates.Sampled
+                    }
+
+                    ' Chunk 0: incompressible. Chunk 1: highly compressible.
+                    Dim Incompressible = GenerateRandomData(ChunkSize, 7100)
+                    Dim Compressible = GeneratePatternData(ChunkSize, 7101)
+                    Dim Expected = CombineArrays(Incompressible, Compressible)
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, Expected)
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Sampled-evaluation stream did not round-trip.")
+
+                        Dim Chunks = Cs.GetStructure().Chunks.ToList()
+
+                        AssertTrue(Chunks(0).IsCompressionEvaluationEstimated, "Incompressible chunk was not flagged as an estimated evaluation.")
+                        AssertEqual(
+                            ChunkedStream.ChunkedStreamOptions.CompressionMethods.None,
+                            Chunks(0).CompressionMethod,
+                            "Incompressible chunk under Sampled evaluation should be stored as plaintext.")
+
+                        AssertTrue(Chunks(1).IsCompressionEvaluationEstimated = False, "Compressible chunk should carry an exact (non-estimated) evaluation.")
+                        AssertEqual(
+                            ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                            Chunks(1).CompressionMethod,
+                            "Compressible chunk should still be stored compressed.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+                        AssertBytesEqual(Expected, Reopened.ToArray(), "Sampled-evaluation data did not survive reopen.")
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' ApplyOptions re-evaluates every estimated chunk in full, so after it runs no
+            ''' chunk carries the estimated flag and the stored representation matches an exact
+            ''' evaluation against the current options.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ApplyOptionsResolvesSampledEstimates()
+
+                Dim ChunkSize = 64 * 1024
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = ChunkSize,
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                        .CompressionRatioThreshold = 0.8R,
+                        .CompressionEvaluation = ChunkedStream.ChunkedStreamOptions.CompressionEvaluationStates.Sampled
+                    }
+
+                    ' A chunk whose leading sample looks incompressible but whose body compresses well:
+                    ' Sampled skips and estimates it, a full evaluation would compress it.
+                    Dim Head = GenerateRandomData(16 * 1024, 7200)
+                    Dim Body = GeneratePatternData(ChunkSize - Head.Length, 7201)
+                    Dim Expected = CombineArrays(Head, Body)
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, Expected)
+                        AssertTrue(Cs.GetStructure().Chunks.Single().IsCompressionEvaluationEstimated, "Expected the chunk to be estimated under Sampled evaluation.")
+
+                        Options.CompressionEvaluation = ChunkedStream.ChunkedStreamOptions.CompressionEvaluationStates.Always
+                        Dim Result = Cs.ApplyOptions(ChunkedStream.ApplyOptionTypes.Compression)
+
+                        Dim Chunk = Cs.GetStructure().Chunks.Single()
+                        AssertTrue(Chunk.IsCompressionEvaluationEstimated = False, "ApplyOptions left the chunk flagged as an estimated evaluation.")
+                        AssertBytesEqual(Expected, Cs.ToArray(), "ApplyOptions changed the logical content of a sampled stream.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+                        AssertBytesEqual(Expected, Reopened.ToArray(), "Data lost after ApplyOptions on a sampled stream.")
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

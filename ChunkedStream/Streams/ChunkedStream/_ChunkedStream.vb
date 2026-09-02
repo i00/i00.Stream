@@ -1226,9 +1226,24 @@ Namespace Streams
         Private _CachedChunkPlain As Byte()
 
         Private ReadOnly _Counter As Byte()
-        Private ReadOnly _KeyStream As Byte()
+
+        '
+        ' AES-CTR keystream scratch. A whole chunk's worth of successive counter blocks is
+        ' built in _CtrCounterScratch and encrypted in one TransformBlock call into
+        ' _CtrKeyStreamScratch, instead of one 16-byte TransformBlock per block. Both grow
+        ' to the largest payload seen and are reused. Serialised by the state lock.
+        '
+        Private _CtrCounterScratch As Byte()
+        Private _CtrKeyStreamScratch As Byte()
 
         Private ReadOnly _AesProvider As Aes
+
+        '
+        ' Cached AES-ECB encryptor keyed with _ChunkEncryptionKey. Rebuilt only when the
+        ' chunk encryption key changes (DeriveFileMasterKeys), not per CryptPayload call.
+        '
+        Private _ChunkCipherTransform As ICryptoTransform
+
         Private ReadOnly _Rng As RandomNumberGenerator
 
         Private _FileMasterKey As Byte()
@@ -1302,17 +1317,37 @@ Namespace Streams
             ''' <summary>
             ''' The logical plaintext represented by the chunk is entirely zero bytes.
             ''' </summary>
-            PlaintextAllZero = 1
+            PlaintextAllZero = 1 << 0
+
+            ''' <summary>
+            ''' The stored compression evaluation is an estimate from a sample of the chunk
+            ''' rather than a measurement of the whole plaintext (see
+            ''' <see cref="ChunkedStreamOptions.CompressionEvaluationStates.Sampled" />).
+            ''' <see cref="ApplyOptions" /> re-evaluates such chunks in full.
+            ''' </summary>
+            CompressionEstimated = 1 << 1
 
         End Enum
 
-        Private Const SupportedChunkFlags As ChunkFlags = ChunkFlags.PlaintextAllZero
+        Private Const SupportedChunkFlags As ChunkFlags = ChunkFlags.PlaintextAllZero Or ChunkFlags.CompressionEstimated
 
         'TODO: get rid of these.. the values would be odvious in place and not change?
         Private Const MinimumCompressionEvaluatedPercent As Integer = 0
         Private Const MaximumCompressionEvaluatedPercent As Integer = 100
         Private Const MinimumCompressionRatioThreshold As Double = 0.0R
         Private Const MaximumCompressionRatioThreshold As Double = 1.0R
+
+        ''' <summary>
+        ''' Sampled compression evaluation: bytes of leading plaintext compressed as a
+        ''' representative sample.
+        ''' </summary>
+        Private Const CompressionSampleBytes As Integer = 8 * 1024
+
+        ''' <summary>
+        ''' Sampled compression evaluation is only used for chunks at least this large; a
+        ''' smaller chunk is barely bigger than the sample, so it is always evaluated in full.
+        ''' </summary>
+        Private Const CompressionSampleMinimumChunkBytes As Integer = CompressionSampleBytes * 3
 
         ''' <summary>
         ''' Gets the logical plaintext length of the stream.
@@ -1419,7 +1454,6 @@ Namespace Streams
             _ChunkPlain = New Byte(_ChunkSize - 1) {}
             _CachedChunkPlain = New Byte(_ChunkSize - 1) {}
             _Counter = New Byte(IvSize - 1) {}
-            _KeyStream = New Byte(15) {}
 
             _AesProvider = Aes.Create()
             _AesProvider.Mode = CipherMode.ECB
@@ -3694,6 +3728,7 @@ Namespace Streams
 
                 _Disposed = True
 
+                If _ChunkCipherTransform IsNot Nothing Then _ChunkCipherTransform.Dispose()
                 _AesProvider.Dispose()
                 _Rng.Dispose()
 

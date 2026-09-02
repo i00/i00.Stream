@@ -1869,6 +1869,17 @@ Namespace Streams
             End Property
 
             ''' <summary>
+            ''' True when <see cref="CompressionEvaluatedPercent" /> is an estimate from a
+            ''' sample rather than a measurement of the whole plaintext (see
+            ''' <see cref="ChunkedStream.ChunkedStreamOptions.CompressionEvaluationStates.Sampled" />).
+            ''' </summary>
+            Public ReadOnly Property IsCompressionEvaluationEstimated As Boolean
+                Get
+                    Return ChunkFlags.HasFlag(ChunkedStream.ChunkFlags.CompressionEstimated)
+                End Get
+            End Property
+
+            ''' <summary>
             ''' Gap before this chunk in physical order, or Nothing for sparse chunks.
             ''' </summary>
             Public ReadOnly Property PreviousPhysicalGap As Long?

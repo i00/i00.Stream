@@ -258,6 +258,7 @@ Namespace Streams
             If _FileMasterKey Is Nothing Then
                 _ChunkEncryptionKey = Nothing
                 _ChunkMacKey = Nothing
+                RebuildChunkCipherTransform()
                 Return
             End If
 
@@ -265,6 +266,27 @@ Namespace Streams
 
             _ChunkEncryptionKey = DeriveKey(_FileMasterKey, FileSalt, KeyPurpose.Enc)
             _ChunkMacKey = DeriveKey(_FileMasterKey, FileSalt, KeyPurpose.Mac)
+
+            RebuildChunkCipherTransform()
+
+        End Sub
+
+        '
+        ' Rebuilds the cached AES-ECB encryptor for the current _ChunkEncryptionKey. Called
+        ' only when the chunk encryption key changes, so CryptPayload never sets Aes.Key or
+        ' allocates a transform per call.
+        '
+        Private Sub RebuildChunkCipherTransform()
+
+            If _ChunkCipherTransform IsNot Nothing Then
+                _ChunkCipherTransform.Dispose()
+                _ChunkCipherTransform = Nothing
+            End If
+
+            If _ChunkEncryptionKey Is Nothing Then Return
+
+            _AesProvider.Key = _ChunkEncryptionKey
+            _ChunkCipherTransform = _AesProvider.CreateEncryptor()
 
         End Sub
 
@@ -378,31 +400,51 @@ Namespace Streams
 
         End Function
 
+        '
+        ' AES-CTR over the cached AES-ECB transform. The keystream for the whole payload is
+        ' produced by one TransformBlock over a buffer of successive big-endian counter
+        ' blocks, then XORed into the output. Byte-for-byte identical to the previous
+        ' per-block implementation, so existing encrypted records still decrypt.
+        '
         Private Sub CryptPayload(Input As Byte(),
                                  InputOffset As Integer,
                                  Count As Integer,
                                  Output As Byte(),
-                                 OutputOffset As Integer,
-                                 Key As Byte())
+                                 OutputOffset As Integer)
 
-            If Key Is Nothing Then Throw New ArgumentNullException(NameOf(Key))
+            If Count <= 0 Then Return
 
-            _AesProvider.Key = Key
+            If _ChunkCipherTransform Is Nothing Then
+                Throw New EncryptionMismatchException("Chunk encryption requested but no file master key is available.")
+            End If
 
-            Using Transform = _AesProvider.CreateEncryptor()
-                For BlockOffset = 0 To Count - 1 Step 16
-                    Transform.TransformBlock(_Counter, 0, 16, _KeyStream, 0)
+            Dim BlockCount = (Count + IvSize - 1) \ IvSize
+            Dim KeyStreamLength = BlockCount * IvSize
 
-                    Dim BytesToProcess = Math.Min(16, Count - BlockOffset)
+            If _CtrKeyStreamScratch Is Nothing OrElse _CtrKeyStreamScratch.Length < KeyStreamLength Then
+                _CtrCounterScratch = New Byte(KeyStreamLength - 1) {}
+                _CtrKeyStreamScratch = New Byte(KeyStreamLength - 1) {}
+            End If
 
-                    For i = 0 To BytesToProcess - 1
-                        Output(OutputOffset + BlockOffset + i) =
-                            CByte(CInt(Input(InputOffset + BlockOffset + i)) Xor CInt(_KeyStream(i)))
-                    Next
+            ' Block 0 is the current counter; each later block is the previous block + 1.
+            Buffer.BlockCopy(_Counter, 0, _CtrCounterScratch, 0, IvSize)
 
-                    IncrementCounter(_Counter)
-                Next
-            End Using
+            For BlockIndex = 1 To BlockCount - 1
+                Buffer.BlockCopy(_CtrCounterScratch, (BlockIndex - 1) * IvSize, _CtrCounterScratch, BlockIndex * IvSize, IvSize)
+                IncrementCounter(_CtrCounterScratch, BlockIndex * IvSize)
+            Next
+
+            _ChunkCipherTransform.TransformBlock(_CtrCounterScratch, 0, KeyStreamLength, _CtrKeyStreamScratch, 0)
+
+            For Index = 0 To Count - 1
+                Output(OutputOffset + Index) =
+                    CByte(Input(InputOffset + Index) Xor _CtrKeyStreamScratch(Index))
+            Next
+
+            ' Leave _Counter advanced by the blocks consumed, as the per-block loop did.
+            For BlockIndex = 0 To BlockCount - 1
+                IncrementCounter(_Counter)
+            Next
 
         End Sub
 
@@ -420,6 +462,7 @@ Namespace Streams
             _FileMasterKey = Nothing
             _ChunkEncryptionKey = Nothing
             _ChunkMacKey = Nothing
+            RebuildChunkCipherTransform()
 
             Array.Clear(_Header, MasterKeyWrapAreaOffset, MasterKeyWrapAreaLength)
 
@@ -558,7 +601,7 @@ Namespace Streams
 
                     Buffer.BlockCopy(Record, ChunkRecordIvOffset, _Counter, 0, IvSize)
 
-                    CryptPayload(Record, ChunkRecordDataOffset, PayloadLength, Payload, 0, _ChunkEncryptionKey)
+                    CryptPayload(Record, ChunkRecordDataOffset, PayloadLength, Payload, 0)
 
                 Case Else
 
@@ -614,10 +657,16 @@ Namespace Streams
 
         Private Shared Sub IncrementCounter(Counter As Byte())
 
-            For Index = Counter.Length - 1 To 0 Step -1
-                Counter(Index) = CByte((CInt(Counter(Index)) + 1) And &HFF)
+            IncrementCounter(Counter, 0)
 
-                If Counter(Index) <> 0 Then Exit For
+        End Sub
+
+        Private Shared Sub IncrementCounter(Buffer As Byte(), Offset As Integer)
+
+            For Index = Offset + IvSize - 1 To Offset Step -1
+                Buffer(Index) = CByte((CInt(Buffer(Index)) + 1) And &HFF)
+
+                If Buffer(Index) <> 0 Then Exit For
             Next
 
         End Sub
