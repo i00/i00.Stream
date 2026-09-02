@@ -739,6 +739,50 @@ Namespace Streams
             End If
         End Sub
 
+        Private Async Function ReadAtAsync(PhysicalOffset As Long,
+                                           Buffer As Byte(),
+                                           BufferOffset As Integer,
+                                           Count As Integer,
+                                           CancellationToken As Threading.CancellationToken) As Task
+
+            ValidatePhysicalIoArguments(PhysicalOffset, Buffer, BufferOffset, Count)
+            If Count = 0 Then Return
+
+            If RequiredPhysicalIoLocks.HasFlag(PhysicalIoLockStates.ReadLock) Then
+                Await _PhysicalIoLock.WaitAsync(CancellationToken).ConfigureAwait(False)
+                Try
+                    Await ReadAtCoreAsync(PhysicalOffset, Buffer, BufferOffset, Count, CancellationToken).ConfigureAwait(False)
+                Finally
+                    _PhysicalIoLock.Release()
+                End Try
+            Else
+                Await ReadAtCoreAsync(PhysicalOffset, Buffer, BufferOffset, Count, CancellationToken).ConfigureAwait(False)
+            End If
+
+        End Function
+
+        Private Async Function WriteAtAsync(PhysicalOffset As Long,
+                                            Buffer As Byte(),
+                                            BufferOffset As Integer,
+                                            Count As Integer,
+                                            CancellationToken As Threading.CancellationToken) As Task
+
+            ValidatePhysicalIoArguments(PhysicalOffset, Buffer, BufferOffset, Count)
+            If Count = 0 Then Return
+
+            If RequiredPhysicalIoLocks.HasFlag(PhysicalIoLockStates.WriteLock) Then
+                Await _PhysicalIoLock.WaitAsync(CancellationToken).ConfigureAwait(False)
+                Try
+                    Await WriteAtCoreAsync(PhysicalOffset, Buffer, BufferOffset, Count, CancellationToken).ConfigureAwait(False)
+                Finally
+                    _PhysicalIoLock.Release()
+                End Try
+            Else
+                Await WriteAtCoreAsync(PhysicalOffset, Buffer, BufferOffset, Count, CancellationToken).ConfigureAwait(False)
+            End If
+
+        End Function
+
         ''' <summary>
         ''' Reads exactly <paramref name="Count" /> bytes from the backing stream at the
         ''' specified physical offset.
@@ -838,6 +882,184 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Asynchronously reads exactly <paramref name="Count" /> bytes from the backing
+        ''' stream at the specified physical offset.
+        ''' </summary>
+        ''' <remarks>
+        ''' The default implementation prefers <see cref="IPositionedStreamAsync" />, then
+        ''' the synchronous <see cref="IPositionedStream" /> (offloaded so the calling
+        ''' thread is not blocked), otherwise it seeks and awaits <see cref="Stream.ReadAsync" />
+        ''' while holding the physical-I/O lock. Override to provide a custom strategy.
+        ''' </remarks>
+        Protected Overridable Async Function ReadAtCoreAsync(PhysicalOffset As Long,
+                                                            Buffer As Byte(),
+                                                            BufferOffset As Integer,
+                                                            Count As Integer,
+                                                            CancellationToken As Threading.CancellationToken) As Task
+
+            Dim AsyncPositionedStream = TryCast(BaseStream, IPositionedStreamAsync)
+
+            If AsyncPositionedStream IsNot Nothing Then
+
+                Dim TotalRead = 0
+
+                While TotalRead < Count
+
+                    Dim BytesRead =
+                        Await AsyncPositionedStream.ReadAtAsync(
+                            PhysicalOffset + TotalRead,
+                            Buffer,
+                            BufferOffset + TotalRead,
+                            Count - TotalRead,
+                            CancellationToken).ConfigureAwait(False)
+
+                    If BytesRead <= 0 Then
+                        Throw New EndOfStreamException("Unexpected end of positioned stream.")
+                    End If
+
+                    If BytesRead > Count - TotalRead Then
+                        Throw New InvalidDataException("The positioned stream returned more bytes than requested.")
+                    End If
+
+                    TotalRead += BytesRead
+
+                End While
+
+                Return
+
+            End If
+
+            Dim PositionedStream = TryCast(BaseStream, IPositionedStream)
+
+            If PositionedStream IsNot Nothing Then
+                '
+                ' The backing stream is position-free but has no async positioned form.
+                ' Honour its concurrency contract by using its synchronous ReadAt, offloaded
+                ' so the async caller's thread is not held for the duration of the I/O.
+                '
+                Await Task.Run(
+                    Sub() ReadAtCore(PhysicalOffset, Buffer, BufferOffset, Count),
+                    CancellationToken).ConfigureAwait(False)
+
+                Return
+
+            End If
+
+            If RequiredPhysicalIoLocks <> PhysicalIoLockStates.FullLock Then
+                Throw New InvalidOperationException(
+                    $"The default position-based {NameOf(ReadAtCoreAsync)} implementation requires " &
+                    $"{NameOf(PhysicalIoLockStates.FullLock)}. Override {NameOf(ReadAtCoreAsync)} " &
+                    $"or provide a backing stream that implements {NameOf(IPositionedStream)}.")
+            End If
+
+            BaseStream.Position = PhysicalOffset
+            Await ReadExactlyAsync(BaseStream, Buffer, BufferOffset, Count, CancellationToken).ConfigureAwait(False)
+
+        End Function
+
+        ''' <summary>
+        ''' Asynchronously writes <paramref name="Count" /> bytes to the backing stream at
+        ''' the specified physical offset.
+        ''' </summary>
+        ''' <remarks>
+        ''' The default implementation prefers <see cref="IPositionedStreamAsync" />, then
+        ''' the synchronous <see cref="IPositionedStream" /> (offloaded), otherwise it seeks
+        ''' and awaits <see cref="Stream.WriteAsync" /> while holding the physical-I/O lock.
+        ''' Override to provide a custom strategy.
+        ''' </remarks>
+        Protected Overridable Async Function WriteAtCoreAsync(PhysicalOffset As Long,
+                                                             Buffer As Byte(),
+                                                             BufferOffset As Integer,
+                                                             Count As Integer,
+                                                             CancellationToken As Threading.CancellationToken) As Task
+
+            Dim AsyncPositionedStream = TryCast(BaseStream, IPositionedStreamAsync)
+
+            If AsyncPositionedStream IsNot Nothing Then
+                Await AsyncPositionedStream.WriteAtAsync(
+                    PhysicalOffset,
+                    Buffer,
+                    BufferOffset,
+                    Count,
+                    CancellationToken).ConfigureAwait(False)
+
+                Return
+
+            End If
+
+            Dim PositionedStream = TryCast(BaseStream, IPositionedStream)
+
+            If PositionedStream IsNot Nothing Then
+                Await Task.Run(
+                    Sub() WriteAtCore(PhysicalOffset, Buffer, BufferOffset, Count),
+                    CancellationToken).ConfigureAwait(False)
+
+                Return
+
+            End If
+
+            If RequiredPhysicalIoLocks <> PhysicalIoLockStates.FullLock Then
+                Throw New InvalidOperationException(
+                    $"The default position-based {NameOf(WriteAtCoreAsync)} implementation requires " &
+                    $"{NameOf(PhysicalIoLockStates.FullLock)}. Override {NameOf(WriteAtCoreAsync)} " &
+                    $"or provide a backing stream that implements {NameOf(IPositionedStream)}.")
+            End If
+
+            BaseStream.Position = PhysicalOffset
+            Await BaseStream.WriteAsync(Buffer, BufferOffset, Count, CancellationToken).ConfigureAwait(False)
+
+        End Function
+
+        '
+        ' Flag-driven dispatch helpers. A method on the shared write / metadata / open
+        ' spine carries a RunAsync flag; at each backing-store touch point it calls one of
+        ' these, which either awaits the real async primitive (RunAsync) or runs the
+        ' synchronous one and hands back an already-completed Task. When RunAsync is False
+        ' no await ever suspends, so the whole spine method completes synchronously and its
+        ' synchronous entry point can safely take the result with GetAwaiter().GetResult().
+        '
+        Private Function ReadAtEitherAsync(RunAsync As Boolean,
+                                           PhysicalOffset As Long,
+                                           Buffer As Byte(),
+                                           BufferOffset As Integer,
+                                           Count As Integer,
+                                           CancellationToken As Threading.CancellationToken) As Task
+
+            If RunAsync Then
+                Return ReadAtAsync(PhysicalOffset, Buffer, BufferOffset, Count, CancellationToken)
+            End If
+
+            ReadAt(PhysicalOffset, Buffer, BufferOffset, Count)
+            Return Task.CompletedTask
+
+        End Function
+
+        Private Function WriteAtEitherAsync(RunAsync As Boolean,
+                                            PhysicalOffset As Long,
+                                            Buffer As Byte(),
+                                            BufferOffset As Integer,
+                                            Count As Integer,
+                                            CancellationToken As Threading.CancellationToken) As Task
+
+            If RunAsync Then
+                Return WriteAtAsync(PhysicalOffset, Buffer, BufferOffset, Count, CancellationToken)
+            End If
+
+            WriteAt(PhysicalOffset, Buffer, BufferOffset, Count)
+            Return Task.CompletedTask
+
+        End Function
+
+        Private Function FlushDurableEitherAsync(RunAsync As Boolean) As Task
+
+            If RunAsync Then Return FlushDurableAsync()
+
+            FlushDurable()
+            Return Task.CompletedTask
+
+        End Function
+
         Private Shared Sub ValidatePhysicalIoArguments(PhysicalOffset As Long, Buffer As Byte(), BufferOffset As Integer, Count As Integer)
             If PhysicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PhysicalOffset))
             If Buffer Is Nothing Then Throw New ArgumentNullException(NameOf(Buffer))
@@ -857,6 +1079,32 @@ Namespace Streams
             If _StateLockDepth.Value = 0 Then _StateLock.Wait()
             _StateLockDepth.Value += 1
             Return New StateLockScope(Me)
+        End Function
+
+        '
+        ' Acquires the state lock for an async operation unless the current async flow
+        ' already holds it, returning True when this call acquired it and must release it.
+        '
+        ' The reentrancy depth is an AsyncLocal, and a write made inside an awaited async
+        ' method does NOT flow back to its caller (the caller's ExecutionContext is
+        ' restored on resume). So this helper only performs the wait; the caller sets
+        ' _StateLockDepth.Value in the method that owns the Try/Finally, where it stays
+        ' visible to everything that method calls and unwinds automatically when it
+        ' returns. Callers release with _StateLock.Release() (synchronous, non-blocking).
+        '
+        Private Async Function EnterStateLockAsync(RunAsync As Boolean,
+                                                  CancellationToken As Threading.CancellationToken) As Task(Of Boolean)
+
+            If _StateLockDepth.Value > 0 Then Return False
+
+            If RunAsync Then
+                Await _StateLock.WaitAsync(CancellationToken).ConfigureAwait(False)
+            Else
+                _StateLock.Wait()
+            End If
+
+            Return True
+
         End Function
 
         Private NotInheritable Class StateLockScope
@@ -1610,6 +1858,49 @@ Namespace Streams
         End Function
 
         ''' <summary>
+        ''' Asynchronously returns the entire logical plaintext stream as a byte array.
+        ''' </summary>
+        ''' <param name="CancellationToken">Token used to cancel the operation.</param>
+        Public Overloads Async Function ToArrayAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Byte())
+
+            CancellationToken.ThrowIfCancellationRequested()
+
+            Dim LockOwner = Await EnterStateLockAsync(True, CancellationToken).ConfigureAwait(False)
+            If LockOwner Then _StateLockDepth.Value = 1
+
+            Try
+                Return Await ToArrayCoreAsync(CancellationToken).ConfigureAwait(False)
+            Finally
+                If LockOwner Then
+                    _StateLockDepth.Value = 0
+                    _StateLock.Release()
+                End If
+            End Try
+
+        End Function
+
+        Private Overloads Async Function ToArrayCoreAsync(CancellationToken As Threading.CancellationToken) As Task(Of Byte())
+
+            ThrowIfDisposed()
+
+            If _Length > Integer.MaxValue Then
+                Throw New InvalidOperationException(
+                    $"The logical length exceeds the maximum supported by an {NameOf(Array)}.")
+            End If
+
+            If _Length = 0 Then
+                Return New Byte() {}
+            End If
+
+            Dim Result(CInt(_Length) - 1) As Byte
+
+            Await ReadCoreAsync(0L, Result, 0, Nothing, CancellationToken).ConfigureAwait(False)
+
+            Return Result
+
+        End Function
+
+        ''' <summary>
         ''' Returns a logical range from the stream as a byte array.
         ''' </summary>
         ''' <param name="Offset">
@@ -1657,6 +1948,64 @@ Namespace Streams
 
             Return Result
 
+
+        End Function
+
+        ''' <summary>
+        ''' Asynchronously returns a logical range from the stream as a byte array.
+        ''' </summary>
+        ''' <param name="Offset">Logical start offset.</param>
+        ''' <param name="Length">Number of bytes to return.</param>
+        ''' <param name="CancellationToken">Token used to cancel the operation.</param>
+        Public Overloads Async Function ToArrayAsync(Offset As Long,
+                                                     Length As Integer,
+                                                     Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Byte())
+
+            CancellationToken.ThrowIfCancellationRequested()
+
+            Dim LockOwner = Await EnterStateLockAsync(True, CancellationToken).ConfigureAwait(False)
+            If LockOwner Then _StateLockDepth.Value = 1
+
+            Try
+                Return Await ToArrayCoreAsync(Offset, Length, CancellationToken).ConfigureAwait(False)
+            Finally
+                If LockOwner Then
+                    _StateLockDepth.Value = 0
+                    _StateLock.Release()
+                End If
+            End Try
+
+        End Function
+
+        Private Overloads Async Function ToArrayCoreAsync(Offset As Long,
+                                                         Length As Integer,
+                                                         CancellationToken As Threading.CancellationToken) As Task(Of Byte())
+
+            ThrowIfDisposed()
+
+            If Offset < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Offset))
+            End If
+
+            If Length < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Length))
+            End If
+
+            If Length = 0 Then
+                Return New Byte() {}
+            End If
+
+            Dim Result(Length - 1) As Byte
+
+            Dim BytesRead = Await ReadCoreAsync(Offset, Result, 0, Nothing, CancellationToken).ConfigureAwait(False)
+
+            If BytesRead = Length Then
+                Return Result
+            End If
+
+            Array.Resize(Result, BytesRead)
+
+            Return Result
 
         End Function
 
@@ -1718,6 +2067,67 @@ Namespace Streams
         End Function
 
         ''' <summary>
+        ''' Asynchronously reads a sequence of bytes from the logical stream at the current
+        ''' <see cref="Position" /> and advances the position by the number of bytes read.
+        ''' </summary>
+        Public Overrides Async Function ReadAsync(Buffer As Byte(),
+                                                 Offset As Integer,
+                                                 Count As Integer,
+                                                 CancellationToken As Threading.CancellationToken) As Task(Of Integer)
+
+            CancellationToken.ThrowIfCancellationRequested()
+
+            Dim LockOwner = Await EnterStateLockAsync(True, CancellationToken).ConfigureAwait(False)
+            If LockOwner Then _StateLockDepth.Value = 1
+
+            Try
+                Return Await ReadCoreAsync(Buffer, Offset, Count, CancellationToken).ConfigureAwait(False)
+            Finally
+                If LockOwner Then
+                    _StateLockDepth.Value = 0
+                    _StateLock.Release()
+                End If
+            End Try
+
+        End Function
+
+        Private Overloads Async Function ReadCoreAsync(Buffer As Byte(),
+                                                      Offset As Integer,
+                                                      Count As Integer,
+                                                      CancellationToken As Threading.CancellationToken) As Task(Of Integer)
+
+            If Buffer Is Nothing Then
+                Throw New ArgumentNullException(NameOf(Buffer))
+            End If
+
+            If Offset < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Offset))
+            End If
+
+            If Count < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(Count))
+            End If
+
+            If Offset + Count > Buffer.Length Then
+                Throw New ArgumentException("Offset and count exceed the buffer length.")
+            End If
+
+            ThrowIfDisposed()
+
+            Dim BytesRead As Integer =
+                Await ReadCoreAsync(CLng(_Position),
+                                    Buffer,
+                                    Offset,
+                                    Count,
+                                    CancellationToken).ConfigureAwait(False)
+
+            _Position += BytesRead
+
+            Return BytesRead
+
+        End Function
+
+        ''' <summary>
         ''' Reads plaintext from the logical stream at the specified offset.
         ''' </summary>
         ''' <param name="LogicalOffset">
@@ -1743,6 +2153,41 @@ Namespace Streams
             Using EnterStateLock()
                 Return ReadCore(LogicalOffset, Output, OutputOffset, Count)
             End Using
+
+        End Function
+
+        ''' <summary>
+        ''' Asynchronously reads plaintext from the logical stream at the specified offset.
+        ''' Does not use or modify <see cref="Position" />.
+        ''' </summary>
+        ''' <param name="LogicalOffset">Logical stream offset to start reading from.</param>
+        ''' <param name="Output">Destination buffer.</param>
+        ''' <param name="OutputOffset">Offset within <paramref name="Output" /> where bytes should be written.</param>
+        ''' <param name="Count">
+        ''' Maximum number of bytes to read. If Nothing, reads as many bytes as will fit from
+        ''' <paramref name="OutputOffset" /> to the end of <paramref name="Output" />.
+        ''' </param>
+        ''' <param name="CancellationToken">Token used to cancel the operation.</param>
+        ''' <returns>Number of bytes read into <paramref name="Output" />.</returns>
+        Public Overloads Async Function ReadAsync(LogicalOffset As Long,
+                                                 Output As Byte(),
+                                                 Optional OutputOffset As Integer = 0,
+                                                 Optional Count As Integer? = Nothing,
+                                                 Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Integer)
+
+            CancellationToken.ThrowIfCancellationRequested()
+
+            Dim LockOwner = Await EnterStateLockAsync(True, CancellationToken).ConfigureAwait(False)
+            If LockOwner Then _StateLockDepth.Value = 1
+
+            Try
+                Return Await ReadCoreAsync(LogicalOffset, Output, OutputOffset, Count, CancellationToken).ConfigureAwait(False)
+            Finally
+                If LockOwner Then
+                    _StateLockDepth.Value = 0
+                    _StateLock.Release()
+                End If
+            End Try
 
         End Function
 
@@ -1803,6 +2248,70 @@ Namespace Streams
 
             Return ToRead
 
+
+        End Function
+
+        '
+        ' Async twin of the range-read ReadCore. Mirrors it exactly; only ReadExtentBytes
+        ' becomes awaited. Assumes the state lock is held (like the synchronous Core).
+        '
+        Private Overloads Async Function ReadCoreAsync(LogicalOffset As Long,
+                                                      Output As Byte(),
+                                                      OutputOffset As Integer,
+                                                      Count As Integer?,
+                                                      CancellationToken As Threading.CancellationToken) As Task(Of Integer)
+
+            ThrowIfDisposed()
+            ThrowIfFaulted()
+
+            If Output Is Nothing Then Throw New ArgumentNullException(NameOf(Output))
+            If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+            If OutputOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(OutputOffset))
+            If OutputOffset > Output.Length Then Throw New ArgumentException("Output offset exceeds the output buffer length.", NameOf(OutputOffset))
+
+            Dim EffectiveCount =
+                If(Count.HasValue,
+                   Count.Value,
+                   Output.Length - OutputOffset)
+
+            If EffectiveCount < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Count))
+            If EffectiveCount > Output.Length - OutputOffset Then Throw New ArgumentException("Invalid offset/count.")
+
+            If EffectiveCount = 0 OrElse LogicalOffset >= _Length Then
+                Return 0
+            End If
+
+            Dim ToRead = CInt(Math.Min(CLng(EffectiveCount), _Length - LogicalOffset))
+            Dim Remaining = ToRead
+            Dim CurrentLogicalOffset = LogicalOffset
+            Dim CurrentOutputOffset = OutputOffset
+
+            While Remaining > 0
+
+                Dim ExtentIndex = FindExtentIndex(CurrentLogicalOffset)
+
+                If ExtentIndex < 0 Then
+                    Throw New InvalidDataException($"No extent found for logical offset {CurrentLogicalOffset}.")
+                End If
+
+                Dim Extent = _Extents(ExtentIndex)
+                Dim OffsetInsideExtent = CInt(CurrentLogicalOffset - Extent.LogicalOffset)
+                Dim CopyLength = Math.Min(Remaining, Extent.LogicalLength - OffsetInsideExtent)
+
+                Await ReadExtentBytesAsync(Extent,
+                                           OffsetInsideExtent,
+                                           Output,
+                                           CurrentOutputOffset,
+                                           CopyLength,
+                                           CancellationToken).ConfigureAwait(False)
+
+                CurrentLogicalOffset += CopyLength
+                CurrentOutputOffset += CopyLength
+                Remaining -= CopyLength
+
+            End While
+
+            Return ToRead
 
         End Function
 
@@ -2967,6 +3476,27 @@ Namespace Streams
 
         End Sub
 
+        Private Shared Async Function ReadExactlyAsync(Source As Stream,
+                                                      Buffer As Byte(),
+                                                      Offset As Integer,
+                                                      Count As Integer,
+                                                      CancellationToken As Threading.CancellationToken) As Task
+
+            Dim TotalRead = 0
+
+            While TotalRead < Count
+
+                Dim ReadBytes =
+                    Await Source.ReadAsync(Buffer, Offset + TotalRead, Count - TotalRead, CancellationToken).ConfigureAwait(False)
+
+                If ReadBytes = 0 Then Throw New EndOfStreamException("Unexpected end of chunked stream.")
+
+                TotalRead += ReadBytes
+
+            End While
+
+        End Function
+
         Private Shared Function FixedTimeEquals(Left As Byte(),
                                                 LeftOffset As Integer,
                                                 Right As Byte(),
@@ -3010,6 +3540,35 @@ Namespace Streams
             Target.Flush()
 
         End Sub
+
+        Private Function FlushDurableAsync() As Task
+
+            Return FlushDurableAsync(BaseStream, _FlushDurableAction)
+
+        End Function
+
+        Private Shared Async Function FlushDurableAsync(Target As Stream,
+                                                       FlushDurableAction As Action) As Task
+
+            '
+            ' The durable-flush primitives (a caller-supplied Action, or FileStream.Flush(True))
+            ' are synchronous write barriers with no async form. Offload them so the awaiting
+            ' caller's thread is released for the duration of the fsync.
+            '
+            If FlushDurableAction IsNot Nothing Then
+                Await Task.Run(FlushDurableAction).ConfigureAwait(False)
+                Return
+            End If
+
+            Dim TargetFileStream = TryCast(Target, FileStream)
+            If TargetFileStream IsNot Nothing Then
+                Await Task.Run(Sub() TargetFileStream.Flush(True)).ConfigureAwait(False)
+                Return
+            End If
+
+            Await Target.FlushAsync().ConfigureAwait(False)
+
+        End Function
 
     End Class
 

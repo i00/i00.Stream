@@ -93,6 +93,7 @@
       <DependentUpon>Settings.settings</DependentUpon>
       <DesignTimeSharedInput>True</DesignTimeSharedInput>
     </Compile>
+    <Compile Include="Tests\Chunked Stream\Core stream semantics\Async.vb" />
     <Compile Include="Tests\Chunked Stream\Core stream semantics\Foundation.vb" />
     <Compile Include="Tests\Chunked Stream\Core stream semantics\PositionedStream.vb" />
     <Compile Include="Tests\Chunked Stream\Core stream semantics\SparseStorage.vb" />

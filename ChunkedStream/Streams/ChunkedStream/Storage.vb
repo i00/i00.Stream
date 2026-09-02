@@ -841,6 +841,31 @@ Namespace Streams
 
         End Function
 
+        '
+        ' Async twin of ReadPhysicalRecordPlain. Only the backing-store read differs; the
+        ' guards and DecryptPhysicalRecord (MAC check, decrypt, decompress) are pure CPU
+        ' and shared with the synchronous path.
+        '
+        Private Async Function ReadPhysicalRecordPlainAsync(Record As PhysicalRecordEntry,
+                                                            CancellationToken As Threading.CancellationToken) As Task(Of Byte())
+
+            If Record.RecordId <= SparsePhysicalRecordId Then Throw New InvalidDataException("Invalid physical record id.")
+            If Record.PhysicalOffset < DataStartOffset Then Throw New InvalidDataException($"Invalid physical record offset for record {Record.RecordId}.")
+            If Record.PhysicalLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
+            If Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
+
+            Dim StoredRecord(Record.PhysicalLength - 1) As Byte
+
+            Await ReadAtAsync(Record.PhysicalOffset, StoredRecord, 0, StoredRecord.Length, CancellationToken).ConfigureAwait(False)
+
+            Dim Plain(Record.PlainLength - 1) As Byte
+
+            DecryptPhysicalRecord(Record.RecordId, StoredRecord, Plain)
+
+            Return Plain
+
+        End Function
+
         Private Sub ReadExtentBytes(Extent As ExtentIndexEntry,
                                     OffsetInsideExtent As Integer,
                                     Output As Byte(),
@@ -865,6 +890,35 @@ Namespace Streams
             Buffer.BlockCopy(Plain, SourceOffset, Output, OutputOffset, Count)
 
         End Sub
+
+        '
+        ' Async twin of ReadExtentBytes.
+        '
+        Private Async Function ReadExtentBytesAsync(Extent As ExtentIndexEntry,
+                                                    OffsetInsideExtent As Integer,
+                                                    Output As Byte(),
+                                                    OutputOffset As Integer,
+                                                    Count As Integer,
+                                                    CancellationToken As Threading.CancellationToken) As Task
+
+            If Count <= 0 Then Return
+
+            If Extent.PhysicalRecordId = SparsePhysicalRecordId Then
+                Array.Clear(Output, OutputOffset, Count)
+                Return
+            End If
+
+            Dim Record = GetPhysicalRecord(Extent.PhysicalRecordId)
+            Dim Plain = Await ReadPhysicalRecordPlainAsync(Record, CancellationToken).ConfigureAwait(False)
+            Dim SourceOffset = Extent.PhysicalRecordOffset + OffsetInsideExtent
+
+            If SourceOffset < 0 OrElse SourceOffset + Count > Plain.Length Then
+                Throw New InvalidDataException($"Extent references beyond physical record {Extent.PhysicalRecordId}.")
+            End If
+
+            Buffer.BlockCopy(Plain, SourceOffset, Output, OutputOffset, Count)
+
+        End Function
 
         Private Function GetDataEndFromIndex() As Long
 

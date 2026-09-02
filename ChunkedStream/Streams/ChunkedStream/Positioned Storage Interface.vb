@@ -24,6 +24,14 @@
 '   - Returning neither capability is valid. ChunkedStream will serialise both methods
 '     through its shared physical-I/O semaphore while still avoiding Stream.Position.
 '
+' Async
+'   - A stream that also implements IPositionedStreamAsync additionally exposes
+'     awaitable positioned reads and writes. ChunkedStream prefers these on its async
+'     code paths and falls back to Stream.ReadAsync / Stream.WriteAsync otherwise.
+'   - ReadAtAsync / WriteAtAsync follow the same contract as ReadAt / WriteAt and reuse
+'     the same PositionedIoCapabilities: a stream that is lock-free for the synchronous
+'     positioned methods is treated as lock-free for the asynchronous equivalents.
+'
 ' ================================================================================
 
 Imports System.IO
@@ -75,6 +83,37 @@ Namespace Streams
                     Buffer As Byte(),
                     BufferOffset As Integer,
                     Count As Integer)
+
+    End Interface
+
+    ''' <summary>
+    ''' Optional contract implemented by a <see cref="IPositionedStream" /> that also
+    ''' supports awaitable physical offset-based I/O. ChunkedStream prefers these methods
+    ''' on its asynchronous code paths.
+    ''' </summary>
+    Public Interface IPositionedStreamAsync
+        Inherits IPositionedStream
+
+        ''' <summary>
+        ''' Asynchronously reads bytes from an explicit physical offset without using
+        ''' Stream.Position. May return fewer bytes than requested and returns zero only
+        ''' at end of data.
+        ''' </summary>
+        Function ReadAtAsync(PhysicalOffset As Long,
+                             Buffer As Byte(),
+                             BufferOffset As Integer,
+                             Count As Integer,
+                             CancellationToken As Threading.CancellationToken) As Task(Of Integer)
+
+        ''' <summary>
+        ''' Asynchronously writes bytes at an explicit physical offset without using
+        ''' Stream.Position. The implementation must write Count bytes or throw.
+        ''' </summary>
+        Function WriteAtAsync(PhysicalOffset As Long,
+                              Buffer As Byte(),
+                              BufferOffset As Integer,
+                              Count As Integer,
+                              CancellationToken As Threading.CancellationToken) As Task
 
     End Interface
 

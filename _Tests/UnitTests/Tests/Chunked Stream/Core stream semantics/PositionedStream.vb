@@ -147,7 +147,7 @@ Namespace Tests
             ''' </summary>
             Private NotInheritable Class PositionedMemoryStream
                 Inherits Stream
-                Implements IPositionedStream
+                Implements IPositionedStreamAsync
 
                 Private ReadOnly _Inner As MemoryStream
                 Private ReadOnly _Capabilities As PositionedIoCapabilities
@@ -210,6 +210,47 @@ Namespace Tests
                     End SyncLock
 
                 End Sub
+
+                Public Property ReadAtAsyncCalls As Integer
+                Public Property WriteAtAsyncCalls As Integer
+
+                Public Function ReadAtAsync(PhysicalOffset As Long,
+                                            Buffer As Byte(),
+                                            BufferOffset As Integer,
+                                            Count As Integer,
+                                            CancellationToken As CancellationToken) As Task(Of Integer) _
+                                            Implements IPositionedStreamAsync.ReadAtAsync
+
+                    CancellationToken.ThrowIfCancellationRequested()
+
+                    SyncLock _Gate
+                        ReadAtAsyncCalls += 1
+                        If PhysicalOffset >= _Inner.Length Then Return Task.FromResult(0)
+                        _Inner.Position = PhysicalOffset
+                        Return Task.FromResult(_Inner.Read(Buffer, BufferOffset, Count))
+                    End SyncLock
+
+                End Function
+
+                Public Function WriteAtAsync(PhysicalOffset As Long,
+                                             Buffer As Byte(),
+                                             BufferOffset As Integer,
+                                             Count As Integer,
+                                             CancellationToken As CancellationToken) As Task _
+                                             Implements IPositionedStreamAsync.WriteAtAsync
+
+                    CancellationToken.ThrowIfCancellationRequested()
+
+                    SyncLock _Gate
+                        WriteAtAsyncCalls += 1
+                        If PhysicalOffset > _Inner.Length Then _Inner.SetLength(PhysicalOffset)
+                        _Inner.Position = PhysicalOffset
+                        _Inner.Write(Buffer, BufferOffset, Count)
+                    End SyncLock
+
+                    Return Task.CompletedTask
+
+                End Function
 
                 Public Overrides ReadOnly Property CanRead As Boolean
                     Get
