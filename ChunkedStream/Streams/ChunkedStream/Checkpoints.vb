@@ -197,6 +197,13 @@ Namespace Streams
             ''' <summary>
             ''' Restores the stream data to this checkpoint's current baseline and closes the checkpoint.
             ''' </summary>
+            ''' <remarks>
+            ''' .NET Framework 4.8 has no <c>IAsyncDisposable</c>, so a checkpoint cannot be
+            ''' released with <c>Await Using</c>. Asynchronous callers should call
+            ''' <see cref="CommitAsync" /> / <see cref="RollbackAsync" /> / <see cref="CloseAsync" />
+            ''' explicitly (typically in a Try/Finally); this synchronous <see cref="Dispose" />
+            ''' remains valid for synchronous callers and as a safety net.
+            ''' </remarks>
             Public Sub Dispose() Implements IDisposable.Dispose
 
                 If _IsDisposed Then Return
@@ -204,6 +211,46 @@ Namespace Streams
                 _Owner.CloseCheckpoint(Me)
 
             End Sub
+
+            ''' <summary>
+            ''' Asynchronously updates this checkpoint's baseline to the current stream data state.
+            ''' </summary>
+            Public Function CommitAsync(Optional Durable As Boolean = True,
+                                        Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+                If Not IsActive Then
+                    Throw New InvalidOperationException("Checkpoint is no longer active.")
+                End If
+
+                Return Task.Run(Sub() _Owner.CommitCheckpoint(Me, Durable), CancellationToken)
+
+            End Function
+
+            ''' <summary>
+            ''' Asynchronously restores the stream data to this checkpoint's current baseline
+            ''' and keeps the checkpoint active.
+            ''' </summary>
+            Public Function RollbackAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+                If Not IsActive Then
+                    Throw New InvalidOperationException("Checkpoint is no longer active.")
+                End If
+
+                Return Task.Run(Sub() _Owner.RollbackCheckpoint(Me), CancellationToken)
+
+            End Function
+
+            ''' <summary>
+            ''' Asynchronously restores the stream data to this checkpoint's current baseline
+            ''' and closes the checkpoint. The asynchronous equivalent of <see cref="Dispose" />.
+            ''' </summary>
+            Public Function CloseAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+                If _IsDisposed Then Return Task.CompletedTask
+
+                Return Task.Run(Sub() _Owner.CloseCheckpoint(Me), CancellationToken)
+
+            End Function
 
         End Class
 
@@ -261,6 +308,21 @@ Namespace Streams
             Using EnterStateLock()
                 Return CreateCheckpointCore()
             End Using
+
+        End Function
+
+        ''' <summary>
+        ''' Asynchronously creates a reusable data-only checkpoint. Creating the outermost
+        ''' checkpoint writes recovery state to the header.
+        ''' </summary>
+        Public Function CreateCheckpointAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of ChunkedStreamCheckpoint)
+
+            Return Task.Run(
+                Function()
+                    Using EnterStateLock()
+                        Return CreateCheckpointCore()
+                    End Using
+                End Function, CancellationToken)
 
         End Function
 

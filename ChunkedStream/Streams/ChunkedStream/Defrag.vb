@@ -87,6 +87,53 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Asynchronously defragments the physical storage layout.
+        ''' </summary>
+        ''' <remarks>
+        ''' Defragmentation is a long-running batch operation and is executed on a worker
+        ''' thread. When <paramref name="CancellationToken" /> is cancelled it is surfaced to
+        ''' the internal operation through its progress cancellation token; the call then
+        ''' completes with a return value of -1 (cancelled), matching the synchronous
+        ''' contract, rather than throwing.
+        ''' </remarks>
+        Public Function DefragmentAsync(Optional Type As DefragTypes = DefragTypes.Move,
+                                        Optional ProgressCallback As StreamProgressCallback = Nothing,
+                                        Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Long)
+
+            Dim EffectiveCallback = BridgeProgressCancellation(ProgressCallback, CancellationToken)
+
+            '
+            ' The token is deliberately not handed to Task.Run: cancellation is surfaced
+            ' through EffectiveCallback so the operation unwinds cleanly and returns its
+            ' cancelled result (-1) rather than the task faulting with a cancellation.
+            '
+            Return Task.Run(
+                Function()
+                    Using EnterStateLock()
+                        Return DefragmentCore(Type, EffectiveCallback)
+                    End Using
+                End Function)
+
+        End Function
+
+        '
+        ' Wraps a caller progress callback so a Threading.CancellationToken firing also sets
+        ' the operation's own progress cancellation token. Returns the original callback
+        ' unchanged when the token can never be cancelled.
+        '
+        Private Shared Function BridgeProgressCancellation(ProgressCallback As StreamProgressCallback,
+                                                          CancellationToken As Threading.CancellationToken) As StreamProgressCallback
+
+            If Not CancellationToken.CanBeCanceled Then Return ProgressCallback
+
+            Return Sub(ProcessedUnits, TotalUnits, UnitType, Token)
+                       If CancellationToken.IsCancellationRequested Then Token.Cancel = True
+                       If ProgressCallback IsNot Nothing Then ProgressCallback(ProcessedUnits, TotalUnits, UnitType, Token)
+                   End Sub
+
+        End Function
+
         Private Function DefragmentCore(Optional Type As DefragTypes = DefragTypes.Move,
                                         Optional ProgressCallback As StreamProgressCallback = Nothing) As Long
 

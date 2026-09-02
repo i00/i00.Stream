@@ -650,17 +650,7 @@ Namespace Streams
         Private Function WritePhysicalRecord(Plain As Byte(),
                                              PlainLength As Integer) As PhysicalRecordEntry
 
-            Dim EncryptionMethod =
-                If(_CurrentWriteEncryptionEnabled,
-                   ChunkEncryptionMethods.AesCtrFileMasterKey,
-                   ChunkEncryptionMethods.None)
-
-            Return WritePhysicalRecordWithPolicy(Plain,
-                                                 PlainLength,
-                                                 Options.CompressionMethod,
-                                                 Options.CompressionRatioThreshold,
-                                                 False,
-                                                 EncryptionMethod)
+            Return WritePhysicalRecordAsync(Plain, PlainLength, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
 
         End Function
 
@@ -670,6 +660,47 @@ Namespace Streams
                                                        CompressionRatioThreshold As Double,
                                                        ForceCompression As Boolean,
                                                        EncryptionMethod As ChunkEncryptionMethods) As PhysicalRecordEntry
+
+            Return WritePhysicalRecordWithPolicyAsync(Plain,
+                                                      PlainLength,
+                                                      CompressionMethodToUse,
+                                                      CompressionRatioThreshold,
+                                                      ForceCompression,
+                                                      EncryptionMethod,
+                                                      RunAsync:=False,
+                                                      CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Function
+
+        Private Function WritePhysicalRecordAsync(Plain As Byte(),
+                                                  PlainLength As Integer,
+                                                  RunAsync As Boolean,
+                                                  CancellationToken As Threading.CancellationToken) As Task(Of PhysicalRecordEntry)
+
+            Dim EncryptionMethod =
+                If(_CurrentWriteEncryptionEnabled,
+                   ChunkEncryptionMethods.AesCtrFileMasterKey,
+                   ChunkEncryptionMethods.None)
+
+            Return WritePhysicalRecordWithPolicyAsync(Plain,
+                                                      PlainLength,
+                                                      Options.CompressionMethod,
+                                                      Options.CompressionRatioThreshold,
+                                                      False,
+                                                      EncryptionMethod,
+                                                      RunAsync,
+                                                      CancellationToken)
+
+        End Function
+
+        Private Async Function WritePhysicalRecordWithPolicyAsync(Plain As Byte(),
+                                                                  PlainLength As Integer,
+                                                                  CompressionMethodToUse As ChunkedStreamOptions.CompressionMethods,
+                                                                  CompressionRatioThreshold As Double,
+                                                                  ForceCompression As Boolean,
+                                                                  EncryptionMethod As ChunkEncryptionMethods,
+                                                                  RunAsync As Boolean,
+                                                                  CancellationToken As Threading.CancellationToken) As Task(Of PhysicalRecordEntry)
 
             If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
             If PlainLength < 0 OrElse PlainLength > Plain.Length Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
@@ -792,7 +823,7 @@ Namespace Streams
             Dim NewRecordOffset =
                 GetNextWriteOffset(StoredRecord.Length, Options.NewChunkWriteLocationPolicy, False)
 
-            WriteAt(NewRecordOffset, StoredRecord, 0, StoredRecord.Length)
+            Await WriteAtEitherAsync(RunAsync, NewRecordOffset, StoredRecord, 0, StoredRecord.Length, CancellationToken).ConfigureAwait(False)
 
             Dim Result =
                 New PhysicalRecordEntry With {

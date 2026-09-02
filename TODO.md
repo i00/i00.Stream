@@ -144,7 +144,10 @@ not a flat-index location. Rename: `_IndexOffset` → `_MetadataBoundary` (or `_
 
 ## API / features
 
-- **Async support.**
+- **Async support.** — *done (see DONE.md).* Follow-ups: make `OpenAsync` / `DefragmentAsync` /
+  `ApplyOptionsAsync` and the checkpoint / DeferPublish `*Async` methods truly async rather
+  than worker-thread offloads; convert `GetStructureAsync` / `ValidateAsync` /
+  `GetFragmentationAsync` onto the real async read path.
 - **Reader concurrency** — lock-free parallel reads. Blocked by the shared AES-CTR state
   (`_Counter` / `_KeyStream` / `_AesProvider` are per-instance; a parallel read needs per-call
   cipher state). Concurrency smoke tests exist and confirm the current serialized behaviour.
@@ -154,6 +157,33 @@ not a flat-index location. Rename: `_IndexOffset` → `_MetadataBoundary` (or `_
 - **Shrink the file header?**
 - **More compression methods:** fast Brotli, Zstd, LZMA / 7-Zip.
 - **More encryption methods:** AES-GCM, ChaCha20-Poly1305.
+
+---
+
+## Compression / encryption throughput
+
+Found while scoping the async work; independent of it.
+
+### AES-CTR is interop-bound
+`CryptPayload` (`Crypto.vb:381`) reassigns `_AesProvider.Key` (rebuilds the key schedule),
+calls `CreateEncryptor()`, and issues one `TransformBlock` per 16-byte block (~4096 interop
+calls per 64 KB chunk), then XORs byte-by-byte.
+**Fix:** precompute the counter-block buffer for the whole chunk, one `TransformBlock` for the
+full keystream, bulk word-at-a-time XOR, cache the `ICryptoTransform` and rebuild it only in
+`DeriveFileMasterKeys`. Same counter math ⇒ byte-identical keystream ⇒ existing encrypted
+files still read. ~10–30× on the crypto step for large chunks.
+
+### Compression always runs even when the result is discarded
+`WritePhysicalRecordWithPolicyAsync` (`Storage.vb`) always calls `CompressPayload` when a
+method is configured, only to record `CompressionEvaluatedPercent`, discarding the result
+when it loses to `CompressionRatioThreshold`.
+**Fix:** an `Options` control (`CompressionEvaluation = Always | Sampled | Off`) or a cheap
+entropy pre-screen; default unchanged. Up to ~2× on writes for incompressible data.
+
+### Re-entrant chunk crypto → parallelism
+Moving the cipher scratch (`_Counter` / `_KeyStream` / `_AesProvider`) off instance fields
+into per-call / pooled state unblocks both parallel per-chunk compress+encrypt for bulk
+operations and the lock-free parallel-reads item above.
 
 ---
 

@@ -1060,6 +1060,23 @@ Namespace Streams
 
         End Function
 
+        Private Function ReadExtentBytesEitherAsync(RunAsync As Boolean,
+                                                    Extent As ExtentIndexEntry,
+                                                    OffsetInsideExtent As Integer,
+                                                    Output As Byte(),
+                                                    OutputOffset As Integer,
+                                                    Count As Integer,
+                                                    CancellationToken As Threading.CancellationToken) As Task
+
+            If RunAsync Then
+                Return ReadExtentBytesAsync(Extent, OffsetInsideExtent, Output, OutputOffset, Count, CancellationToken)
+            End If
+
+            ReadExtentBytes(Extent, OffsetInsideExtent, Output, OutputOffset, Count)
+            Return Task.CompletedTask
+
+        End Function
+
         Private Shared Sub ValidatePhysicalIoArguments(PhysicalOffset As Long, Buffer As Byte(), BufferOffset As Integer, Count As Integer)
             If PhysicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PhysicalOffset))
             If Buffer Is Nothing Then Throw New ArgumentNullException(NameOf(Buffer))
@@ -1104,6 +1121,50 @@ Namespace Streams
             End If
 
             Return True
+
+        End Function
+
+        '
+        ' Runs an asynchronous operation body under the state lock. Acquires the lock unless
+        ' the current async flow already holds it, sets the reentrancy depth here (in the
+        ' method that owns the Try/Finally, so it stays visible to the awaited body and
+        ' unwinds when this returns), and releases on the way out.
+        '
+        Private Async Function RunUnderStateLockAsync(CancellationToken As Threading.CancellationToken,
+                                                     Body As Func(Of Task)) As Task
+
+            CancellationToken.ThrowIfCancellationRequested()
+
+            Dim LockOwner = Await EnterStateLockAsync(True, CancellationToken).ConfigureAwait(False)
+            If LockOwner Then _StateLockDepth.Value = 1
+
+            Try
+                Await Body().ConfigureAwait(False)
+            Finally
+                If LockOwner Then
+                    _StateLockDepth.Value = 0
+                    _StateLock.Release()
+                End If
+            End Try
+
+        End Function
+
+        Private Async Function RunUnderStateLockAsync(Of TResult)(CancellationToken As Threading.CancellationToken,
+                                                                 Body As Func(Of Task(Of TResult))) As Task(Of TResult)
+
+            CancellationToken.ThrowIfCancellationRequested()
+
+            Dim LockOwner = Await EnterStateLockAsync(True, CancellationToken).ConfigureAwait(False)
+            If LockOwner Then _StateLockDepth.Value = 1
+
+            Try
+                Return Await Body().ConfigureAwait(False)
+            Finally
+                If LockOwner Then
+                    _StateLockDepth.Value = 0
+                    _StateLock.Release()
+                End If
+            End Try
 
         End Function
 
@@ -1471,6 +1532,53 @@ Namespace Streams
             RunOpenRecovery(Result, BaseStream, AllowOpeningWhenRecoveryFails)
 
             Return Result
+
+        End Function
+
+        ''' <summary>
+        ''' Asynchronously opens an existing ChunkedStream or creates a new one if the
+        ''' backing stream is empty.
+        ''' </summary>
+        ''' <param name="BaseStream">Backing storage stream. The caller owns the stream lifetime.</param>
+        ''' <param name="CancellationToken">Token observed before the open begins.</param>
+        Public Shared Function OpenAsync(BaseStream As Stream,
+                                         Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of ChunkedStream)
+
+            Return OpenAsync(Of Stream)(BaseStream, Nothing, False, Nothing, CancellationToken)
+
+        End Function
+
+        ''' <summary>
+        ''' Asynchronously opens an existing ChunkedStream or creates a new one if the
+        ''' backing stream is empty.
+        ''' </summary>
+        ''' <remarks>
+        ''' Open reads the header copies and paged metadata and then runs any pending crash
+        ''' recovery - a one-time cost per stream. It is executed on a worker thread so the
+        ''' awaiting caller is not blocked; the steady-state read and write path is truly
+        ''' asynchronous end to end.
+        ''' </remarks>
+        ''' <param name="BaseStream">Backing storage stream. The caller owns the stream lifetime.</param>
+        ''' <param name="Options">Options controlling newly written chunks.</param>
+        ''' <param name="AllowOpeningWhenRecoveryFails">
+        ''' When True, the stream is opened for diagnostic access even if automatic recovery
+        ''' fails or cannot run.
+        ''' </param>
+        ''' <param name="FlushDurableAction">Optional durable-flush implementation for the backing stream.</param>
+        ''' <param name="CancellationToken">Token observed before the open begins.</param>
+        ''' <typeparam name="T">Concrete backing-stream type.</typeparam>
+        Public Shared Async Function OpenAsync(Of T As Stream)(
+                                     BaseStream As T,
+                                     Optional Options As ChunkedStreamOptions = Nothing,
+                                     Optional AllowOpeningWhenRecoveryFails As Boolean = False,
+                                     Optional FlushDurableAction As Action(Of T) = Nothing,
+                                     Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of ChunkedStream)
+
+            CancellationToken.ThrowIfCancellationRequested()
+
+            Return Await Task.Run(
+                Function() Open(BaseStream, Options, AllowOpeningWhenRecoveryFails, FlushDurableAction),
+                CancellationToken).ConfigureAwait(False)
 
         End Function
 
@@ -1861,21 +1969,9 @@ Namespace Streams
         ''' Asynchronously returns the entire logical plaintext stream as a byte array.
         ''' </summary>
         ''' <param name="CancellationToken">Token used to cancel the operation.</param>
-        Public Overloads Async Function ToArrayAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Byte())
+        Public Overloads Function ToArrayAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Byte())
 
-            CancellationToken.ThrowIfCancellationRequested()
-
-            Dim LockOwner = Await EnterStateLockAsync(True, CancellationToken).ConfigureAwait(False)
-            If LockOwner Then _StateLockDepth.Value = 1
-
-            Try
-                Return Await ToArrayCoreAsync(CancellationToken).ConfigureAwait(False)
-            Finally
-                If LockOwner Then
-                    _StateLockDepth.Value = 0
-                    _StateLock.Release()
-                End If
-            End Try
+            Return RunUnderStateLockAsync(CancellationToken, Function() ToArrayCoreAsync(CancellationToken))
 
         End Function
 
@@ -1957,23 +2053,11 @@ Namespace Streams
         ''' <param name="Offset">Logical start offset.</param>
         ''' <param name="Length">Number of bytes to return.</param>
         ''' <param name="CancellationToken">Token used to cancel the operation.</param>
-        Public Overloads Async Function ToArrayAsync(Offset As Long,
-                                                     Length As Integer,
-                                                     Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Byte())
+        Public Overloads Function ToArrayAsync(Offset As Long,
+                                               Length As Integer,
+                                               Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Byte())
 
-            CancellationToken.ThrowIfCancellationRequested()
-
-            Dim LockOwner = Await EnterStateLockAsync(True, CancellationToken).ConfigureAwait(False)
-            If LockOwner Then _StateLockDepth.Value = 1
-
-            Try
-                Return Await ToArrayCoreAsync(Offset, Length, CancellationToken).ConfigureAwait(False)
-            Finally
-                If LockOwner Then
-                    _StateLockDepth.Value = 0
-                    _StateLock.Release()
-                End If
-            End Try
+            Return RunUnderStateLockAsync(CancellationToken, Function() ToArrayCoreAsync(Offset, Length, CancellationToken))
 
         End Function
 
@@ -2070,24 +2154,12 @@ Namespace Streams
         ''' Asynchronously reads a sequence of bytes from the logical stream at the current
         ''' <see cref="Position" /> and advances the position by the number of bytes read.
         ''' </summary>
-        Public Overrides Async Function ReadAsync(Buffer As Byte(),
-                                                 Offset As Integer,
-                                                 Count As Integer,
-                                                 CancellationToken As Threading.CancellationToken) As Task(Of Integer)
+        Public Overrides Function ReadAsync(Buffer As Byte(),
+                                            Offset As Integer,
+                                            Count As Integer,
+                                            CancellationToken As Threading.CancellationToken) As Task(Of Integer)
 
-            CancellationToken.ThrowIfCancellationRequested()
-
-            Dim LockOwner = Await EnterStateLockAsync(True, CancellationToken).ConfigureAwait(False)
-            If LockOwner Then _StateLockDepth.Value = 1
-
-            Try
-                Return Await ReadCoreAsync(Buffer, Offset, Count, CancellationToken).ConfigureAwait(False)
-            Finally
-                If LockOwner Then
-                    _StateLockDepth.Value = 0
-                    _StateLock.Release()
-                End If
-            End Try
+            Return RunUnderStateLockAsync(CancellationToken, Function() ReadCoreAsync(Buffer, Offset, Count, CancellationToken))
 
         End Function
 
@@ -2169,25 +2241,13 @@ Namespace Streams
         ''' </param>
         ''' <param name="CancellationToken">Token used to cancel the operation.</param>
         ''' <returns>Number of bytes read into <paramref name="Output" />.</returns>
-        Public Overloads Async Function ReadAsync(LogicalOffset As Long,
-                                                 Output As Byte(),
-                                                 Optional OutputOffset As Integer = 0,
-                                                 Optional Count As Integer? = Nothing,
-                                                 Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Integer)
+        Public Overloads Function ReadAsync(LogicalOffset As Long,
+                                            Output As Byte(),
+                                            Optional OutputOffset As Integer = 0,
+                                            Optional Count As Integer? = Nothing,
+                                            Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Integer)
 
-            CancellationToken.ThrowIfCancellationRequested()
-
-            Dim LockOwner = Await EnterStateLockAsync(True, CancellationToken).ConfigureAwait(False)
-            If LockOwner Then _StateLockDepth.Value = 1
-
-            Try
-                Return Await ReadCoreAsync(LogicalOffset, Output, OutputOffset, Count, CancellationToken).ConfigureAwait(False)
-            Finally
-                If LockOwner Then
-                    _StateLockDepth.Value = 0
-                    _StateLock.Release()
-                End If
-            End Try
+            Return RunUnderStateLockAsync(CancellationToken, Function() ReadCoreAsync(LogicalOffset, Output, OutputOffset, Count, CancellationToken))
 
         End Function
 
@@ -2332,9 +2392,32 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Asynchronously writes a sequence of bytes to the logical stream at the current
+        ''' <see cref="Position" /> and advances the position by the number of bytes written.
+        ''' </summary>
+        Public Overrides Function WriteAsync(Buffer As Byte(),
+                                             Offset As Integer,
+                                             Count As Integer,
+                                             CancellationToken As Threading.CancellationToken) As Task
+
+            Return RunUnderStateLockAsync(CancellationToken, Function() WriteCoreAsync(Buffer, Offset, Count, RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
         Private Overloads Sub WriteCore(Buffer As Byte(),
                                         Offset As Integer,
                                         Count As Integer)
+
+            WriteCoreAsync(Buffer, Offset, Count, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Sub
+
+        Private Overloads Async Function WriteCoreAsync(Buffer As Byte(),
+                                                       Offset As Integer,
+                                                       Count As Integer,
+                                                       RunAsync As Boolean,
+                                                       CancellationToken As Threading.CancellationToken) As Task
 
             If Buffer Is Nothing Then
                 Throw New ArgumentNullException(NameOf(Buffer))
@@ -2355,15 +2438,17 @@ Namespace Streams
 
             ThrowIfDisposed()
 
-            WriteCore(_Position,
-                  Buffer,
-                  Offset,
-                  Count)
+            Await WriteCoreAsync(CLng(_Position),
+                                 Buffer,
+                                 Offset,
+                                 Count,
+                                 RunAsync,
+                                 CancellationToken).ConfigureAwait(False)
 
             _Position += Count
 
 
-        End Sub
+        End Function
 
         ''' <summary>
         ''' Writes plaintext data at the specified logical offset.
@@ -2394,10 +2479,41 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Asynchronously writes plaintext data at the specified logical offset. Does not
+        ''' use or modify <see cref="Position" />.
+        ''' </summary>
+        ''' <param name="LogicalOffset">Logical stream offset to start writing to.</param>
+        ''' <param name="Input">Source buffer.</param>
+        ''' <param name="DataOffset">Offset within <paramref name="Input" /> where bytes should be read from.</param>
+        ''' <param name="Count">Number of bytes to write, or Nothing to write to the end of <paramref name="Input" />.</param>
+        ''' <param name="CancellationToken">Token used to cancel the operation.</param>
+        ''' <returns>Number of bytes written.</returns>
+        Public Overloads Function WriteAsync(LogicalOffset As Long,
+                                             Input As Byte(),
+                                             Optional DataOffset As Integer = 0,
+                                             Optional Count As Integer? = Nothing,
+                                             Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Integer)
+
+            Return RunUnderStateLockAsync(CancellationToken, Function() WriteCoreAsync(LogicalOffset, Input, DataOffset, Count, RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
         Private Overloads Function WriteCore(LogicalOffset As Long,
                                              Input As Byte(),
                                              Optional DataOffset As Integer = 0,
                                              Optional Count As Integer? = Nothing) As Integer
+
+            Return WriteCoreAsync(LogicalOffset, Input, DataOffset, Count, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Function
+
+        Private Overloads Async Function WriteCoreAsync(LogicalOffset As Long,
+                                                       Input As Byte(),
+                                                       DataOffset As Integer,
+                                                       Count As Integer?,
+                                                       RunAsync As Boolean,
+                                                       CancellationToken As Threading.CancellationToken) As Task(Of Integer)
 
             ThrowIfDisposed()
             ThrowIfFaulted()
@@ -2436,7 +2552,7 @@ Namespace Streams
                 If ExistingLength > 0 Then
 
                     Dim ExistingCount = CInt(ExistingLength)
-                    Dim ReplacementExtents = BuildExtentsFromBuffer(Input, DataOffset, ExistingCount)
+                    Dim ReplacementExtents = Await BuildExtentsFromBufferAsync(Input, DataOffset, ExistingCount, RunAsync, CancellationToken).ConfigureAwait(False)
 
                     ReplaceRangeCore(LogicalOffset, ExistingLength, ReplacementExtents)
 
@@ -2447,14 +2563,14 @@ Namespace Streams
                     Dim AppendOffset = LogicalOffset + ExistingLength
                     Dim AppendDataOffset = DataOffset + CInt(ExistingLength)
                     Dim AppendCount = EffectiveCount - CInt(ExistingLength)
-                    Dim AppendExtents = BuildExtentsFromBuffer(Input, AppendDataOffset, AppendCount)
+                    Dim AppendExtents = Await BuildExtentsFromBufferAsync(Input, AppendDataOffset, AppendCount, RunAsync, CancellationToken).ConfigureAwait(False)
 
                     InsertExtentsCore(AppendOffset, AppendExtents)
 
                 End If
 
                 If MetadataPublishSuspended = False Then
-                    PersistIndexAndHeader(_IndexOffset)
+                    Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
                 End If
 
                 Return EffectiveCount
@@ -2480,7 +2596,27 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Asynchronously changes the logical plaintext length of the stream.
+        ''' </summary>
+        ''' <param name="Length">The new logical length.</param>
+        ''' <param name="CancellationToken">Token used to cancel the operation.</param>
+        Public Function SetLengthAsync(Length As Long,
+                                       Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            Return RunUnderStateLockAsync(CancellationToken, Function() SetLengthCoreAsync(Length, RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
         Private Sub SetLengthCore(Length As Long)
+
+            SetLengthCoreAsync(Length, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Sub
+
+        Private Async Function SetLengthCoreAsync(Length As Long,
+                                                 RunAsync As Boolean,
+                                                 CancellationToken As Threading.CancellationToken) As Task
 
 
             ThrowIfDisposed()
@@ -2496,7 +2632,7 @@ Namespace Streams
 
                 If Length < _Length Then
 
-                    RemoveRangeCore(Length, _Length - Length, False)
+                    Await RemoveRangeCoreAsync(Length, _Length - Length, False, RunAsync, CancellationToken).ConfigureAwait(False)
 
                 Else
 
@@ -2505,7 +2641,7 @@ Namespace Streams
                 End If
 
                 If MetadataPublishSuspended = False Then
-                    PersistIndexAndHeader(_IndexOffset)
+                    Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
                 End If
 
             Catch
@@ -2516,7 +2652,7 @@ Namespace Streams
             End Try
 
 
-        End Sub
+        End Function
 
         ''' <summary>
         ''' Replaces a logical range with the supplied data. The replacement length does not
@@ -2573,6 +2709,39 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Asynchronously replaces a logical range with the supplied data.
+        ''' </summary>
+        Public Overloads Function ReplaceAsync(LogicalOffset As Long,
+                                               Length As Long,
+                                               Data As Byte(),
+                                               Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset =
+                                                   AnchorActionsAtLogicalOffset.Use,
+                                               Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            If Data Is Nothing Then Throw New ArgumentNullException(NameOf(Data))
+
+            Return ReplaceAsync(LogicalOffset, Length, Data, 0, Data.Length, AnchorActionAtLogicalOffset, CancellationToken)
+
+        End Function
+
+        ''' <summary>
+        ''' Asynchronously replaces a logical range with a region of the supplied buffer.
+        ''' </summary>
+        Public Overloads Function ReplaceAsync(LogicalOffset As Long,
+                                               Length As Long,
+                                               Data As Byte(),
+                                               DataOffset As Integer,
+                                               Count As Integer,
+                                               Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset =
+                                                   AnchorActionsAtLogicalOffset.Use,
+                                               Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            Return RunUnderStateLockAsync(CancellationToken,
+                                          Function() ReplaceCoreAsync(LogicalOffset, Length, Data, DataOffset, Count, AnchorActionAtLogicalOffset, RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
         Private Sub ReplaceCore(LogicalOffset As Long,
                            Length As Long,
                            Data As Byte(),
@@ -2580,6 +2749,20 @@ Namespace Streams
                            Count As Integer,
                            Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset =
                                AnchorActionsAtLogicalOffset.Use)
+
+            ReplaceCoreAsync(LogicalOffset, Length, Data, DataOffset, Count, AnchorActionAtLogicalOffset,
+                             RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Sub
+
+        Private Async Function ReplaceCoreAsync(LogicalOffset As Long,
+                                               Length As Long,
+                                               Data As Byte(),
+                                               DataOffset As Integer,
+                                               Count As Integer,
+                                               AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset,
+                                               RunAsync As Boolean,
+                                               CancellationToken As Threading.CancellationToken) As Task
 
 
             ThrowIfDisposed()
@@ -2631,17 +2814,21 @@ Namespace Streams
                     FindAnchorIdAtLogicalOffset(LogicalOffset)
 
                 If ActualLength > 0 Then
-                    RemoveRangeCore(LogicalOffset,
-                                    ActualLength,
-                                    False)
+                    Await RemoveRangeCoreAsync(LogicalOffset,
+                                               ActualLength,
+                                               False,
+                                               RunAsync,
+                                               CancellationToken).ConfigureAwait(False)
                 End If
 
                 If Count > 0 Then
 
                     Dim NewExtents =
-                        BuildExtentsFromBuffer(Data,
-                                               DataOffset,
-                                               Count)
+                        Await BuildExtentsFromBufferAsync(Data,
+                                                          DataOffset,
+                                                          Count,
+                                                          RunAsync,
+                                                          CancellationToken).ConfigureAwait(False)
 
                     If StartAnchorId > 0 AndAlso
                        AnchorActionAtLogicalOffset = AnchorActionsAtLogicalOffset.Use Then
@@ -2673,7 +2860,7 @@ Namespace Streams
                 RebuildAnchorIndex()
 
                 If MetadataPublishSuspended = False Then
-                    PersistIndexAndHeader(_IndexOffset)
+                    Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
                 End If
 
             Catch
@@ -2684,7 +2871,7 @@ Namespace Streams
             End Try
 
 
-        End Sub
+        End Function
 
         ''' <summary>
         ''' Copies a logical range and inserts the copy at another logical offset. Bytes and
@@ -2708,11 +2895,40 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Asynchronously copies a logical range and inserts the copy at another logical
+        ''' offset. Bytes and physical-record references are cloned; source anchor identities
+        ''' are not.
+        ''' </summary>
+        Public Function CloneInsertAsync(SourceLogicalOffset As Long,
+                                         CloneLength As Long,
+                                         TargetLogicalOffset As Long,
+                                         Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset =
+                                             AnchorActionsAtLogicalOffset.TransformAway,
+                                         Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            Return RunUnderStateLockAsync(CancellationToken,
+                                          Function() CloneInsertCoreAsync(SourceLogicalOffset, CloneLength, TargetLogicalOffset, AnchorActionAtLogicalOffset, RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
         Private Sub CloneInsertCore(SourceLogicalOffset As Long,
                                CloneLength As Long,
                                TargetLogicalOffset As Long,
                                Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset =
                                    AnchorActionsAtLogicalOffset.TransformAway)
+
+            CloneInsertCoreAsync(SourceLogicalOffset, CloneLength, TargetLogicalOffset, AnchorActionAtLogicalOffset,
+                                 RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Sub
+
+        Private Async Function CloneInsertCoreAsync(SourceLogicalOffset As Long,
+                                                   CloneLength As Long,
+                                                   TargetLogicalOffset As Long,
+                                                   AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset,
+                                                   RunAsync As Boolean,
+                                                   CancellationToken As Threading.CancellationToken) As Task
 
 
             ThrowIfDisposed()
@@ -2741,8 +2957,10 @@ Namespace Streams
                              _Length - SourceLogicalOffset)
 
                 Dim CloneExtents =
-                    BuildCloneExtents(SourceLogicalOffset,
-                                      ActualLength)
+                    Await BuildCloneExtentsAsync(SourceLogicalOffset,
+                                                 ActualLength,
+                                                 RunAsync,
+                                                 CancellationToken).ConfigureAwait(False)
 
                 '
                 ' Source anchor identities are never cloned.
@@ -2761,7 +2979,7 @@ Namespace Streams
                                   AnchorActionAtLogicalOffset)
 
                 If MetadataPublishSuspended = False Then
-                    PersistIndexAndHeader(_IndexOffset)
+                    Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
                 End If
 
             Catch
@@ -2772,7 +2990,7 @@ Namespace Streams
             End Try
 
 
-        End Sub
+        End Function
 
         ''' <summary>
         ''' Removes a logical range from the stream, shortening the logical length. Anchors
@@ -2789,8 +3007,30 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Asynchronously removes a logical range from the stream, shortening the logical
+        ''' length. Anchors whose logical starts fall inside the removed range are destroyed.
+        ''' </summary>
+        Public Overloads Function RemoveAsync(LogicalOffset As Long,
+                                              Length As Long,
+                                              Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            Return RunUnderStateLockAsync(CancellationToken,
+                                          Function() RemoveCoreAsync(LogicalOffset, Length, RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
         Private Overloads Sub RemoveCore(LogicalOffset As Long,
                           Length As Long)
+
+            RemoveCoreAsync(LogicalOffset, Length, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Sub
+
+        Private Overloads Async Function RemoveCoreAsync(LogicalOffset As Long,
+                                                        Length As Long,
+                                                        RunAsync As Boolean,
+                                                        CancellationToken As Threading.CancellationToken) As Task
 
 
             ThrowIfDisposed()
@@ -2806,10 +3046,10 @@ Namespace Streams
 
                 Dim ActualLength = Math.Min(Length, _Length - LogicalOffset)
 
-                RemoveRangeCore(LogicalOffset, ActualLength, True)
+                Await RemoveRangeCoreAsync(LogicalOffset, ActualLength, True, RunAsync, CancellationToken).ConfigureAwait(False)
 
                 If MetadataPublishSuspended = False Then
-                    PersistIndexAndHeader(_IndexOffset)
+                    Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
                 End If
 
             Catch
@@ -2820,7 +3060,7 @@ Namespace Streams
             End Try
 
 
-        End Sub
+        End Function
 
         ''' <summary>
         ''' Inserts data at the specified logical offset, shifting subsequent data forward.
@@ -2869,11 +3109,55 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Asynchronously inserts data at the specified logical offset, shifting subsequent
+        ''' data forward.
+        ''' </summary>
+        Public Overloads Function InsertAsync(LogicalOffset As Long,
+                                              Data As Byte(),
+                                              Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway,
+                                              Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            If Data Is Nothing Then Throw New ArgumentNullException(NameOf(Data))
+
+            Return InsertAsync(LogicalOffset, Data, 0, Data.Length, AnchorActionAtLogicalOffset, CancellationToken)
+
+        End Function
+
+        ''' <summary>
+        ''' Asynchronously inserts a region of the supplied buffer at the specified logical
+        ''' offset, shifting subsequent data forward.
+        ''' </summary>
+        Public Overloads Function InsertAsync(LogicalOffset As Long,
+                                              Data As Byte(),
+                                              DataOffset As Integer,
+                                              Count As Integer,
+                                              Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway,
+                                              Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            Return RunUnderStateLockAsync(CancellationToken,
+                                          Function() InsertCoreAsync(LogicalOffset, Data, DataOffset, Count, AnchorActionAtLogicalOffset, RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
         Private Overloads Sub InsertCore(LogicalOffset As Long,
                                     Data As Byte(),
                                     DataOffset As Integer,
                                     Count As Integer,
                                     Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway)
+
+            InsertCoreAsync(LogicalOffset, Data, DataOffset, Count, AnchorActionAtLogicalOffset,
+                            RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Sub
+
+        Private Overloads Async Function InsertCoreAsync(LogicalOffset As Long,
+                                                        Data As Byte(),
+                                                        DataOffset As Integer,
+                                                        Count As Integer,
+                                                        AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset,
+                                                        RunAsync As Boolean,
+                                                        CancellationToken As Threading.CancellationToken) As Task
 
 
             ThrowIfDisposed()
@@ -2897,16 +3181,18 @@ Namespace Streams
 
                 InvalidateChunkCache()
 
-                Dim NewExtents = BuildExtentsFromBuffer(Data,
-                                                        DataOffset,
-                                                        Count)
+                Dim NewExtents = Await BuildExtentsFromBufferAsync(Data,
+                                                                  DataOffset,
+                                                                  Count,
+                                                                  RunAsync,
+                                                                  CancellationToken).ConfigureAwait(False)
 
                 InsertExtentsCore(LogicalOffset,
                                   NewExtents,
                                   AnchorActionAtLogicalOffset)
 
                 If MetadataPublishSuspended = False Then
-                    PersistIndexAndHeader(_IndexOffset)
+                    Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
                 End If
 
             Catch
@@ -2917,7 +3203,7 @@ Namespace Streams
             End Try
 
 
-        End Sub
+        End Function
 
         ''' <summary>
         ''' Copies a logical range and inserts the copy at another logical offset using the
@@ -2937,9 +3223,34 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Asynchronously copies a logical range and inserts the copy at another logical
+        ''' offset using the default anchor handling.
+        ''' </summary>
+        Public Function CloneAsync(SourceLogicalOffset As Long,
+                                   CloneLength As Long,
+                                   TargetLogicalOffset As Long,
+                                   Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            Return RunUnderStateLockAsync(CancellationToken,
+                                          Function() CloneCoreAsync(SourceLogicalOffset, CloneLength, TargetLogicalOffset, RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
         Private Sub CloneCore(SourceLogicalOffset As Long,
                          CloneLength As Long,
                          TargetLogicalOffset As Long)
+
+            CloneCoreAsync(SourceLogicalOffset, CloneLength, TargetLogicalOffset,
+                           RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Sub
+
+        Private Async Function CloneCoreAsync(SourceLogicalOffset As Long,
+                                             CloneLength As Long,
+                                             TargetLogicalOffset As Long,
+                                             RunAsync As Boolean,
+                                             CancellationToken As Threading.CancellationToken) As Task
 
 
             ThrowIfDisposed()
@@ -2956,12 +3267,12 @@ Namespace Streams
                 InvalidateChunkCache()
 
                 Dim ActualLength = Math.Min(CloneLength, _Length - SourceLogicalOffset)
-                Dim CloneExtents = BuildCloneExtents(SourceLogicalOffset, ActualLength)
+                Dim CloneExtents = Await BuildCloneExtentsAsync(SourceLogicalOffset, ActualLength, RunAsync, CancellationToken).ConfigureAwait(False)
 
                 InsertExtentsCore(TargetLogicalOffset, CloneExtents)
 
                 If MetadataPublishSuspended = False Then
-                    PersistIndexAndHeader(_IndexOffset)
+                    Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
                 End If
 
             Catch
@@ -2972,7 +3283,7 @@ Namespace Streams
             End Try
 
 
-        End Sub
+        End Function
 
         ''' <summary>
         ''' Replaces a logical range with zero bytes using sparse extents directly.
@@ -2986,8 +3297,29 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Asynchronously replaces a logical range with zero bytes.
+        ''' </summary>
+        Public Overloads Function ClearAsync(LogicalOffset As Long,
+                                             Count As Long,
+                                             Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            Return RunUnderStateLockAsync(CancellationToken,
+                                          Function() ClearCoreAsync(LogicalOffset, Count, RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
         Private Overloads Sub ClearCore(LogicalOffset As Long,
                                    Count As Long)
+
+            ClearCoreAsync(LogicalOffset, Count, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Sub
+
+        Private Overloads Async Function ClearCoreAsync(LogicalOffset As Long,
+                                                       Count As Long,
+                                                       RunAsync As Boolean,
+                                                       CancellationToken As Threading.CancellationToken) As Task
 
 
             ThrowIfDisposed()
@@ -3049,7 +3381,7 @@ Namespace Streams
                                      ReplacementExtents)
 
                     If MetadataPublishSuspended = False Then
-                        PersistIndexAndHeader(_IndexOffset)
+                        Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
                     End If
 
                 Catch
@@ -3087,10 +3419,12 @@ Namespace Streams
                         CInt(Math.Min(CLng(ZeroBuffer.Length),
                                       Remaining))
 
-                    WriteCore(CurrentOffset,
-                          ZeroBuffer,
-                          0,
-                          ThisWrite)
+                    Await WriteCoreAsync(CurrentOffset,
+                                         ZeroBuffer,
+                                         0,
+                                         ThisWrite,
+                                         RunAsync,
+                                         CancellationToken).ConfigureAwait(False)
 
                     CurrentOffset += ThisWrite
                     Remaining -= ThisWrite
@@ -3106,7 +3440,7 @@ Namespace Streams
             End Try
 
 
-        End Sub
+        End Function
 
         ''' <summary>
         ''' Inserts zero bytes at the specified logical offset using sparse extents directly.
@@ -3121,9 +3455,33 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Asynchronously inserts zero bytes at the specified logical offset.
+        ''' </summary>
+        Public Overloads Function InsertNullBytesAsync(LogicalOffset As Long,
+                                                       Count As Long,
+                                                       Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway,
+                                                       Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            Return RunUnderStateLockAsync(CancellationToken,
+                                          Function() InsertNullBytesCoreAsync(LogicalOffset, Count, AnchorActionAtLogicalOffset, RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
         Private Overloads Sub InsertNullBytesCore(LogicalOffset As Long,
                                              Count As Long,
                                              Optional AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset = AnchorActionsAtLogicalOffset.TransformAway)
+
+            InsertNullBytesCoreAsync(LogicalOffset, Count, AnchorActionAtLogicalOffset,
+                                     RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Sub
+
+        Private Overloads Async Function InsertNullBytesCoreAsync(LogicalOffset As Long,
+                                                                 Count As Long,
+                                                                 AnchorActionAtLogicalOffset As AnchorActionsAtLogicalOffset,
+                                                                 RunAsync As Boolean,
+                                                                 CancellationToken As Threading.CancellationToken) As Task
 
 
             ThrowIfDisposed()
@@ -3160,7 +3518,7 @@ Namespace Streams
                                       AnchorActionAtLogicalOffset)
 
                     If MetadataPublishSuspended = False Then
-                        PersistIndexAndHeader(_IndexOffset)
+                        Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
                     End If
 
                 Catch
@@ -3198,13 +3556,15 @@ Namespace Streams
                         CInt(Math.Min(CLng(ZeroBuffer.Length),
                                       Remaining))
 
-                    InsertCore(InsertOffset,
-                           ZeroBuffer,
-                           0,
-                           ThisInsert,
-                           If(FirstInsert,
-                              AnchorActionAtLogicalOffset,
-                              AnchorActionsAtLogicalOffset.TransformAway))
+                    Await InsertCoreAsync(InsertOffset,
+                                          ZeroBuffer,
+                                          0,
+                                          ThisInsert,
+                                          If(FirstInsert,
+                                             AnchorActionAtLogicalOffset,
+                                             AnchorActionsAtLogicalOffset.TransformAway),
+                                          RunAsync,
+                                          CancellationToken).ConfigureAwait(False)
 
                     InsertOffset += ThisInsert
                     Remaining -= ThisInsert
@@ -3221,7 +3581,7 @@ Namespace Streams
             End Try
 
 
-        End Sub
+        End Function
 
         ''' <summary>
         ''' Flushes pending changes to the backing stream.
@@ -3234,7 +3594,23 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Asynchronously flushes pending changes to the backing stream.
+        ''' </summary>
+        Public Overrides Function FlushAsync(CancellationToken As Threading.CancellationToken) As Task
+
+            Return RunUnderStateLockAsync(CancellationToken, Function() FlushCoreAsync(RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
         Private Sub FlushCore()
+
+            FlushCoreAsync(RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Sub
+
+        Private Async Function FlushCoreAsync(RunAsync As Boolean,
+                                             CancellationToken As Threading.CancellationToken) As Task
 
 
             ThrowIfDisposed()
@@ -3249,7 +3625,7 @@ Namespace Streams
                _Faulted = False AndAlso
                BaseStream.CanWrite Then
 
-                PersistIndexAndHeader(_IndexOffset, True)
+                Await PersistIndexAndHeaderAsync(_IndexOffset, True, RunAsync, CancellationToken).ConfigureAwait(False)
 
                 '
                 ' The batch is now durable, so it becomes the rollback baseline: a later
@@ -3261,11 +3637,15 @@ Namespace Streams
             End If
 
             If BaseStream.CanWrite Then
-                BaseStream.Flush()
+                If RunAsync Then
+                    Await BaseStream.FlushAsync(CancellationToken).ConfigureAwait(False)
+                Else
+                    BaseStream.Flush()
+                End If
             End If
 
 
-        End Sub
+        End Function
 
         ''' <summary>
         ''' Releases resources owned by the ChunkedStream. The underlying stream is not disposed.
@@ -3346,14 +3726,38 @@ Namespace Streams
 
         End Function
 
+        Private Function PersistIndexAndHeaderAsync(IndexOffset As Long,
+                                                   Durable As Boolean,
+                                                   RunAsync As Boolean,
+                                                   CancellationToken As Threading.CancellationToken) As Task
+
+            Return PersistPagedMetadataAsync(IndexOffset, Durable, RunAsync, CancellationToken)
+
+        End Function
+
+        '
+        ' Synchronous bridge for the metadata-publish spine. The publish logic lives in a
+        ' single flag-driven body; the synchronous callers (the sync public API, Dispose,
+        ' and the paths not yet threaded for async) run it with RunAsync:=False, where no
+        ' await ever suspends so GetResult() completes synchronously and rethrows the
+        ' original exception unwrapped.
+        '
         Private Sub PersistIndexAndHeader(IndexOffset As Long,
                                           Optional Durable As Boolean = False)
 
-            PersistPagedMetadata(IndexOffset, Durable)
+            PersistIndexAndHeaderAsync(IndexOffset, Durable, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
 
         End Sub
 
         Private Sub UpdateHeader(Optional Durable As Boolean = False)
+
+            UpdateHeaderAsync(Durable, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Sub
+
+        Private Async Function UpdateHeaderAsync(Durable As Boolean,
+                                                RunAsync As Boolean,
+                                                CancellationToken As Threading.CancellationToken) As Task
 
             _HeaderFlags = _HeaderFlags Or HeaderFlags.VariableChunkIndex
 
@@ -3385,7 +3789,11 @@ Namespace Streams
                     Dim Root(_MetadataRootLength - 1) As Byte
 
                     BaseStream.Position = _MetadataRootOffset
-                    ReadExactly(BaseStream, Root, 0, Root.Length)
+                    If RunAsync Then
+                        Await ReadExactlyAsync(BaseStream, Root, 0, Root.Length, CancellationToken).ConfigureAwait(False)
+                    Else
+                        ReadExactly(BaseStream, Root, 0, Root.Length)
+                    End If
 
                     RootMac = ComputeMac(Root, Root.Length - MacSize, PublicIntegrityKey)
 
@@ -3399,11 +3807,19 @@ Namespace Streams
 
             End If
 
-            WriteHeaderCopies(Durable)
+            Await WriteHeaderCopiesAsync(Durable, RunAsync, CancellationToken).ConfigureAwait(False)
+
+        End Function
+
+        Private Sub WriteHeaderCopies(Durable As Boolean)
+
+            WriteHeaderCopiesAsync(Durable, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
 
         End Sub
 
-        Private Sub WriteHeaderCopies(Durable As Boolean)
+        Private Async Function WriteHeaderCopiesAsync(Durable As Boolean,
+                                                     RunAsync As Boolean,
+                                                     CancellationToken As Threading.CancellationToken) As Task
 
             _HeaderSequence += 1
             System.Buffer.BlockCopy(BitConverter.GetBytes(_HeaderSequence), 0, _Header, HeaderSequenceOffset, 8)
@@ -3415,7 +3831,11 @@ Namespace Streams
             Dim HeaderOffset = _ActiveHeaderCopy * HeaderSize
 
             BaseStream.Position = HeaderOffset
-            BaseStream.Write(_Header, 0, _Header.Length)
+            If RunAsync Then
+                Await BaseStream.WriteAsync(_Header, 0, _Header.Length, CancellationToken).ConfigureAwait(False)
+            Else
+                BaseStream.Write(_Header, 0, _Header.Length)
+            End If
 
             '
             ' This rotation has overwritten one header slot. Any deferred span whose
@@ -3424,9 +3844,9 @@ Namespace Streams
             '
             ReleaseDeferredFreeSpace()
 
-            If Durable Then FlushDurable()
+            If Durable Then Await FlushDurableEitherAsync(RunAsync).ConfigureAwait(False)
 
-        End Sub
+        End Function
 
         Private Sub ThrowIfDisposed()
 

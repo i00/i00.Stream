@@ -171,8 +171,273 @@ Namespace Tests
             End Sub
 
             ' ================================================================================
+            ' Write / mutation path
+            ' ================================================================================
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub AsyncWritesAndMutationsMatchTheSyncModel()
+
+                For Each Encrypted In New Boolean() {False, True}
+
+                    Dim SyncBytes As Byte()
+                    Dim AsyncBytes As Byte()
+
+                    ' Run the identical operation script synchronously and asynchronously and
+                    ' require byte-identical results.
+                    Using Ms As New MemoryStream()
+                        Using Cs = ChunkedStream.Open(Ms, MakeOptions(Encrypted, 2000))
+                            Dim Data = GenerateRandomData(9000, 4400)
+                            Cs.Write(0, Data)
+                            Cs.Insert(1500, GenerateRandomData(1200, 4401))
+                            Cs.Replace(500, 800, GenerateRandomData(2500, 4402))
+                            Cs.Remove(3000, 1000)
+                            Cs.SetLength(Cs.Length + 3000)
+                            Cs.Clear(200, 700)
+                            Cs.InsertNullBytes(50, 400)
+                            Cs.Clone(100, 900, Cs.Length)
+                            Cs.Flush()
+                            SyncBytes = Cs.ToArray()
+                            Cs.Validate()
+                        End Using
+                    End Using
+
+                    Using Ms As New MemoryStream()
+                        Using Cs = ChunkedStream.Open(Ms, MakeOptions(Encrypted, 2000))
+                            Dim Data = GenerateRandomData(9000, 4400)
+                            Cs.WriteAsync(0, Data).GetAwaiter().GetResult()
+                            Cs.InsertAsync(1500, GenerateRandomData(1200, 4401)).GetAwaiter().GetResult()
+                            Cs.ReplaceAsync(500, 800, GenerateRandomData(2500, 4402)).GetAwaiter().GetResult()
+                            Cs.RemoveAsync(3000, 1000).GetAwaiter().GetResult()
+                            Cs.SetLengthAsync(Cs.Length + 3000).GetAwaiter().GetResult()
+                            Cs.ClearAsync(200, 700).GetAwaiter().GetResult()
+                            Cs.InsertNullBytesAsync(50, 400).GetAwaiter().GetResult()
+                            Cs.CloneAsync(100, 900, Cs.Length).GetAwaiter().GetResult()
+                            Cs.FlushAsync(CancellationToken.None).GetAwaiter().GetResult()
+                            AsyncBytes = Cs.ToArrayAsync().GetAwaiter().GetResult()
+                            Cs.Validate()
+                        End Using
+                    End Using
+
+                    AssertBytesEqual(SyncBytes, AsyncBytes, $"Async op script diverged from the sync model (encrypted={Encrypted}).")
+
+                Next
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub AsyncWrittenStreamSurvivesReopen()
+
+                Dim Expected = GenerateRandomData(ChunkedStream.DefaultChunkSize * 4 + 55, 4500)
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+                        Cs.WriteAsync(0, Expected).GetAwaiter().GetResult()
+                        Cs.FlushAsync(CancellationToken.None).GetAwaiter().GetResult()
+                        Cs.Validate()
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+                        AssertBytesEqual(Expected, Reopened.ToArray(), "Async-written data did not survive reopen.")
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub WriteAsyncDrivesTheAsyncPositionedFastPath()
+
+                Using Backing As New AsyncPositionedMemoryStream(PositionedIoCapabilities.None)
+
+                    Dim Expected = GenerateRandomData(ChunkedStream.DefaultChunkSize * 3, 4600)
+
+                    Using Cs = ChunkedStream.Open(Backing)
+
+                        Backing.ResetCounters()
+                        Cs.WriteAsync(0, Expected).GetAwaiter().GetResult()
+                        Cs.FlushAsync(CancellationToken.None).GetAwaiter().GetResult()
+
+                        Dim AsyncWriteCalls = Backing.WriteAtAsyncCalls
+                        Dim SyncWriteCalls = Backing.SyncWriteAtCallsSinceReset
+
+                        AssertBytesEqual(Expected, Cs.ToArrayAsync().GetAwaiter().GetResult(), "Async positioned write round-trip mismatch.")
+                        Cs.Validate()
+
+                        AssertTrue(AsyncWriteCalls > 0, "ChunkedStream never used IPositionedStreamAsync.WriteAtAsync.")
+                        AssertEqual(0, SyncWriteCalls, "ChunkedStream fell back to the synchronous WriteAt on the async write path.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub WriteAsyncFaultsTheStreamOnFailureLikeTheSyncPath()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, GenerateRandomData(1000, 4700))
+
+                        Dim Threw = False
+                        Try
+                            Cs.WriteAsync(-1, New Byte() {1, 2, 3}).GetAwaiter().GetResult()
+                        Catch Ex As ArgumentOutOfRangeException
+                            Threw = True
+                        End Try
+                        AssertTrue(Threw, "WriteAsync with a negative offset should throw ArgumentOutOfRangeException.")
+
+                        ' An argument guard rejects before any state mutation, so the stream stays usable.
+                        AssertEqual(1000, Cs.ToArray().Length, "Stream unusable after a rejected WriteAsync.")
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ' ================================================================================
+            ' Open / anchors / checkpoints / maintenance
+            ' ================================================================================
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub OpenAsyncMatchesOpenAndRunsRecovery()
+
+                Dim Expected = GenerateRandomData(ChunkedStream.DefaultChunkSize * 3 + 7, 4800)
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+                        Cs.Write(0, Expected)
+                    End Using
+
+                    Using Reopened = ChunkedStream.OpenAsync(Ms).GetAwaiter().GetResult()
+                        AssertBytesEqual(Expected, Reopened.ToArrayAsync().GetAwaiter().GetResult(), "OpenAsync produced different content.")
+                        Reopened.Validate()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub AnchorRelativeAsyncIoTracksTheAnchor()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms, New ChunkedStream.ChunkedStreamOptions With {.ChunkSize = 1024})
+
+                        Cs.Write(0, GenerateRandomData(4000, 4900))
+
+                        Dim Anchor = Cs.CreateAnchorAsync(2000L).GetAwaiter().GetResult()
+
+                        ' Shift the anchored data by inserting before it, then write through the anchor.
+                        Cs.Insert(500, GenerateRandomData(300, 4901))
+
+                        Dim Patch = GenerateRandomData(200, 4902)
+                        Cs.WriteAsync(Anchor, Patch).GetAwaiter().GetResult()
+
+                        Dim Back(199) As Byte
+                        Cs.ReadAsync(Anchor, Back, 0, Back.Length).GetAwaiter().GetResult()
+                        AssertBytesEqual(Patch, Back, "Anchor-relative async read did not see the anchor-relative async write.")
+
+                        ' The anchor's absolute offset moved by the insert length.
+                        AssertEqual(2300L, Cs.GetAnchorOffset(Anchor.AnchorId), "Anchor offset did not track the insert.")
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CheckpointAsyncCommitAndRollbackBehaveLikeSync()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, GenerateRandomData(2000, 5000))
+                        Dim V0 = Cs.ToArray()
+
+                        Dim Cp = Cs.CreateCheckpointAsync().GetAwaiter().GetResult()
+                        Try
+                            Cs.Write(0, GenerateRandomData(2000, 5001))
+                            Cp.RollbackAsync().GetAwaiter().GetResult()
+                            AssertBytesEqual(V0, Cs.ToArray(), "Async rollback did not restore the checkpoint baseline.")
+
+                            Cs.Write(500, GenerateRandomData(400, 5002))
+                            Dim V1 = Cs.ToArray()
+                            Cp.CommitAsync().GetAwaiter().GetResult()
+
+                            Cs.Write(0, GenerateRandomData(2000, 5003))
+                            Cp.RollbackAsync().GetAwaiter().GetResult()
+                            AssertBytesEqual(V1, Cs.ToArray(), "Async rollback did not restore the committed baseline.")
+                        Finally
+                            Cp.CloseAsync().GetAwaiter().GetResult()
+                        End Try
+
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DefragmentAsyncCompactsAndCanBeCancelled()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms, New ChunkedStream.ChunkedStreamOptions With {.ChunkSize = 512})
+
+                        Cs.Write(0, GenerateRandomData(40000, 5100))
+                        For Offset = 0 To 30000 Step 2000
+                            Cs.Write(Offset, GenerateRandomData(700, 5100 + Offset))
+                        Next
+
+                        Dim Expected = Cs.ToArray()
+
+                        Dim Saved = Cs.DefragmentAsync(ChunkedStream.DefragTypes.Sequence).GetAwaiter().GetResult()
+                        AssertTrue(Saved >= 0, "DefragmentAsync reported a negative result without cancellation.")
+                        AssertBytesEqual(Expected, Cs.ToArray(), "DefragmentAsync changed the logical content.")
+                        Cs.Validate()
+
+                        ' A pre-cancelled token makes the async defrag return the cancelled result.
+                        Using Cts As New CancellationTokenSource()
+                            Cts.Cancel()
+                            Dim Result = Cs.DefragmentAsync(ChunkedStream.DefragTypes.Rebuild, Nothing, Cts.Token).GetAwaiter().GetResult()
+                            AssertEqual(-1L, Result, "Cancelled DefragmentAsync should return -1.")
+                        End Using
+
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Cancelled DefragmentAsync corrupted the stream.")
+                        Cs.Validate()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ' ================================================================================
             ' Helpers
             ' ================================================================================
+
+            Private Shared Function MakeOptions(Encrypted As Boolean, ChunkSize As Integer) As ChunkedStream.ChunkedStreamOptions
+
+                Dim Options As New ChunkedStream.ChunkedStreamOptions With {.ChunkSize = ChunkSize}
+                If Encrypted Then Options.EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(4321))
+                Return Options
+
+            End Function
 
             ''' <summary>
             ''' A seekable in-memory stream implementing <see cref="IPositionedStreamAsync" />,
@@ -193,11 +458,15 @@ Namespace Tests
                 End Sub
 
                 Public Property ReadAtAsyncCalls As Integer
+                Public Property WriteAtAsyncCalls As Integer
                 Public Property SyncReadAtCallsSinceReset As Integer
+                Public Property SyncWriteAtCallsSinceReset As Integer
 
                 Public Sub ResetCounters()
                     ReadAtAsyncCalls = 0
+                    WriteAtAsyncCalls = 0
                     SyncReadAtCallsSinceReset = 0
+                    SyncWriteAtCallsSinceReset = 0
                 End Sub
 
                 Public ReadOnly Property PositionedIoCapabilities As PositionedIoCapabilities _
@@ -223,6 +492,7 @@ Namespace Tests
                     Implements IPositionedStream.WriteAt
 
                     SyncLock _Gate
+                        SyncWriteAtCallsSinceReset += 1
                         If PhysicalOffset > _Inner.Length Then _Inner.SetLength(PhysicalOffset)
                         _Inner.Position = PhysicalOffset
                         _Inner.Write(Buffer, BufferOffset, Count)
@@ -254,6 +524,7 @@ Namespace Tests
                     CancellationToken.ThrowIfCancellationRequested()
 
                     SyncLock _Gate
+                        WriteAtAsyncCalls += 1
                         If PhysicalOffset > _Inner.Length Then _Inner.SetLength(PhysicalOffset)
                         _Inner.Position = PhysicalOffset
                         _Inner.Write(Buffer, BufferOffset, Count)

@@ -4,6 +4,50 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ---
 
+## 2026-09-02
+
+### Async support — DONE
+`ChunkedStream` gained a full asynchronous API on .NET Framework 4.8 / VB (no new deps).
+
+**Truly async end to end** (awaited call yields the thread during backing-store I/O):
+`ReadAsync` / `WriteAsync` (Stream overrides + positional `(LogicalOffset,…)` + anchor-relative),
+`FlushAsync`, `ToArrayAsync` (×2), `SetLengthAsync`,
+`ReplaceAsync` / `InsertAsync` / `RemoveAsync` / `ClearAsync` / `CloneAsync` / `CloneInsertAsync` /
+`InsertNullBytesAsync` (+ anchor-relative forms), `CreateAnchorAsync` (×2).
+New optional `IPositionedStreamAsync` backing-store contract (`ReadAtAsync` / `WriteAtAsync`);
+`ChunkedStream` prefers it, else falls back to `Stream.ReadAsync` / `WriteAsync`.
+
+**Design:**
+- Read path — hand-written sync + async twins (`ReadCoreAsync` / `ReadExtentBytesAsync` /
+  `ReadPhysicalRecordPlainAsync`); the existing synchronous read chain is untouched, so no
+  allocation regression on bulk reads.
+- Write / metadata-publish / mutation spine — one flag-driven body per method
+  (`…Async(…, RunAsync As Boolean, CancellationToken)`), with a thin synchronous bridge
+  (`Xxx(…)` → `XxxAsync(…, RunAsync:=False, Nothing).GetAwaiter().GetResult()`). Safe because
+  with `RunAsync:=False` no await ever suspends (the three `*EitherAsync` dispatch helpers
+  return already-completed tasks), so the body runs straight through and `GetResult()`
+  rethrows the original exception unwrapped. Single source of truth for the crash-safety
+  ordering.
+- State lock — `SemaphoreSlim.WaitAsync`; the `AsyncLocal` reentrancy depth is written in the
+  method that owns the `Try/Finally` (`RunUnderStateLockAsync`), never in an awaited helper
+  (an awaited async method's `ExecutionContext` mutations do not flow back to its caller).
+
+**Async by worker-thread offload** (documented; one-shot / long-running batch ops, matching
+the pre-existing `ValidateAsync` etc.): `OpenAsync` (×2), `DefragmentAsync`, `ApplyOptionsAsync`
+(both bridge a `CancellationToken` into the operation's progress cancellation token and return
+the cancelled result rather than throwing), `CreateCheckpointAsync`,
+`ChunkedStreamCheckpoint.CommitAsync` / `RollbackAsync` / `CloseAsync`,
+`DeferPublishScope.PublishAsync` / `CloseAsync`, `DeferPublishAsync`. .NET Framework 4.8 has no
+`IAsyncDisposable`, so the checkpoint / scope docs tell async callers to call `CloseAsync`
+explicitly; `Dispose()` stays for sync callers and as a safety net.
+
+Tests: `_Tests/UnitTests/Tests/Chunked Stream/Core stream semantics/Async.vb` (+8), suite
+261 → 269. `PositionedStream.vb` test double implements `IPositionedStreamAsync`.
+
+Follow-ups in TODO.md (make the offloaded methods truly async; crypto/compression throughput).
+
+---
+
 ## 2026-08-30
 
 ### C2-a — non-sparse Clear / InsertNullBytes now batch into one publish — FIXED

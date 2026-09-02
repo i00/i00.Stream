@@ -238,7 +238,27 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Asynchronously creates an anchor identifying the start of existing logical data
+        ''' at the specified offset.
+        ''' </summary>
+        Public Overloads Function CreateAnchorAsync(LogicalOffset As Long,
+                                                   Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Anchor)
+
+            Return RunUnderStateLockAsync(CancellationToken,
+                                          Function() CreateAnchorCoreAsync(LogicalOffset, RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
         Private Function CreateAnchorCore(LogicalOffset As Long) As Anchor
+
+            Return CreateAnchorCoreAsync(LogicalOffset, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Function
+
+        Private Async Function CreateAnchorCoreAsync(LogicalOffset As Long,
+                                                    RunAsync As Boolean,
+                                                    CancellationToken As Threading.CancellationToken) As Task(Of Anchor)
 
 
             ThrowIfDisposed()
@@ -287,7 +307,7 @@ Namespace Streams
                 MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex)
 
                 If MetadataPublishSuspended = False Then
-                    PersistIndexAndHeader(_IndexOffset)
+                    Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
                 End If
 
                 Return New Anchor(Me, AnchorId)
@@ -316,7 +336,27 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Asynchronously appends the supplied data to the end of the logical stream and
+        ''' creates an anchor identifying its first byte.
+        ''' </summary>
+        Public Overloads Function CreateAnchorAsync(Data As Byte(),
+                                                   Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Anchor)
+
+            Return RunUnderStateLockAsync(CancellationToken,
+                                          Function() CreateAnchorCoreAsync(Data, RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
         Private Function CreateAnchorCore(Data As Byte()) As Anchor
+
+            Return CreateAnchorCoreAsync(Data, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Function
+
+        Private Async Function CreateAnchorCoreAsync(Data As Byte(),
+                                                    RunAsync As Boolean,
+                                                    CancellationToken As Threading.CancellationToken) As Task(Of Anchor)
 
             If Data Is Nothing Then Throw New ArgumentNullException(NameOf(Data))
 
@@ -334,7 +374,7 @@ Namespace Streams
 
                 Dim AnchorOffset = _Length
                 Dim AnchorId = AllocateAnchorId()
-                Dim NewExtents = BuildExtentsFromBuffer(Data, 0, Data.Length)
+                Dim NewExtents = Await BuildExtentsFromBufferAsync(Data, 0, Data.Length, RunAsync, CancellationToken).ConfigureAwait(False)
 
                 If NewExtents.Count = 0 Then
                     Throw New InvalidOperationException(
@@ -352,7 +392,7 @@ Namespace Streams
                                   AnchorActionsAtLogicalOffset.Use)
 
                 If MetadataPublishSuspended = False Then
-                    PersistIndexAndHeader(_IndexOffset)
+                    Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
                 End If
 
                 Return New Anchor(Me, AnchorId)
@@ -764,6 +804,106 @@ Namespace Streams
                     AnchorActionsAtLogicalOffset.Use)
 
         End Sub
+
+        ' ============================================================================
+        ' Anchor-relative asynchronous I/O. Each resolves the anchor's current logical
+        ' offset and forwards to the corresponding logical-offset async method.
+        ' ============================================================================
+
+        ''' <summary>Asynchronously writes data at the current logical offset of the specified anchor.</summary>
+        Public Overloads Function WriteAsync(Anchor As Anchor,
+                                             Input As Byte(),
+                                             Optional DataOffset As Integer = 0,
+                                             Optional Count As Integer? = Nothing,
+                                             Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Integer)
+
+            If Anchor Is Nothing Then Throw New ArgumentNullException(NameOf(Anchor))
+            EnsureAnchorOwner(Anchor)
+            Return WriteAsync(GetAnchorOffset(Anchor.AnchorId), Input, DataOffset, Count, CancellationToken)
+
+        End Function
+
+        ''' <summary>Asynchronously reads data starting at the current logical offset of the specified anchor.</summary>
+        Public Overloads Function ReadAsync(Anchor As Anchor,
+                                            Output As Byte(),
+                                            Optional OutputOffset As Integer = 0,
+                                            Optional Count As Integer? = Nothing,
+                                            Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Integer)
+
+            If Anchor Is Nothing Then Throw New ArgumentNullException(NameOf(Anchor))
+            EnsureAnchorOwner(Anchor)
+            Return ReadAsync(GetAnchorOffset(Anchor.AnchorId), Output, OutputOffset, Count, CancellationToken)
+
+        End Function
+
+        ''' <summary>Asynchronously replaces logical bytes with zero bytes at the current offset of the anchor.</summary>
+        Public Overloads Function ClearAsync(Anchor As Anchor,
+                                             Count As Long,
+                                             Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            If Anchor Is Nothing Then Throw New ArgumentNullException(NameOf(Anchor))
+            EnsureAnchorOwner(Anchor)
+            Return ClearAsync(GetAnchorOffset(Anchor.AnchorId), Count, CancellationToken)
+
+        End Function
+
+        ''' <summary>Asynchronously inserts zero bytes at the current logical offset of the anchor.</summary>
+        Public Overloads Function InsertNullBytesAsync(Anchor As Anchor,
+                                                       Count As Long,
+                                                       Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            If Anchor Is Nothing Then Throw New ArgumentNullException(NameOf(Anchor))
+            EnsureAnchorOwner(Anchor)
+            Return InsertNullBytesAsync(GetAnchorOffset(Anchor.AnchorId), Count, AnchorActionsAtLogicalOffset.Use, CancellationToken)
+
+        End Function
+
+        ''' <summary>Asynchronously removes logical bytes starting at the current offset of the anchor.</summary>
+        Public Overloads Function RemoveAsync(Anchor As Anchor,
+                                              Length As Long,
+                                              Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            If Anchor Is Nothing Then Throw New ArgumentNullException(NameOf(Anchor))
+            Return RemoveAsync(GetAnchorOffset(Anchor.AnchorId), Length, CancellationToken)
+
+        End Function
+
+        ''' <summary>Asynchronously inserts data at the current logical offset of the anchor.</summary>
+        Public Overloads Function InsertAsync(Anchor As Anchor,
+                                              Data As Byte(),
+                                              Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            If Anchor Is Nothing Then Throw New ArgumentNullException(NameOf(Anchor))
+            If Data Is Nothing Then Throw New ArgumentNullException(NameOf(Data))
+            EnsureAnchorOwner(Anchor)
+            Return InsertAsync(GetAnchorOffset(Anchor.AnchorId), Data, 0, Data.Length, AnchorActionsAtLogicalOffset.Use, CancellationToken)
+
+        End Function
+
+        ''' <summary>Asynchronously inserts a region of the supplied buffer at the current offset of the anchor.</summary>
+        Public Overloads Function InsertAsync(Anchor As Anchor,
+                                              Data As Byte(),
+                                              DataOffset As Integer,
+                                              Count As Integer,
+                                              Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            If Anchor Is Nothing Then Throw New ArgumentNullException(NameOf(Anchor))
+            Return InsertAsync(GetAnchorOffset(Anchor.AnchorId), Data, DataOffset, Count, AnchorActionsAtLogicalOffset.Use, CancellationToken)
+
+        End Function
+
+        ''' <summary>Asynchronously replaces logical bytes at the current offset of the anchor with the supplied data.</summary>
+        Public Overloads Function ReplaceAsync(Anchor As Anchor,
+                                               Length As Long,
+                                               Data As Byte(),
+                                               Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            If Anchor Is Nothing Then Throw New ArgumentNullException(NameOf(Anchor))
+            If Data Is Nothing Then Throw New ArgumentNullException(NameOf(Data))
+            EnsureAnchorOwner(Anchor)
+            Return ReplaceAsync(GetAnchorOffset(Anchor.AnchorId), Length, Data, 0, Data.Length, AnchorActionsAtLogicalOffset.Use, CancellationToken)
+
+        End Function
 
         ''' <summary>
         ''' Copies a logical range and inserts the copy at the current logical offset of the

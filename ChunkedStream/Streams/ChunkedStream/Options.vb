@@ -490,6 +490,36 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Asynchronously rewrites existing chunks to conform to the current options.
+        ''' </summary>
+        ''' <remarks>
+        ''' ApplyOptions is a long-running batch operation and is executed on a worker
+        ''' thread. When <paramref name="CancellationToken" /> is cancelled it is surfaced to
+        ''' the internal operation through its progress cancellation token; the call then
+        ''' completes with <c>WasCancelled</c> set on the result rather than throwing.
+        ''' </remarks>
+        Public Function ApplyOptionsAsync(Optional Types As ApplyOptionTypes = ApplyOptionTypes.All,
+                                          Optional ProgressCallback As StreamProgressCallback = Nothing,
+                                          Optional Durable As Boolean = True,
+                                          Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of ApplyOptionsResult)
+
+            Dim EffectiveCallback = BridgeProgressCancellation(ProgressCallback, CancellationToken)
+
+            '
+            ' The token is surfaced through EffectiveCallback rather than handed to
+            ' Task.Run, so cancellation completes with WasCancelled set on the result
+            ' rather than faulting the task.
+            '
+            Return Task.Run(
+                Function()
+                    Using EnterStateLock()
+                        Return ApplyOptionsCore(Types, EffectiveCallback, Durable)
+                    End Using
+                End Function)
+
+        End Function
+
         Private Function ApplyOptionsCore(Optional Types As ApplyOptionTypes = ApplyOptionTypes.All,
                                      Optional ProgressCallback As StreamProgressCallback = Nothing,
                                      Optional Durable As Boolean = True) As ApplyOptionsResult

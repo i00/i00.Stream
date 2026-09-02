@@ -153,7 +153,9 @@ Namespace Streams
 
         End Function
 
-        Private Sub WriteExtentPage(PageNumber As Integer)
+        Private Async Function WriteExtentPageAsync(PageNumber As Integer,
+                                                   RunAsync As Boolean,
+                                                   CancellationToken As Threading.CancellationToken) As Task
 
             If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
 
@@ -177,7 +179,7 @@ Namespace Streams
             Dim Page = BuildExtentPage(PageNumber)
             Dim Offset = GetNextWriteOffset(Page.Length, Options.NewIndexPageWriteLocationPolicy, True)
 
-            WriteAt(Offset, Page, 0, Page.Length)
+            Await WriteAtEitherAsync(RunAsync, Offset, Page, 0, Page.Length, CancellationToken).ConfigureAwait(False)
 
             Dim Descriptor = New MetadataPageDescriptor With {
                 .PageNumber = PageNumber,
@@ -192,7 +194,7 @@ Namespace Streams
 
             _ExtentPageDescriptors(PageNumber) = Descriptor
 
-        End Sub
+        End Function
 
         Private Function BuildPhysicalRecordPage(PageNumber As Integer) As Byte()
 
@@ -256,7 +258,9 @@ Namespace Streams
 
         End Function
 
-        Private Sub WritePhysicalRecordPage(PageNumber As Integer)
+        Private Async Function WritePhysicalRecordPageAsync(PageNumber As Integer,
+                                                           RunAsync As Boolean,
+                                                           CancellationToken As Threading.CancellationToken) As Task
 
             If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
 
@@ -298,7 +302,7 @@ Namespace Streams
             Dim Page = BuildPhysicalRecordPage(PageNumber)
             Dim Offset = GetNextWriteOffset(Page.Length, Options.NewIndexPageWriteLocationPolicy, True)
 
-            WriteAt(Offset, Page, 0, Page.Length)
+            Await WriteAtEitherAsync(RunAsync, Offset, Page, 0, Page.Length, CancellationToken).ConfigureAwait(False)
 
             Dim Descriptor =
                 New MetadataPageDescriptor With {
@@ -321,7 +325,7 @@ Namespace Streams
 
             _PhysicalRecordPageDescriptors(PageNumber) = Descriptor
 
-        End Sub
+        End Function
 
         Private Function BuildDirectoryPage(DirectoryType As DirectoryTypes,
                                             PageNumber As Integer,
@@ -368,9 +372,11 @@ Namespace Streams
 
         End Function
 
-        Private Function WriteDirectoryPages(DirectoryType As DirectoryTypes,
-                                             Descriptors As IEnumerable(Of MetadataPageDescriptor),
-                                             ExistingDirectoryDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)) As Dictionary(Of Integer, MetadataPageDescriptor)
+        Private Async Function WriteDirectoryPagesAsync(DirectoryType As DirectoryTypes,
+                                                       Descriptors As IEnumerable(Of MetadataPageDescriptor),
+                                                       ExistingDirectoryDescriptors As Dictionary(Of Integer, MetadataPageDescriptor),
+                                                       RunAsync As Boolean,
+                                                       CancellationToken As Threading.CancellationToken) As Task(Of Dictionary(Of Integer, MetadataPageDescriptor))
 
             If Descriptors Is Nothing Then Throw New ArgumentNullException(NameOf(Descriptors))
             If ExistingDirectoryDescriptors Is Nothing Then Throw New ArgumentNullException(NameOf(ExistingDirectoryDescriptors))
@@ -385,7 +391,7 @@ Namespace Streams
                 Dim OldDescriptor As MetadataPageDescriptor = Nothing
                 Dim HadOldDescriptor = ExistingDirectoryDescriptors.TryGetValue(PageNumber, OldDescriptor)
 
-                WriteAt(Offset, Page, 0, Page.Length)
+                Await WriteAtEitherAsync(RunAsync, Offset, Page, 0, Page.Length, CancellationToken).ConfigureAwait(False)
 
                 Dim NewDescriptor = New MetadataPageDescriptor With {
                     .PageNumber = PageNumber,
@@ -445,7 +451,9 @@ Namespace Streams
 
         End Function
 
-        Private Function WriteHoleDirectoryPages(Records As IList(Of HoleDirectoryRecord)) As Dictionary(Of Integer, MetadataPageDescriptor)
+        Private Async Function WriteHoleDirectoryPagesAsync(Records As IList(Of HoleDirectoryRecord),
+                                                           RunAsync As Boolean,
+                                                           CancellationToken As Threading.CancellationToken) As Task(Of Dictionary(Of Integer, MetadataPageDescriptor))
 
             Dim Result As New Dictionary(Of Integer, MetadataPageDescriptor)()
 
@@ -483,7 +491,7 @@ Namespace Streams
 
                 Dim Offset = GetNextWriteOffset(Page.Length, Options.NewIndexDirectoryPageWriteLocationPolicy, True)
 
-                WriteAt(Offset, Page, 0, Page.Length)
+                Await WriteAtEitherAsync(RunAsync, Offset, Page, 0, Page.Length, CancellationToken).ConfigureAwait(False)
 
                 Dim NewDescriptor = New MetadataPageDescriptor With {
                     .PageNumber = PageNumber,
@@ -654,8 +662,10 @@ Namespace Streams
 
         End Sub
 
-        Private Sub PersistPagedMetadata(IndexOffset As Long,
-                                         Durable As Boolean)
+        Private Async Function PersistPagedMetadataAsync(IndexOffset As Long,
+                                                        Durable As Boolean,
+                                                        RunAsync As Boolean,
+                                                        CancellationToken As Threading.CancellationToken) As Task
 
             If IndexOffset < DataStartOffset Then Throw New InvalidDataException("Invalid index offset.")
 
@@ -710,7 +720,7 @@ Namespace Streams
             For Each PageNumber In _DirtyExtentPages.ToArray()
 
                 If PageNumber < RequiredExtentPageCount Then
-                    WriteExtentPage(PageNumber)
+                    Await WriteExtentPageAsync(PageNumber, RunAsync, CancellationToken).ConfigureAwait(False)
                 End If
 
             Next
@@ -718,7 +728,7 @@ Namespace Streams
             For Each PageNumber In _DirtyPhysicalRecordPages.ToArray()
 
                 If PageNumber < RequiredPhysicalRecordPageCount Then
-                    WritePhysicalRecordPage(PageNumber)
+                    Await WritePhysicalRecordPageAsync(PageNumber, RunAsync, CancellationToken).ConfigureAwait(False)
                 End If
 
             Next
@@ -737,9 +747,11 @@ Namespace Streams
             If _ExtentPageDescriptors.Count > _IndexDirectoryEntryCount Then
 
                 Dim NewExtentDirectoryDescriptors =
-                    WriteDirectoryPages(DirectoryTypes.ExtentPages,
-                                        _ExtentPageDescriptors.Values,
-                                        _ExtentDirectoryPageDescriptors)
+                    Await WriteDirectoryPagesAsync(DirectoryTypes.ExtentPages,
+                                                   _ExtentPageDescriptors.Values,
+                                                   _ExtentDirectoryPageDescriptors,
+                                                   RunAsync,
+                                                   CancellationToken).ConfigureAwait(False)
 
                 _ExtentDirectoryPageDescriptors.Clear()
 
@@ -781,9 +793,11 @@ Namespace Streams
             If _PhysicalRecordPageDescriptors.Count > _IndexDirectoryEntryCount Then
 
                 Dim NewPhysicalRecordDirectoryDescriptors =
-                    WriteDirectoryPages(DirectoryTypes.PhysicalRecordPages,
-                                        _PhysicalRecordPageDescriptors.Values,
-                                        _PhysicalRecordDirectoryPageDescriptors)
+                    Await WriteDirectoryPagesAsync(DirectoryTypes.PhysicalRecordPages,
+                                                   _PhysicalRecordPageDescriptors.Values,
+                                                   _PhysicalRecordDirectoryPageDescriptors,
+                                                   RunAsync,
+                                                   CancellationToken).ConfigureAwait(False)
 
                 _PhysicalRecordDirectoryPageDescriptors.Clear()
 
@@ -819,7 +833,7 @@ Namespace Streams
 
             If ShouldPersistHoleDirectory(Durable) Then
                 NewHoleDirectoryDescriptors =
-                    WriteHoleDirectoryPages(GetKnownHoleRecords())
+                    Await WriteHoleDirectoryPagesAsync(GetKnownHoleRecords(), RunAsync, CancellationToken).ConfigureAwait(False)
             End If
 
             For Each Descriptor In _HoleDirectoryPageDescriptors.Values.ToArray()
@@ -894,7 +908,7 @@ Namespace Streams
 
                 _MetadataRootLength = Root.Length
 
-                WriteAt(_MetadataRootOffset, Root, 0, Root.Length)
+                Await WriteAtEitherAsync(RunAsync, _MetadataRootOffset, Root, 0, Root.Length, CancellationToken).ConfigureAwait(False)
 
                 If OldRootOffset > 0 AndAlso OldRootLength > 0 Then
                     DeferFreeSpace(OldRootOffset, OldRootLength)
@@ -904,13 +918,13 @@ Namespace Streams
 
             End If
 
-            If Durable Then FlushDurable()
+            If Durable Then Await FlushDurableEitherAsync(RunAsync).ConfigureAwait(False)
 
-            UpdateHeader(Durable)
+            Await UpdateHeaderAsync(Durable, RunAsync, CancellationToken).ConfigureAwait(False)
 
-            If Durable Then FlushDurable()
+            If Durable Then Await FlushDurableEitherAsync(RunAsync).ConfigureAwait(False)
 
-        End Sub
+        End Function
 
         Private Shared Function ReadMetadataRootDescriptor(Buffer As Byte(), Offset As Integer) As MetadataPageDescriptor
 

@@ -119,6 +119,18 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Asynchronously suspends the per-operation metadata publish. Opening the scope
+        ''' only captures an in-memory snapshot, so this rarely blocks; it is provided for
+        ''' symmetry with <see cref="DeferPublishScope.PublishAsync" /> and
+        ''' <see cref="DeferPublishScope.CloseAsync" />.
+        ''' </summary>
+        Public Function DeferPublishAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of DeferPublishScope)
+
+            Return Task.Run(Function() DeferPublish(), CancellationToken)
+
+        End Function
+
         Private Sub PublishDeferred()
 
             Using EnterStateLock()
@@ -216,6 +228,26 @@ Namespace Streams
                 _Disposed = True
                 _Owner.EndDeferPublish()
             End Sub
+
+            ''' <summary>
+            ''' Asynchronously persists the accumulated metadata durably. The asynchronous
+            ''' equivalent of <see cref="Publish" />.
+            ''' </summary>
+            Public Function PublishAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+                If _Disposed Then Throw New ObjectDisposedException(NameOf(DeferPublishScope))
+                Return Task.Run(Sub() _Owner.PublishDeferred(), CancellationToken)
+            End Function
+
+            ''' <summary>
+            ''' Asynchronously closes the scope, publishing or rolling back the batch. The
+            ''' asynchronous equivalent of <see cref="Dispose" />; call it explicitly since
+            ''' .NET Framework 4.8 has no <c>Await Using</c>.
+            ''' </summary>
+            Public Function CloseAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+                If _Disposed Then Return Task.CompletedTask
+                _Disposed = True
+                Return Task.Run(Sub() _Owner.EndDeferPublish(), CancellationToken)
+            End Function
 
         End Class
 

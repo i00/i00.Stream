@@ -657,6 +657,16 @@ Namespace Streams
                                                 InputOffset As Integer,
                                                 Count As Integer) As List(Of ExtentIndexEntry)
 
+            Return BuildExtentsFromBufferAsync(Input, InputOffset, Count, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Function
+
+        Private Async Function BuildExtentsFromBufferAsync(Input As Byte(),
+                                                          InputOffset As Integer,
+                                                          Count As Integer,
+                                                          RunAsync As Boolean,
+                                                          CancellationToken As Threading.CancellationToken) As Task(Of List(Of ExtentIndexEntry))
+
             Dim Result As New List(Of ExtentIndexEntry)()
             Dim Remaining = Count
             Dim CurrentInputOffset = InputOffset
@@ -678,7 +688,7 @@ Namespace Streams
 
                 Else
 
-                    Dim Record = WritePhysicalRecord(Segment, SegmentLength)
+                    Dim Record = Await WritePhysicalRecordAsync(Segment, SegmentLength, RunAsync, CancellationToken).ConfigureAwait(False)
 
                     Result.Add(New ExtentIndexEntry With {
                         .LogicalLength = SegmentLength,
@@ -830,6 +840,16 @@ Namespace Streams
                                     Length As Long,
                                     AllowRemoveBoundaryMaterialise As Boolean)
 
+            RemoveRangeCoreAsync(LogicalOffset, Length, AllowRemoveBoundaryMaterialise, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Sub
+
+        Private Async Function RemoveRangeCoreAsync(LogicalOffset As Long,
+                                                   Length As Long,
+                                                   AllowRemoveBoundaryMaterialise As Boolean,
+                                                   RunAsync As Boolean,
+                                                   CancellationToken As Threading.CancellationToken) As Task
+
             If LogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
             If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
             If Length = 0 OrElse LogicalOffset >= _Length Then Return
@@ -880,20 +900,24 @@ Namespace Streams
 
                     Dim Combined(CombinedLength - 1) As Byte
 
-                    ReadExtentBytes(LeftExtent,
-                                    0,
-                                    Combined,
-                                    0,
-                                    LeftExtent.LogicalLength)
+                    Await ReadExtentBytesEitherAsync(RunAsync, LeftExtent,
+                                                     0,
+                                                     Combined,
+                                                     0,
+                                                     LeftExtent.LogicalLength,
+                                                     CancellationToken).ConfigureAwait(False)
 
-                    ReadExtentBytes(RightExtent,
-                                    0,
-                                    Combined,
-                                    LeftExtent.LogicalLength,
-                                    RightExtent.LogicalLength)
+                    Await ReadExtentBytesEitherAsync(RunAsync, RightExtent,
+                                                     0,
+                                                     Combined,
+                                                     LeftExtent.LogicalLength,
+                                                     RightExtent.LogicalLength,
+                                                     CancellationToken).ConfigureAwait(False)
 
-                    Dim Record = WritePhysicalRecord(Combined,
-                                                     CombinedLength)
+                    Dim Record = Await WritePhysicalRecordAsync(Combined,
+                                                               CombinedLength,
+                                                               RunAsync,
+                                                               CancellationToken).ConfigureAwait(False)
 
                     BoundaryReplacement =
                         New ExtentIndexEntry With {
@@ -970,7 +994,7 @@ Namespace Streams
 
             ReclaimUnreferencedPhysicalRecordsByScan()
 
-        End Sub
+        End Function
 
         Private Sub ReplaceRangeCore(LogicalOffset As Long,
                                      Length As Long,
@@ -1113,6 +1137,15 @@ Namespace Streams
         Private Function BuildCloneExtents(SourceLogicalOffset As Long,
                                            Length As Long) As List(Of ExtentIndexEntry)
 
+            Return BuildCloneExtentsAsync(SourceLogicalOffset, Length, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Function
+
+        Private Async Function BuildCloneExtentsAsync(SourceLogicalOffset As Long,
+                                                     Length As Long,
+                                                     RunAsync As Boolean,
+                                                     CancellationToken As Threading.CancellationToken) As Task(Of List(Of ExtentIndexEntry))
+
             If SourceLogicalOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(SourceLogicalOffset))
             If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
 
@@ -1175,21 +1208,25 @@ Namespace Streams
 
                 Dim Combined(CombinedLength - 1) As Byte
 
-                ReadExtentBytes(Segments(0),
-                                0,
-                                Combined,
-                                0,
-                                Segments(0).LogicalLength)
+                Await ReadExtentBytesEitherAsync(RunAsync, Segments(0),
+                                                 0,
+                                                 Combined,
+                                                 0,
+                                                 Segments(0).LogicalLength,
+                                                 CancellationToken).ConfigureAwait(False)
 
-                ReadExtentBytes(Segments(1),
-                                0,
-                                Combined,
-                                Segments(0).LogicalLength,
-                                Segments(1).LogicalLength)
+                Await ReadExtentBytesEitherAsync(RunAsync, Segments(1),
+                                                 0,
+                                                 Combined,
+                                                 Segments(0).LogicalLength,
+                                                 Segments(1).LogicalLength,
+                                                 CancellationToken).ConfigureAwait(False)
 
                 Dim Record =
-                    WritePhysicalRecord(Combined,
-                                        CombinedLength)
+                    Await WritePhysicalRecordAsync(Combined,
+                                                   CombinedLength,
+                                                   RunAsync,
+                                                   CancellationToken).ConfigureAwait(False)
 
                 Result.Add(
                     New ExtentIndexEntry With {
@@ -1224,15 +1261,18 @@ Namespace Streams
 
                     Dim Buffer(Segment.LogicalLength - 1) As Byte
 
-                    ReadExtentBytes(Segment,
-                                    0,
-                                    Buffer,
-                                    0,
-                                    Segment.LogicalLength)
+                    Await ReadExtentBytesEitherAsync(RunAsync, Segment,
+                                                     0,
+                                                     Buffer,
+                                                     0,
+                                                     Segment.LogicalLength,
+                                                     CancellationToken).ConfigureAwait(False)
 
                     Dim Record =
-                        WritePhysicalRecord(Buffer,
-                                            Segment.LogicalLength)
+                        Await WritePhysicalRecordAsync(Buffer,
+                                                       Segment.LogicalLength,
+                                                       RunAsync,
+                                                       CancellationToken).ConfigureAwait(False)
 
                     Result.Add(
                         New ExtentIndexEntry With {
