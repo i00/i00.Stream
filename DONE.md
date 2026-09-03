@@ -4,6 +4,35 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ---
 
+## 2026-09-04
+
+### `Defragment(Move)` truncated live data when the compacted metadata overflowed the gap — DONE
+The sample (`Test("C:\Windows\System32\mrt.exe", False)` — a ~229 MB purely sequential LZ4 +
+encrypted BestFit write, reopened and `Defragment(Move)`d) threw
+`InvalidDataException("Defrag data end is beyond the backing stream length.")` on the second
+Move pass's commit.
+
+Root cause was in `TrimAndCommitDefragMetadata` (`Defrag.vb`), not the D6 `_PhysicalDataEnd`
+cache. A Move pass compacts its surviving metadata into the gap
+`[CompactDataEnd, FirstActiveMetadataOffset)` (`_CompactMetadataWriteLimit`). When the
+compacted metadata is bigger than that gap — many records, little for Move to actually
+reclaim, so the gap is small — the overflow pages fall back to appended offsets (above the
+old metadata) and the metadata root gets recycled into a snug freed hole
+(`TryAllocateSnugMetadataRootHole`) that can sit *below* the live data end. The post-trim
+length was then derived from `_MetadataRootOffset + _MetadataRootLength` alone, on the
+assumption the root is the highest object in the file, so `BaseStream.SetLength` truncated
+the appended pages **and every live physical record above the recycled root** (~1.76 MB of
+live data for `mrt.exe`). The next pass's guard caught the now-real "data end past EOF" and
+`DefragmentCore`'s `Catch : _Faulted = True` kept the last good generation.
+
+Fix: `NewEndOffset` is now the max of `GetDataEndFromIndex()` and the end of every
+`GetActiveMetadataRanges()` entry — the true high-water mark of everything that must survive —
+so the trim can never cut into a live record or a freshly written metadata page. (The
+messier-than-ideal spilled layout is a convergence concern, tracked separately; the stream is
+valid and readable.) New test
+`Defragmentation.MoveDefragKeepsMetadataThatSpilledPastTheCompactionGap` (6 MB / 8 KB chunks /
+clustered compressibility — reproduces the exact throw without the fix). Suite 292 → 293.
+
 ## 2026-09-03
 
 ### Re-entrant chunk crypto + parallel bulk read — DONE

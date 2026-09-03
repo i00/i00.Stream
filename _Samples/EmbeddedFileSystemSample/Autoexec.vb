@@ -1,5 +1,9 @@
 ﻿Public NotInheritable Class Autoexec
 
+    Private Sub New()
+
+    End Sub
+
     Public Shared Sub Main()
         Application.EnableVisualStyles()
         Application.SetCompatibleTextRenderingDefault(False)

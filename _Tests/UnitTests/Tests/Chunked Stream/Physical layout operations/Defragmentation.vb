@@ -913,6 +913,127 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Repro for "Defrag data end is beyond the backing stream length." reported from
+            ''' the ChunkedStream sample (a large LZ4 + encrypted BestFit stream, reopened and
+            ''' Defragment(Move)d).
+            '''
+            ''' When a Move pass's compacted metadata does not fit in the gap below the
+            ''' superseded metadata, the overflow pages fall back to appended offsets and the
+            ''' metadata root can be recycled into a freed hole well below the end of the file.
+            ''' TrimAndCommitDefragMetadata used to derive the post-trim length from the root
+            ''' alone, so it truncated the appended pages (and any live record above the root),
+            ''' which the next pass then reported as a data end past the backing stream.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub MoveDefragKeepsMetadataThatSpilledPastTheCompactionGap()
+
+                Dim Key = MakeKey(90210)
+
+                Dim MakeOptions =
+                    Function() As ChunkedStream.ChunkedStreamOptions
+                        Return New ChunkedStream.ChunkedStreamOptions With {
+                            .ChunkSize = 8192,
+                            .CompressionRatioThreshold = 1,
+                            .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
+                            .NewIndexPageWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit,
+                            .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFit,
+                            .EncryptionInfo = New ChunkedStream.EncryptionInfo(Key)
+                        }
+                    End Function
+
+                Const TotalLength As Integer = 6 * 1024 * 1024
+                Const ChunkSize As Integer = 8192
+                Const WriteBlock As Integer = 64 * 1024
+
+                ' Clustered / bimodal compressibility, like a real executable: alternating runs
+                ' of near-incompressible and highly compressible chunks. This is what leaves the
+                ' awkward mid-sized freed holes a Move pass then recycles the metadata root into.
+                Dim Expected = GenerateClusteredCompressibleData(TotalLength, ChunkSize, 4242)
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms, MakeOptions())
+
+                        Dim Offset = 0
+                        While Offset < Expected.Length
+                            Dim BlockLength = Math.Min(WriteBlock, Expected.Length - Offset)
+                            Cs.Write(Offset, Slice(Expected, Offset, BlockLength))
+                            Offset += BlockLength
+                        End While
+
+                    End Using
+
+                    Ms.Position = 0
+
+                    Using Cs = ChunkedStream.Open(Ms, MakeOptions())
+
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Reopened stream did not round-trip before defrag.")
+
+                        Cs.Defragment(ChunkedStream.DefragTypes.Move)
+
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Defragment(Move) changed the logical data.")
+
+                        Cs.Validate().ThrowIfErrors()
+
+                    End Using
+
+                    Ms.Position = 0
+
+                    Using Reopened = ChunkedStream.Open(Ms, MakeOptions())
+                        Reopened.Validate().ThrowIfErrors()
+                        AssertBytesEqual(Expected, Reopened.ToArray(), "Reopened stream lost data after defrag.")
+                    End Using
+
+                End Using
+
+            End Sub
+
+            Private Shared Function GenerateClusteredCompressibleData(Length As Integer,
+                                                                     ChunkSize As Integer,
+                                                                     Seed As Integer) As Byte()
+
+                Dim Result(Length - 1) As Byte
+                Dim Randomizer As New Random(Seed)
+                Dim Position = 0
+                Dim RunRemaining = 0
+                Dim RunCompressible = False
+
+                While Position < Length
+
+                    Dim ThisLength = Math.Min(ChunkSize, Length - Position)
+
+                    If RunRemaining <= 0 Then
+                        RunCompressible = Not RunCompressible
+                        RunRemaining = Randomizer.Next(5, 45)
+                    End If
+
+                    RunRemaining -= 1
+
+                    Dim CompressibleRatio =
+                        If(RunCompressible,
+                           0.82R + Randomizer.NextDouble() * 0.15R,
+                           Randomizer.NextDouble() * 0.12R)
+
+                    Dim CompressibleLength = CInt(ThisLength * CompressibleRatio)
+                    Dim Period = 3 + Randomizer.Next(0, 40)
+
+                    For Index = 0 To CompressibleLength - 1
+                        Result(Position + Index) = CByte((Index Mod Period) + 65)
+                    Next
+
+                    Dim Tail(ThisLength - CompressibleLength - 1) As Byte
+                    Randomizer.NextBytes(Tail)
+                    Buffer.BlockCopy(Tail, 0, Result, Position + CompressibleLength, Tail.Length)
+
+                    Position += ThisLength
+
+                End While
+
+                Return Result
+
+            End Function
+
             ' ================================================================================
             ' Helpers
             ' ================================================================================

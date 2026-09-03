@@ -734,10 +734,20 @@ Namespace Streams
                 _CompactMetadataWriteLimit = Nothing
             End Try
 
-            Dim NewEndOffset =
-                If(_MetadataRootOffset > 0 AndAlso _MetadataRootLength > 0,
-                   _MetadataRootOffset + CLng(_MetadataRootLength),
-                   Math.Max(CLng(DataStartOffset), GetDataEndFromIndex()))
+            '
+            ' Trim to the true high-water mark of everything that must survive: the live
+            ' physical data plus every active metadata page and the metadata root. The
+            ' compacted metadata is not guaranteed to sit contiguously above the data - when
+            ' it does not fit in the gap below the superseded metadata (CompactWriteLimit)
+            ' the overflow pages fall back to appended offsets, and the root can be recycled
+            ' into a freed hole well below the end - so deriving the new length from the root
+            ' alone can truncate live records or freshly written metadata pages.
+            '
+            Dim NewEndOffset = Math.Max(CLng(DataStartOffset), GetDataEndFromIndex())
+
+            For Each Range In GetActiveMetadataRanges()
+                NewEndOffset = Math.Max(NewEndOffset, Range.Item2)
+            Next
 
             If NewEndOffset < BaseStream.Length Then
                 BaseStream.SetLength(NewEndOffset)
