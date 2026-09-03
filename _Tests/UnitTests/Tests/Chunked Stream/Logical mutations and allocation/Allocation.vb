@@ -621,6 +621,26 @@ Namespace Tests
             End Sub
 
             ''' <summary>
+            ''' A single Remove that frees hundreds of physical records is reclaimed as one
+            ''' batch - one ordinal-map rebuild for the whole edit, not one per record.
+            ''' Verifies both reclaim modes leave an identical, valid, leak-free stream and
+            ''' that the surviving data is intact.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub LargeRangeRemovalBatchesPhysicalRecordReclaims()
+
+                Dim RefCountResult = RunLargeDeleteWorkload(ChunkedStream.ChunkedStreamOptions.ExtentReclaimTypes.RefCount)
+                Dim ScanResult = RunLargeDeleteWorkload(ChunkedStream.ChunkedStreamOptions.ExtentReclaimTypes.Scan)
+
+                AssertBytesEqual(RefCountResult.Data, ScanResult.Data, "Batched reclaim changed the logical data between modes.")
+                AssertEqual(RefCountResult.ChunkCount, ScanResult.ChunkCount, "Batched reclaim produced a different chunk count between modes.")
+                AssertEqual(RefCountResult.LivePhysicalRecordCount, ScanResult.LivePhysicalRecordCount, "Batched reclaim left a different live physical-record count between modes.")
+                AssertEqual(RefCountResult.PhysicalChunkRecordBytes, ScanResult.PhysicalChunkRecordBytes, "Batched reclaim left a different live chunk-record byte count between modes.")
+                AssertEqual(RefCountResult.LiveDataEndOffset, ScanResult.LiveDataEndOffset, "Batched reclaim left a different live-data end offset between modes.")
+
+            End Sub
+
+            ''' <summary>
             ''' Verifies that Scan reclamation identifies an unreferenced physical record from
             ''' the extent table even when its maintained reference count has drifted, a case
             ''' RefCount reclamation cannot recover from.
@@ -754,6 +774,66 @@ Namespace Tests
                                                              Select(Function(chunk) chunk.PhysicalRecordId.Value).
                                                              Distinct().
                                                              Count(),
+                            .PhysicalChunkRecordBytes = Struct.PhysicalChunkRecordBytes,
+                            .LiveDataEndOffset = Struct.LiveDataEndOffset
+                        }
+
+                    End Using
+
+                End Using
+
+            End Function
+
+            Private Shared Function RunLargeDeleteWorkload(ReclaimType As ChunkedStream.ChunkedStreamOptions.ExtentReclaimTypes) As ReclaimWorkloadResult
+
+                Const ChunkCount As Integer = 800
+                Const KeptHead As Integer = 40
+                Const KeptTail As Integer = 30
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 512,
+                        .ExtentReclaimType = ReclaimType,
+                        .StoreSparseChunks = False
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        For ChunkIndex = 0 To ChunkCount - 1
+                            Cs.Write(CLng(ChunkIndex) * Options.ChunkSize,
+                                     GenerateRandomData(Options.ChunkSize, 21000 + ChunkIndex))
+                        Next
+
+                        Dim Expected = Cs.ToArray()
+
+                        ' One Remove that frees every record between the head and tail we keep.
+                        Dim RemoveOffset = CInt(CLng(KeptHead) * Options.ChunkSize)
+                        Dim RemoveLength = CInt(CLng(ChunkCount - KeptHead - KeptTail) * Options.ChunkSize)
+
+                        ' Frees ~730 physical records; the reclaim rebuilds the ordinal map once
+                        ' for the batch, not once per record.
+                        Cs.Remove(RemoveOffset, RemoveLength)
+
+                        Dim ExpectedAfter = CombineArrays(Slice(Expected, 0, RemoveOffset),
+                                                          Slice(Expected, RemoveOffset + RemoveLength, Expected.Length - RemoveOffset - RemoveLength))
+
+                        Cs.Validate().ThrowIfErrors()
+                        AssertBytesEqual(ExpectedAfter, Cs.ToArray(), "The large range removal damaged the surviving data.")
+
+                        Dim Struct = Cs.GetStructure()
+
+                        Dim ReferencedRecordCount = Struct.Chunks.
+                                                          Where(Function(chunk) chunk.PhysicalRecordId.HasValue).
+                                                          Select(Function(chunk) chunk.PhysicalRecordId.Value).
+                                                          Distinct().
+                                                          Count()
+
+                        Return New ReclaimWorkloadResult With {
+                            .Data = Cs.ToArray(),
+                            .ChunkCount = Struct.ChunkCount,
+                            .AllocatedChunkCount = Struct.AllocatedChunkCount,
+                            .LivePhysicalRecordCount = ReferencedRecordCount,
                             .PhysicalChunkRecordBytes = Struct.PhysicalChunkRecordBytes,
                             .LiveDataEndOffset = Struct.LiveDataEndOffset
                         }

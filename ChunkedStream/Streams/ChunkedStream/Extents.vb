@@ -224,25 +224,92 @@ Namespace Streams
 
             If Record.RefCount <> 0 Then Return
 
-            If HasOpenCheckpoint Then
-                _PendingReclaimedPhysicalRecords.Add(RecordId)
-                Return
-            End If
+            '
+            ' In Scan mode the decision to reclaim is not taken from this counter -
+            ' ReclaimUnreferencedPhysicalRecordsByScan reclaims every record no extent
+            ' points at once the surrounding edit has rebuilt the extent layout. An open
+            ' checkpoint always falls back to this counter-driven pending set instead,
+            ' because the scan sweep does not run until the checkpoint is gone.
+            '
+            If HasOpenCheckpoint = False AndAlso
+               Options.ExtentReclaimType = ChunkedStreamOptions.ExtentReclaimTypes.Scan Then Return
 
             '
-            ' In Scan mode the decision to reclaim is not taken from this counter.
-            ' ReclaimUnreferencedPhysicalRecordsByScan runs once the surrounding edit
-            ' has rebuilt the extent layout and reclaims every record no extent points at.
+            ' Defer the reclaim. Every record freed by one edit is detached in a single
+            ' batch - one ordinal-map rebuild for the whole edit - by
+            ' SettleDeferredPhysicalRecordReclaims when the edit finishes, or held until
+            ' the outermost checkpoint commit by ReclaimPendingPhysicalRecords so a
+            ' rollback can still restore it.
             '
-            If Options.ExtentReclaimType = ChunkedStreamOptions.ExtentReclaimTypes.Scan Then Return
-
-            ReclaimPhysicalRecord(RecordId)
+            _PendingReclaimedPhysicalRecords.Add(RecordId)
 
         End Sub
 
-        Private Sub ReclaimPhysicalRecord(RecordId As Long)
+        '
+        ' Applies every physical-record reclaim deferred during an extent mutation. In Scan
+        ' mode the unreferenced records are found by scanning the rebuilt extent table;
+        ' otherwise the records DecrementPhysicalRecordRefCount marked pending are detached
+        ' as one batch. Under an open checkpoint nothing is reclaimed here -
+        ' ReclaimPendingPhysicalRecords does it at the outermost commit.
+        '
+        Private Sub SettleDeferredPhysicalRecordReclaims()
 
-            If RecordId = SparsePhysicalRecordId Then Return
+            If HasOpenCheckpoint Then Return
+
+            If Options.ExtentReclaimType = ChunkedStreamOptions.ExtentReclaimTypes.Scan Then
+                ReclaimUnreferencedPhysicalRecordsByScan()
+            Else
+                ApplyPendingPhysicalRecordReclaims()
+            End If
+
+        End Sub
+
+        '
+        ' Detaches every still-unreferenced record in _PendingReclaimedPhysicalRecords, then
+        ' rebuilds the ordinal map and marks the affected physical-record pages once for the
+        ' whole batch instead of once per record.
+        '
+        Private Sub ApplyPendingPhysicalRecordReclaims()
+
+            If _PendingReclaimedPhysicalRecords.Count = 0 Then Return
+
+            Dim PendingRecordIds = _PendingReclaimedPhysicalRecords.ToArray()
+            _PendingReclaimedPhysicalRecords.Clear()
+
+            Dim LowestRemovedOrdinal = Integer.MaxValue
+
+            For Each recordId In PendingRecordIds
+
+                Dim Record As PhysicalRecordEntry
+
+                If _PhysicalRecords.TryGetValue(recordId, Record) = False Then Continue For
+                If Record.RefCount <> 0 Then Continue For
+
+                Dim RemovedOrdinal = DetachReclaimedPhysicalRecord(recordId)
+
+                If RemovedOrdinal >= 0 AndAlso RemovedOrdinal < LowestRemovedOrdinal Then
+                    LowestRemovedOrdinal = RemovedOrdinal
+                End If
+
+            Next
+
+            If LowestRemovedOrdinal = Integer.MaxValue Then Return
+
+            RebuildPhysicalRecordOrdinals()
+            MarkPhysicalRecordPagesDirtyFromOrdinal(LowestRemovedOrdinal)
+
+        End Sub
+
+        '
+        ' Removes one unreferenced physical record from the record table, drops its
+        ' live-offset index entry and defers its backing span. The ordinal map and the
+        ' physical-record page index are left stale: the caller rebuilds them once for the
+        ' whole batch via RebuildPhysicalRecordOrdinals and marks pages from the lowest
+        ' returned ordinal. Returns the ordinal the record held, or -1 for the sparse id.
+        '
+        Private Function DetachReclaimedPhysicalRecord(RecordId As Long) As Integer
+
+            If RecordId = SparsePhysicalRecordId Then Return -1
 
             Dim RemovedOrdinal As Integer
 
@@ -275,9 +342,23 @@ Namespace Streams
 
             _PhysicalRecords.Remove(RecordId)
 
+            Return RemovedOrdinal
+
+        End Function
+
+        '
+        ' Single-record reclaim for the callers that only ever free one record at a time.
+        ' The batched paths use DetachReclaimedPhysicalRecord directly.
+        '
+        Private Sub ReclaimPhysicalRecord(RecordId As Long)
+
+            Dim RemovedOrdinal = DetachReclaimedPhysicalRecord(RecordId)
+
+            If RemovedOrdinal < 0 Then Return
+
             '
-            ' Removing a record shifts every later ordinal and also
-            ' rebuilds the cached physical-data end value.
+            ' Removing a record shifts every later ordinal and also rebuilds the cached
+            ' physical-data end value.
             '
             RebuildPhysicalRecordOrdinals()
 
@@ -443,9 +524,19 @@ Namespace Streams
 
             _PhysicalDataEnd = DataStartOffset
 
+            '
+            ' Ordinal order is ascending record id. Sort the ids (a primitive in-place
+            ' sort) rather than OrderBy over the record structs, which copied every entry
+            ' into the sort buffer on each rebuild.
+            '
+            Dim OrderedRecordIds As New List(Of Long)(_PhysicalRecords.Keys)
+            OrderedRecordIds.Sort()
+
             Dim Ordinal = 0
 
-            For Each Record In _PhysicalRecords.Values.OrderBy(Function(x) x.RecordId)
+            For Each recordId In OrderedRecordIds
+
+                Dim Record = _PhysicalRecords(recordId)
 
                 _PhysicalRecordOrdinals(Record.RecordId) = Ordinal
 
@@ -491,21 +582,7 @@ Namespace Streams
             '
             If _CheckpointStack.Count > 1 Then Return
 
-            Dim Pending = _PendingReclaimedPhysicalRecords.ToArray()
-
-            _PendingReclaimedPhysicalRecords.Clear()
-
-            For Each recordId In Pending
-
-                If _PhysicalRecords.ContainsKey(recordId) = False Then Continue For
-
-                Dim Record = _PhysicalRecords(recordId)
-
-                If Record.RefCount = 0 Then
-                    ReclaimPhysicalRecord(recordId)
-                End If
-
-            Next
+            ApplyPendingPhysicalRecordReclaims()
 
         End Sub
 
@@ -576,13 +653,15 @@ Namespace Streams
                                  Where(Function(recordId) ReferencedRecordIds.Contains(recordId) = False).
                                  ToList()
 
+            Dim LowestRemovedOrdinal = Integer.MaxValue
+
             For Each recordId In UnreferencedRecordIds
 
                 Dim Record = _PhysicalRecords(recordId)
 
                 '
                 ' The counter is normally already zero here. Force it to agree with the
-                ' scan before the record is dropped so ReclaimPhysicalRecord's
+                ' scan before the record is dropped so DetachReclaimedPhysicalRecord's
                 ' still-referenced guard does not trip on a drifted count.
                 '
                 If Record.RefCount <> 0 Then
@@ -590,9 +669,18 @@ Namespace Streams
                     _PhysicalRecords(recordId) = Record
                 End If
 
-                ReclaimPhysicalRecord(recordId)
+                Dim RemovedOrdinal = DetachReclaimedPhysicalRecord(recordId)
+
+                If RemovedOrdinal >= 0 AndAlso RemovedOrdinal < LowestRemovedOrdinal Then
+                    LowestRemovedOrdinal = RemovedOrdinal
+                End If
 
             Next
+
+            If LowestRemovedOrdinal <> Integer.MaxValue Then
+                RebuildPhysicalRecordOrdinals()
+                MarkPhysicalRecordPagesDirtyFromOrdinal(LowestRemovedOrdinal)
+            End If
 
             Return UnreferencedRecordIds.Count
 
@@ -1012,7 +1100,7 @@ Namespace Streams
                                                RemovedExtentCount,
                                                InsertedExtentCount)
 
-            ReclaimUnreferencedPhysicalRecordsByScan()
+            SettleDeferredPhysicalRecordReclaims()
 
         End Function
 
@@ -1112,7 +1200,7 @@ Namespace Streams
                                                RemovedExtentCount,
                                                Materialised.Count)
 
-            ReclaimUnreferencedPhysicalRecordsByScan()
+            SettleDeferredPhysicalRecordReclaims()
 
         End Sub
 

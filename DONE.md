@@ -64,6 +64,43 @@ data-area salvage is out of scope (see TODO).
 New files: `Streams/ChunkedStream/Repair.vb`. New test seam
 `Debug_CorruptPersistedHeaderIndexOffset`. Tests +6, suite 273 → 278.
 
+### `OpenFile` commit control + public `FileStreamView` — DONE
+`EmbeddedFileSystem.OpenFile` now returns the (newly `Public`) `FileStreamView` and takes
+`Optional PendingOnClose As Boolean = False`. `FileStreamView.PendingOnClose` is settable:
+while set, disposing the stream leaves the parent entry `PendingFile` (and drops the write
+buffer instead of flushing it) rather than finalising it to `File`. An upload opens with
+`PendingOnClose:=True` and clears it as the last statement on the success path, so an aborted
+copy is left for `RecoverPendingFiles` / the overwrite-pending path with no `Catch` +
+`DeleteEntry` dance and no silent-truncation window. `Dispose` now drains and closes under a
+`Try/Finally` so a failing buffer drain can't leak the open-file id. New
+`FileStreamView.ToArray()` returns the whole file (buffered appends flushed, position
+independent, `Array.Empty` for empty, throws above `Integer.MaxValue`). Sample upload loop
+switched over. Tests +3.
+
+### `DecrementPhysicalRecordRefCount` — batch the reclaim — DONE
+Freeing K physical records in one edit called `RebuildPhysicalRecordOrdinals()` (a full
+O(n log n) rebuild of three indexes) K times — O(K·n log n), seconds for a large
+`DeleteEntry` / file replace / `ApplyOptions` migration (the user saw 400 ms+ single calls).
+
+- `ReclaimPhysicalRecord` split into `DetachReclaimedPhysicalRecord` (drop one record from
+  the table + live-offset index, defer its span, return its ordinal) and a batch finaliser
+  that rebuilds the ordinal map and marks pages **once**. New `ApplyPendingPhysicalRecordReclaims`.
+- `DecrementPhysicalRecordRefCount` no longer reclaims inline in RefCount mode — it adds to
+  `_PendingReclaimedPhysicalRecords` (the mechanism checkpoints already used). New
+  `SettleDeferredPhysicalRecordReclaims` at the end of `RemoveRangeCore` / `ReplaceRangeCore`
+  drains the whole batch with one rebuild (or, under a checkpoint, leaves it for
+  `ReclaimPendingPhysicalRecords` at the outermost commit — now also batched).
+- Scan-mode sweep (`ReclaimUnreferencedPhysicalRecords`) and `ApplyOptions`'
+  `ReplacePhysicalRecordWith*` helpers routed through the same batch path
+  (`RunApplyOptions` drains once after its record loop) — kills the `ApplyOptions` O(n²).
+- `RebuildPhysicalRecordOrdinals` sorts record-id `Long`s in place instead of `OrderBy` over
+  the record structs.
+
+Semantics unchanged across all four modes (RefCount / Scan × checkpoint / none); span-freeing
+now matches Scan mode's existing end-of-edit timing. Measured: one `Remove` freeing 4,930
+records went from seconds-class to **5 ms**. Resolves the TODO "batch the removals" item.
+Tests +1 (`LargeRangeRemovalBatchesPhysicalRecordReclaims`), suite 278 → 282.
+
 ## 2026-09-02
 
 ### Defragment(Move) corrupted a heavily-churned file — DONE

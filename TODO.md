@@ -125,11 +125,6 @@ bump.
 `Output(ExpectedSize - 1)`. A forged multi-gigabyte varint preamble → a multi-GB allocation
 (OOM). Sanity-cap `ExpectedSize` against `Input.Length * a plausible max ratio`.
 
-### `ReclaimUnreferencedPhysicalRecords` — batch the removals
-It calls `ReclaimPhysicalRecord` per record and each rebuilds the ordinal map — O(n² log n)
-for a file with many orphans. Cold recovery path, so low priority; batch removals + one
-rebuild at the end if it ever bites.
-
 ---
 
 ## Naming / housekeeping

@@ -686,6 +686,12 @@ Namespace Streams
 
             Next
 
+            '
+            ' Detach every record the loop replaced in one batch (a single ordinal-map
+            ' rebuild). Under an open checkpoint they stay pending for the outermost commit.
+            '
+            If HasOpenCheckpoint = False Then ApplyPendingPhysicalRecordReclaims()
+
             Dim RemovedFileMasterKey = False
 
             If Result.WasCancelled = False AndAlso Types.HasFlag(ApplyOptionTypes.Encryption) Then
@@ -1176,11 +1182,13 @@ Namespace Streams
             Record.RefCount = 0
             _PhysicalRecords(RecordId) = Record
 
-            If HasOpenCheckpoint Then
-                _PendingReclaimedPhysicalRecords.Add(RecordId)
-            Else
-                ReclaimPhysicalRecord(RecordId)
-            End If
+            '
+            ' Detached as one batch by ApplyPendingPhysicalRecordReclaims at the end of the
+            ' record loop (RunApplyOptions), or - under a checkpoint - at the outermost
+            ' commit, so migrating a large file rebuilds the ordinal map once, not once per
+            ' chunk.
+            '
+            _PendingReclaimedPhysicalRecords.Add(RecordId)
 
             MarkAllMetadataPagesDirty()
 
@@ -1222,11 +1230,8 @@ Namespace Streams
             OldRecord.RefCount = 0
             _PhysicalRecords(OldRecordId) = OldRecord
 
-            If HasOpenCheckpoint Then
-                _PendingReclaimedPhysicalRecords.Add(OldRecordId)
-            Else
-                ReclaimPhysicalRecord(OldRecordId)
-            End If
+            ' Detached as one batch - see ReplacePhysicalRecordWithSparseExtents.
+            _PendingReclaimedPhysicalRecords.Add(OldRecordId)
 
             MarkAllMetadataPagesDirty()
 
