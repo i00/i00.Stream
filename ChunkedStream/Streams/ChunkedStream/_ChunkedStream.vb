@@ -1084,7 +1084,14 @@ Namespace Streams
             If Count < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Count))
             If BufferOffset > Buffer.Length - Count Then Throw New ArgumentException("Buffer offset and count exceed the buffer length.")
         End Sub
-        Private ReadOnly _StateLock As New SemaphoreSlim(1, 1)
+        '
+        ' State lock. Mutations, Open/recovery, defrag, checkpoints and the position-mutating
+        ' Stream overrides take it exclusively (EnterStateLock / RunUnderStateLockAsync);
+        ' large positional reads (ToArray, Read(LogicalOffset,...)) take it shared
+        ' (EnterReadLock / RunUnderReadLockAsync) so several run at once, each with its own
+        ' ChunkCipher. Writers take precedence, so a stream of readers cannot starve a write.
+        '
+        Private ReadOnly _StateLock As New AsyncReaderWriterLock()
 
         ' WARNING: AsyncLocal flows forward into asynchronous forks (e.g., Task.Run, Task.WhenAll) as a shallow copy.
         ' If concurrent tasks are spawned while this lock is held, both branches will independently inherit the same
@@ -1093,9 +1100,36 @@ Namespace Streams
         Private ReadOnly _StateLockDepth As New AsyncLocal(Of Integer)
 
         Private Function EnterStateLock() As IDisposable
-            If _StateLockDepth.Value = 0 Then _StateLock.Wait()
+            If _StateLockDepth.Value = 0 Then _StateLock.EnterWriteAsync().GetAwaiter().GetResult()
             _StateLockDepth.Value += 1
             Return New StateLockScope(Me)
+        End Function
+
+        '
+        ' Acquires the state lock for reading unless the current flow already holds it
+        ' exclusively (in which case reading is trivially safe and this is a no-op). The
+        ' read path is not reentrant, so no depth counter is kept for it.
+        '
+        Private Function EnterReadLock() As IDisposable
+            If _StateLockDepth.Value > 0 Then Return NullScope.Instance
+            _StateLock.EnterReadAsync().GetAwaiter().GetResult()
+            Return New ReadLockScope(Me)
+        End Function
+
+        Private Async Function RunUnderReadLockAsync(Of TResult)(CancellationToken As Threading.CancellationToken,
+                                                                Body As Func(Of Task(Of TResult))) As Task(Of TResult)
+
+            CancellationToken.ThrowIfCancellationRequested()
+
+            Dim AcquiredHere = _StateLockDepth.Value = 0
+            If AcquiredHere Then Await _StateLock.EnterReadAsync().ConfigureAwait(False)
+
+            Try
+                Return Await Body().ConfigureAwait(False)
+            Finally
+                If AcquiredHere Then _StateLock.ExitRead()
+            End Try
+
         End Function
 
         '
@@ -1107,17 +1141,19 @@ Namespace Streams
         ' restored on resume). So this helper only performs the wait; the caller sets
         ' _StateLockDepth.Value in the method that owns the Try/Finally, where it stays
         ' visible to everything that method calls and unwinds automatically when it
-        ' returns. Callers release with _StateLock.Release() (synchronous, non-blocking).
+        ' returns. Callers release with _StateLock.ExitWrite() (synchronous, non-blocking).
         '
         Private Async Function EnterStateLockAsync(RunAsync As Boolean,
                                                   CancellationToken As Threading.CancellationToken) As Task(Of Boolean)
 
+            CancellationToken.ThrowIfCancellationRequested()
+
             If _StateLockDepth.Value > 0 Then Return False
 
             If RunAsync Then
-                Await _StateLock.WaitAsync(CancellationToken).ConfigureAwait(False)
+                Await _StateLock.EnterWriteAsync().ConfigureAwait(False)
             Else
-                _StateLock.Wait()
+                _StateLock.EnterWriteAsync().GetAwaiter().GetResult()
             End If
 
             Return True
@@ -1143,7 +1179,7 @@ Namespace Streams
             Finally
                 If LockOwner Then
                     _StateLockDepth.Value = 0
-                    _StateLock.Release()
+                    _StateLock.ExitWrite()
                 End If
             End Try
 
@@ -1162,7 +1198,7 @@ Namespace Streams
             Finally
                 If LockOwner Then
                     _StateLockDepth.Value = 0
-                    _StateLock.Release()
+                    _StateLock.ExitWrite()
                 End If
             End Try
 
@@ -1179,8 +1215,97 @@ Namespace Streams
                 If Owner Is Nothing Then Return
                 _Owner = Nothing
                 Owner._StateLockDepth.Value -= 1
-                If Owner._StateLockDepth.Value = 0 Then Owner._StateLock.Release()
+                If Owner._StateLockDepth.Value = 0 Then Owner._StateLock.ExitWrite()
             End Sub
+        End Class
+
+        Private NotInheritable Class ReadLockScope
+            Implements IDisposable
+            Private _Owner As ChunkedStream
+            Public Sub New(Owner As ChunkedStream)
+                _Owner = Owner
+            End Sub
+            Public Sub Dispose() Implements IDisposable.Dispose
+                Dim Owner = _Owner
+                If Owner Is Nothing Then Return
+                _Owner = Nothing
+                Owner._StateLock.ExitRead()
+            End Sub
+        End Class
+
+        Private NotInheritable Class NullScope
+            Implements IDisposable
+            Public Shared ReadOnly Instance As New NullScope()
+            Public Sub Dispose() Implements IDisposable.Dispose
+            End Sub
+        End Class
+
+        '
+        ' Minimal async-capable reader/writer lock. Many readers run together; a writer runs
+        ' alone. Once a writer is waiting, new readers queue behind it, so a steady stream of
+        ' readers cannot starve a write. Waiter continuations run on the pool
+        ' (RunContinuationsAsynchronously), so completing a waiter while _Sync is held is safe.
+        '
+        Private NotInheritable Class AsyncReaderWriterLock
+
+            Private ReadOnly _Sync As New Object()
+            ' -1 = a writer holds it; 0 = free; > 0 = active reader count.
+            Private _State As Integer
+            Private ReadOnly _WaitingWriters As New Queue(Of TaskCompletionSource(Of Boolean))()
+            Private ReadOnly _WaitingReaders As New List(Of TaskCompletionSource(Of Boolean))()
+
+            Friend Function EnterReadAsync() As Task
+                SyncLock _Sync
+                    If _State >= 0 AndAlso _WaitingWriters.Count = 0 Then
+                        _State += 1
+                        Return Task.CompletedTask
+                    End If
+                    Dim Waiter As New TaskCompletionSource(Of Boolean)(TaskCreationOptions.RunContinuationsAsynchronously)
+                    _WaitingReaders.Add(Waiter)
+                    Return Waiter.Task
+                End SyncLock
+            End Function
+
+            Friend Sub ExitRead()
+                SyncLock _Sync
+                    _State -= 1
+                    If _State = 0 Then WakeNext()
+                End SyncLock
+            End Sub
+
+            Friend Function EnterWriteAsync() As Task
+                SyncLock _Sync
+                    If _State = 0 Then
+                        _State = -1
+                        Return Task.CompletedTask
+                    End If
+                    Dim Waiter As New TaskCompletionSource(Of Boolean)(TaskCreationOptions.RunContinuationsAsynchronously)
+                    _WaitingWriters.Enqueue(Waiter)
+                    Return Waiter.Task
+                End SyncLock
+            End Function
+
+            Friend Sub ExitWrite()
+                SyncLock _Sync
+                    _State = 0
+                    WakeNext()
+                End SyncLock
+            End Sub
+
+            Private Sub WakeNext()
+                ' _Sync held, _State = 0.
+                If _WaitingWriters.Count > 0 Then
+                    _State = -1
+                    _WaitingWriters.Dequeue().SetResult(True)
+                ElseIf _WaitingReaders.Count > 0 Then
+                    _State = _WaitingReaders.Count
+                    For Each Waiter In _WaitingReaders
+                        Waiter.SetResult(True)
+                    Next
+                    _WaitingReaders.Clear()
+                End If
+            End Sub
+
         End Class
 
         Private _Options As ChunkedStreamOptions
@@ -2097,13 +2222,15 @@ Namespace Streams
         ''' </returns>
         Public Function ToArray() As Byte()
 
-            Using EnterStateLock()
-                Return ToArrayCore()
+            Using EnterReadLock()
+                Using Cipher = CreateChunkCipher()
+                    Return ToArrayCore(Cipher)
+                End Using
             End Using
 
         End Function
 
-        Private Function ToArrayCore() As Byte()
+        Private Function ToArrayCore(Optional Cipher As ChunkCipher = Nothing) As Byte()
 
 
             ThrowIfDisposed()
@@ -2119,7 +2246,7 @@ Namespace Streams
 
             Dim Result(CInt(_Length) - 1) As Byte
 
-            ReadCore(0, Result)
+            ReadCore(0, Result, 0, Nothing, Cipher)
 
             Return Result
 
@@ -2132,7 +2259,7 @@ Namespace Streams
         ''' <param name="CancellationToken">Token used to cancel the operation.</param>
         Public Overloads Function ToArrayAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Byte())
 
-            Return RunUnderStateLockAsync(CancellationToken, Function() ToArrayCoreAsync(CancellationToken))
+            Return RunUnderReadLockAsync(CancellationToken, Function() ToArrayCoreAsync(CancellationToken))
 
         End Function
 
@@ -2151,7 +2278,9 @@ Namespace Streams
 
             Dim Result(CInt(_Length) - 1) As Byte
 
-            Await ReadCoreAsync(0L, Result, 0, Nothing, CancellationToken).ConfigureAwait(False)
+            Using Cipher = CreateChunkCipher()
+                Await ReadCoreAsync(0L, Result, 0, Nothing, CancellationToken, Cipher).ConfigureAwait(False)
+            End Using
 
             Return Result
 
@@ -2169,14 +2298,17 @@ Namespace Streams
         Public Function ToArray(Offset As Long,
                                 Length As Integer) As Byte()
 
-            Using EnterStateLock()
-                Return ToArrayCore(Offset, Length)
+            Using EnterReadLock()
+                Using Cipher = CreateChunkCipher()
+                    Return ToArrayCore(Offset, Length, Cipher)
+                End Using
             End Using
 
         End Function
 
         Private Function ToArrayCore(Offset As Long,
-                                Length As Integer) As Byte()
+                                Length As Integer,
+                                Optional Cipher As ChunkCipher = Nothing) As Byte()
 
 
             ThrowIfDisposed()
@@ -2195,7 +2327,7 @@ Namespace Streams
 
             Dim Result(Length - 1) As Byte
 
-            Dim BytesRead = ReadCore(Offset, Result)
+            Dim BytesRead = ReadCore(Offset, Result, 0, Nothing, Cipher)
 
             If BytesRead = Length Then
                 Return Result
@@ -2218,7 +2350,7 @@ Namespace Streams
                                                Length As Integer,
                                                Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Byte())
 
-            Return RunUnderStateLockAsync(CancellationToken, Function() ToArrayCoreAsync(Offset, Length, CancellationToken))
+            Return RunUnderReadLockAsync(CancellationToken, Function() ToArrayCoreAsync(Offset, Length, CancellationToken))
 
         End Function
 
@@ -2241,8 +2373,11 @@ Namespace Streams
             End If
 
             Dim Result(Length - 1) As Byte
+            Dim BytesRead As Integer
 
-            Dim BytesRead = Await ReadCoreAsync(Offset, Result, 0, Nothing, CancellationToken).ConfigureAwait(False)
+            Using Cipher = CreateChunkCipher()
+                BytesRead = Await ReadCoreAsync(Offset, Result, 0, Nothing, CancellationToken, Cipher).ConfigureAwait(False)
+            End Using
 
             If BytesRead = Length Then
                 Return Result
@@ -2383,8 +2518,10 @@ Namespace Streams
                                        Optional OutputOffset As Integer = 0,
                                        Optional Count As Integer? = Nothing) As Integer
 
-            Using EnterStateLock()
-                Return ReadCore(LogicalOffset, Output, OutputOffset, Count)
+            Using EnterReadLock()
+                Using Cipher = CreateChunkCipher()
+                    Return ReadCore(LogicalOffset, Output, OutputOffset, Count, Cipher)
+                End Using
             End Using
 
         End Function
@@ -2408,14 +2545,31 @@ Namespace Streams
                                             Optional Count As Integer? = Nothing,
                                             Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Integer)
 
-            Return RunUnderStateLockAsync(CancellationToken, Function() ReadCoreAsync(LogicalOffset, Output, OutputOffset, Count, CancellationToken))
+            Return RunUnderReadLockAsync(CancellationToken, Function() ReadPositionedRangeAsync(LogicalOffset, Output, OutputOffset, Count, CancellationToken))
+
+        End Function
+
+        '
+        ' Read-lock body for the positional ReadAsync overload: a per-call ChunkCipher so
+        ' several parallel readers never share serial-path cipher state.
+        '
+        Private Async Function ReadPositionedRangeAsync(LogicalOffset As Long,
+                                                        Output As Byte(),
+                                                        OutputOffset As Integer,
+                                                        Count As Integer?,
+                                                        CancellationToken As Threading.CancellationToken) As Task(Of Integer)
+
+            Using Cipher = CreateChunkCipher()
+                Return Await ReadCoreAsync(LogicalOffset, Output, OutputOffset, Count, CancellationToken, Cipher).ConfigureAwait(False)
+            End Using
 
         End Function
 
         Private Overloads Function ReadCore(LogicalOffset As Long,
                                        Output As Byte(),
                                        Optional OutputOffset As Integer = 0,
-                                       Optional Count As Integer? = Nothing) As Integer
+                                       Optional Count As Integer? = Nothing,
+                                       Optional Cipher As ChunkCipher = Nothing) As Integer
 
 
             ThrowIfDisposed()
@@ -2465,7 +2619,8 @@ Namespace Streams
                                 OffsetInsideExtent,
                                 Output,
                                 CurrentOutputOffset,
-                                CopyLength)
+                                CopyLength,
+                                Cipher)
 
                 CurrentLogicalOffset += CopyLength
                 CurrentOutputOffset += CopyLength
@@ -2484,7 +2639,11 @@ Namespace Streams
         ' the backing-store reads and the copy into the caller's buffer stay serial, and
         ' each worker takes its own ChunkCipher so nothing crypto-related is shared.
         '
-        Private Const ParallelReadMinChunks As Integer = 8
+        '
+        ' A read or write covering at least this many chunks runs its per-chunk crypto on a
+        ' worker pool (Options.MaxCryptoParallelism), when that option allows more than one.
+        '
+        Private Const ParallelChunkCryptoMinChunks As Integer = 8
 
         Private Structure ReadSlice
             Public PhysicalRecordId As Long
@@ -2497,7 +2656,7 @@ Namespace Streams
 
             Return Options.MaxCryptoParallelism > 1 AndAlso
                    _ChunkSize > 0 AndAlso
-                   CLng(ByteCount) >= CLng(_ChunkSize) * ParallelReadMinChunks
+                   CLng(ByteCount) >= CLng(_ChunkSize) * ParallelChunkCryptoMinChunks
 
         End Function
 
@@ -2602,7 +2761,8 @@ Namespace Streams
                                                       Output As Byte(),
                                                       OutputOffset As Integer,
                                                       Count As Integer?,
-                                                      CancellationToken As Threading.CancellationToken) As Task(Of Integer)
+                                                      CancellationToken As Threading.CancellationToken,
+                                                      Optional Cipher As ChunkCipher = Nothing) As Task(Of Integer)
 
             ThrowIfDisposed()
             ThrowIfFaulted()
@@ -2657,7 +2817,8 @@ Namespace Streams
                                            Output,
                                            CurrentOutputOffset,
                                            CopyLength,
-                                           CancellationToken).ConfigureAwait(False)
+                                           CancellationToken,
+                                           Cipher).ConfigureAwait(False)
 
                 CurrentLogicalOffset += CopyLength
                 CurrentOutputOffset += CopyLength

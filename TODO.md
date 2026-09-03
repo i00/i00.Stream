@@ -150,9 +150,9 @@ not a flat-index location. Rename: `_IndexOffset` → `_MetadataBoundary` (or `_
   `ApplyOptionsAsync` and the checkpoint / DeferPublish `*Async` methods truly async rather
   than worker-thread offloads; convert `GetStructureAsync` / `ValidateAsync` /
   `GetFragmentationAsync` onto the real async read path.
-- **Reader concurrency** — lock-free parallel reads. Blocked by the shared AES-CTR state
-  (`_Counter` / `_KeyStream` / `_AesProvider` are per-instance; a parallel read needs per-call
-  cipher state). Concurrency smoke tests exist and confirm the current serialized behaviour.
+- **Reader concurrency** — lock-free parallel reads — *done (see DONE.md).* `_StateLock` is a
+  writer-preference `AsyncReaderWriterLock`; the large positional reads take it shared with a
+  per-call `ChunkCipher`.
 - **Write coalescing / current-chunk write caching** — `Options.CurrentChunkWriteCaching`.
 - **Multi-chunk read cache** — `Options.ReadCacheChunkCount > 1` (currently fixed at 1).
 - **Read-time coalescing of contiguous extents.**
@@ -168,11 +168,9 @@ not a flat-index location. Rename: `_IndexOffset` → `_MetadataBoundary` (or `_
 ### Compression always runs even when the result is discarded — DONE (`Options.CompressionEvaluation`, see DONE.md)
 ### Re-entrant chunk crypto → parallelism — DONE (see DONE.md)
 All AES-CTR state moved onto a per-`ChunkCipher` instance; large reads authenticate / decrypt /
-decompress on a worker pool (`Options.MaxCryptoParallelism`). **Still open under this heading:**
-parallel per-chunk *write* (`BuildExtentsFromBuffer` → `WritePhysicalRecordWithPolicy`) — the
-compress+encrypt+MAC is now re-entrant, but `WritePhysicalRecordWithPolicy` still interleaves
-it with allocation / dedup / index updates, so it needs splitting into a pure "build the record
-bytes" phase (parallelisable) and a serial "place it" phase.
+decompress on a worker pool (`Options.MaxCryptoParallelism`). Parallel per-chunk *write* also
+done: `WritePhysicalRecordWithPolicy` split into `PrepareChunkRecord` (pure CPU, parallelised
+by `BuildExtentsInParallelAsync`) + serial `PlaceChunkRecordAsync`.
 
 ---
 

@@ -792,6 +792,10 @@ Namespace Streams
                                                           RunAsync As Boolean,
                                                           CancellationToken As Threading.CancellationToken) As Task(Of List(Of ExtentIndexEntry))
 
+            If ShouldBuildChunksInParallel(Count) Then
+                Return Await BuildExtentsInParallelAsync(Input, InputOffset, Count, RunAsync, CancellationToken).ConfigureAwait(False)
+            End If
+
             Dim Result As New List(Of ExtentIndexEntry)()
             Dim Remaining = Count
             Dim CurrentInputOffset = InputOffset
@@ -827,6 +831,132 @@ Namespace Streams
                 Remaining -= SegmentLength
 
             End While
+
+            Return Result
+
+        End Function
+
+        Private Function ShouldBuildChunksInParallel(ByteCount As Integer) As Boolean
+
+            Return Options.MaxCryptoParallelism > 1 AndAlso
+                   Options.ChunkSize > 0 AndAlso
+                   CLng(ByteCount) >= CLng(Options.ChunkSize) * ParallelChunkCryptoMinChunks
+
+        End Function
+
+        Private Structure ChunkBuildPlan
+            Public Segment As Byte()
+            Public IsSparse As Boolean
+            Public RecordId As Long
+            Public Iv As Byte()
+        End Structure
+
+        '
+        ' Splits the input into chunks, compresses / encrypts / authenticates the non-sparse
+        ' ones on a worker pool (Options.MaxCryptoParallelism), then places them serially so
+        ' the free-space allocation, physical-record table and ordinal map are only ever
+        ' touched from one thread. Each worker takes its own ChunkCipher.
+        '
+        Private Async Function BuildExtentsInParallelAsync(Input As Byte(),
+                                                          InputOffset As Integer,
+                                                          Count As Integer,
+                                                          RunAsync As Boolean,
+                                                          CancellationToken As Threading.CancellationToken) As Task(Of List(Of ExtentIndexEntry))
+
+            Dim EncryptionMethod =
+                If(_CurrentWriteEncryptionEnabled,
+                   ChunkEncryptionMethods.AesCtrFileMasterKey,
+                   ChunkEncryptionMethods.None)
+
+            Dim StoreSparse = Options.StoreSparseChunks = False
+
+            Dim Plans As New List(Of ChunkBuildPlan)()
+            Dim Remaining = Count
+            Dim CurrentInputOffset = InputOffset
+
+            While Remaining > 0
+
+                Dim SegmentLength = Math.Min(Options.ChunkSize, Remaining)
+                Dim Segment(SegmentLength - 1) As Byte
+                Buffer.BlockCopy(Input, CurrentInputOffset, Segment, 0, SegmentLength)
+
+                Dim Plan As New ChunkBuildPlan With {
+                    .Segment = Segment,
+                    .IsSparse = StoreSparse AndAlso IsAllZero(Segment, SegmentLength)}
+
+                If Plan.IsSparse = False Then
+                    Plan.RecordId = AllocatePhysicalRecordId()
+                    Plan.Iv = New Byte(IvSize - 1) {}
+                    _Rng.GetBytes(Plan.Iv)
+                End If
+
+                Plans.Add(Plan)
+
+                CurrentInputOffset += SegmentLength
+                Remaining -= SegmentLength
+
+            End While
+
+            Dim NonSparse As New List(Of Integer)()
+            For Index = 0 To Plans.Count - 1
+                If Plans(Index).IsSparse = False Then NonSparse.Add(Index)
+            Next
+
+            Dim PreparedByIndex(Plans.Count - 1) As PreparedChunkRecord
+
+            Dim PrepareAll =
+                Sub()
+                    Dim LoopOptions As New System.Threading.Tasks.ParallelOptions With {
+                        .MaxDegreeOfParallelism = Math.Max(1, Options.MaxCryptoParallelism)}
+
+                    Try
+                        System.Threading.Tasks.Parallel.ForEach(NonSparse, LoopOptions,
+                            Function() CreateChunkCipher(),
+                            Function(PlanIndex, LoopState, Cipher)
+                                Dim P = Plans(PlanIndex)
+                                PreparedByIndex(PlanIndex) =
+                                    PrepareChunkRecord(P.Segment, P.Segment.Length, P.RecordId, P.Iv,
+                                                       Options.CompressionMethod, Options.CompressionRatioThreshold,
+                                                       False, EncryptionMethod, False, Cipher)
+                                Return Cipher
+                            End Function,
+                            Sub(Cipher)
+                                If Cipher IsNot Nothing Then Cipher.Dispose()
+                            End Sub)
+                    Catch ex As AggregateException When ex.InnerExceptions.Count > 0
+                        Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerExceptions(0)).Throw()
+                    End Try
+                End Sub
+
+            If RunAsync Then
+                Await System.Threading.Tasks.Task.Run(PrepareAll).ConfigureAwait(False)
+            Else
+                PrepareAll()
+            End If
+
+            Dim Result As New List(Of ExtentIndexEntry)()
+
+            For Index = 0 To Plans.Count - 1
+
+                If Plans(Index).IsSparse Then
+
+                    Result.Add(New ExtentIndexEntry With {
+                        .LogicalLength = Plans(Index).Segment.Length,
+                        .PhysicalRecordId = SparsePhysicalRecordId,
+                        .PhysicalRecordOffset = 0})
+
+                Else
+
+                    Dim Record = Await PlaceChunkRecordAsync(PreparedByIndex(Index), RunAsync, CancellationToken).ConfigureAwait(False)
+
+                    Result.Add(New ExtentIndexEntry With {
+                        .LogicalLength = Plans(Index).Segment.Length,
+                        .PhysicalRecordId = Record.RecordId,
+                        .PhysicalRecordOffset = 0})
+
+                End If
+
+            Next
 
             Return Result
 

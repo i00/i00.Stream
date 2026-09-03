@@ -31,7 +31,71 @@ chunk still surfaces its `CryptographicException`. The async read path runs the 
 block on `Task.Run` so the awaiting thread is not blocked. Tests +1 (`Encryption.vb`);
 suite 290 → 291.
 
-**Still open:** parallel per-chunk *write* — see TODO.
+Tests +1 (`Encryption.vb`); suite 290 → 291. Committed `c333c78`.
+
+### Parallel per-chunk write — DONE
+The write side of deferred item 3.
+
+`WritePhysicalRecordWithPolicy` is split in two. `PrepareChunkRecord` is pure CPU — it
+applies the compression policy, builds the record header, encrypts (given its own
+`ChunkCipher`) and computes the HMAC into a finished stored-record byte array, touching no
+shared stream state. It does **not** allocate the record id, draw the IV, call
+`MarkCompressionFlag`, or touch `_Rng` — those stay with the caller. `PlaceChunkRecordAsync`
+is the serial tail: `MarkCompressionFlag`, `GetNextWriteOffset`, the backing-store write, and
+the `_PhysicalRecords` / index / `_IndexOffset` / dirty-page updates.
+
+`BuildExtentsFromBufferAsync` routes a write of ≥ 8 chunks (`ShouldBuildChunksInParallel`,
+same `Options.MaxCryptoParallelism` gate as the read side) to `BuildExtentsInParallelAsync`:
+it splits the buffer, classifies all-zero sparse chunks, and draws every record id + IV
+serially; runs `PrepareChunkRecord` for the non-sparse chunks on `Parallel.ForEach` (one
+`ChunkCipher` per worker via `localInit`/`localFinally`, `AggregateException` unwrapped with
+`ExceptionDispatchInfo`); then walks the plans in order, emitting a sparse extent or
+`Await PlaceChunkRecordAsync` for each. `RunAsync` wraps the parallel prepare in `Task.Run`.
+`ParallelReadMinChunks` → `ParallelChunkCryptoMinChunks` (now shared by read and write).
+
+New test `Encryption.ParallelChunkCryptoMatchesSerialAndSurfacesCorruption`: a 40-chunk
+deflate+encrypted stream with a mid-stream sparse chunk, written and read back at
+`MaxCryptoParallelism = 8`, byte-compared against the `= 1` result, plus reopen, ranged
+read, and a corrupt-MAC chunk still surfacing `CryptographicException`.
+
+### Lock-free parallel reads — DONE
+The last `TODO.md` "Reader concurrency" item; unblocked by the re-entrant `ChunkCipher`.
+
+`_StateLock` was a `SemaphoreSlim(1, 1)`; it is now a purpose-built
+`AsyncReaderWriterLock` (nested in `_ChunkedStream.vb`). `_State` is `-1` (writer) / `0`
+(free) / `> 0` (reader count); waiting writers and the waiting-reader batch are queues of
+`TaskCompletionSource(Of Boolean)` with `RunContinuationsAsynchronously`. It is
+**writer-preference** — `EnterReadAsync` only fast-paths when no writer is queued — so a
+steady stream of readers cannot starve a write, which keeps the crash-safety-critical write
+path's latency unchanged. An uncontended acquire returns `Task.CompletedTask` (no
+allocation).
+
+Shared (concurrent) callers: `ToArray()`, `ToArray(Offset, Length)`,
+`Read(LogicalOffset, …)` and their `*Async` twins — each takes its own per-call
+`ChunkCipher` (`CreateChunkCipher()`), so nothing crypto-related is shared. `Optional Cipher
+As ChunkCipher = Nothing` is threaded through `ReadCore` / `ReadExtentBytes` /
+`ReadPhysicalRecordPlain` and the async twins; `Nothing` still selects the shared
+serial-path `_ChunkCipher` for the exclusive callers. Backing-store reads are already
+serialized by `_PhysicalIoLock` (unless the backing store advertises `LockFreeReads`), and
+the record table / extent list / anchor index are only mutated under the exclusive lock, so
+concurrent readers touch only stable state.
+
+Everything else stays exclusive: `Stream.Read`/`Write`, anchor-relative reads,
+`GetStructure`, `Validate`, `GetFragmentation`, every mutation, and open / recovery / defrag
+/ checkpoints — reads and a writer never overlap, so `GetDataEndFromIndex`'s lazy
+`_PhysicalDataEnd` recompute and the `_Faulted` flag stay single-threaded. `EnterReadLock`
+is a `NullScope` no-op when the flow already holds the write lock; the read path is not
+otherwise reentrant and keeps no depth counter.
+
+Trade-off: a `CancellationToken` that fires *while waiting for the lock* no longer aborts
+the wait (the lock has no queued-waiter cancellation). The `*Async` helpers still
+`ThrowIfCancellationRequested()` up front, so a pre-cancelled token behaves as before. Lock
+waits are short (one logical writer), so this is acceptable.
+
+New test `Concurrency.ConcurrentPositionalReadsOverlapRatherThanSerialise`: a gated
+`IPositionedStream` backing store (`LockFreeReads`) makes every reader block inside a chunk
+read until all four have arrived — which can only complete if the reads truly overlap.
+Verified to fail when the read path is forced exclusive. Suite 291 → 292.
 
 ### D6 — cache-coherence invariant + drift producer — DONE
 The `_PhysicalDataEnd` half-fix from the defrag work is now complete.

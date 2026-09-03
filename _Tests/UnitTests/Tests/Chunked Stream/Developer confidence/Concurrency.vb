@@ -135,6 +135,64 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Large positional reads (ToArray, Read(LogicalOffset, ...)) take the state lock
+            ''' shared, so several run at once. This drives that deterministically: the backing
+            ''' store makes every reader block inside a chunk read until all of them have
+            ''' arrived, which can only complete if the reads truly overlap. A serialising read
+            ''' path would leave each reader waiting alone until the gate timed out.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ConcurrentPositionalReadsOverlapRatherThanSerialise()
+
+                Const ReaderCount As Integer = 4
+
+                Using Backing As New GatedReadStream(ReaderCount)
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(6801))
+                    }
+
+                    Using Cs = ChunkedStream.Open(Backing, Options)
+
+                        Dim Expected = GenerateRandomData(Cs.Options.ChunkSize * 4, 6802)
+                        Cs.Write(0, Expected)
+                        Cs.Validate().ThrowIfErrors()
+
+                        Dim Failure As Exception = Nothing
+
+                        Backing.ArmGate()
+
+                        Dim Body =
+                            Sub()
+                                Try
+                                    AssertBytesEqual(Expected, Cs.ToArray(), "A gated concurrent reader saw wrong data.")
+
+                                    Dim Slab(4095) As Byte
+                                    Dim Read = Cs.Read(2048, Slab, 0, Slab.Length)
+                                    AssertEqual(Slab.Length, Read, "Short gated positional read.")
+                                    AssertBytesEqual(Slice(Expected, 2048, Slab.Length), Slab, "Gated positional read mismatch.")
+                                Catch Ex As Exception
+                                    Interlocked.CompareExchange(Failure, Ex, Nothing)
+                                End Try
+                            End Sub
+
+                        RunOnThreads(ReaderCount, Body)
+
+                        If Failure IsNot Nothing Then
+                            Throw New Exception("A gated concurrent reader failed: " & Failure.Message, Failure)
+                        End If
+
+                        AssertTrue(
+                            Backing.MaxConcurrentReaders >= ReaderCount,
+                            $"Reads never overlapped ({Backing.MaxConcurrentReaders} of {ReaderCount} at once) - the read path still serialises.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
             Private Shared Sub RunOnThreads(Count As Integer, Body As Action)
 
                 Dim Threads As New List(Of Thread)()
@@ -147,6 +205,180 @@ Namespace Tests
                 For Each T In Threads : T.Join() : Next
 
             End Sub
+
+            ''' <summary>
+            ''' A seekable in-memory backing store that, once armed, makes every reader block
+            ''' inside a positioned chunk read until <c>ReaderCount</c> of them are present, and
+            ''' records the peak overlap. It advertises lock-free reads so ChunkedStream does
+            ''' not funnel the reads through its own physical-I/O lock first.
+            ''' </summary>
+            Private NotInheritable Class GatedReadStream
+                Inherits Stream
+                Implements IPositionedStream
+
+                Private Const GateTimeoutMs As Integer = 5000
+
+                Private ReadOnly _Inner As New MemoryStream()
+                Private ReadOnly _Sync As New Object()
+                Private ReadOnly _Arrived As CountdownEvent
+                Private ReadOnly _ArrivedThreads As New HashSet(Of Integer)()
+                Private _Armed As Boolean
+                Private _InFlight As Integer
+                Private _MaxConcurrentReaders As Integer
+
+                Public Sub New(ReaderCount As Integer)
+                    _Arrived = New CountdownEvent(ReaderCount)
+                End Sub
+
+                Public Sub ArmGate()
+                    SyncLock _Sync
+                        _Armed = True
+                    End SyncLock
+                End Sub
+
+                Public ReadOnly Property MaxConcurrentReaders As Integer
+                    Get
+                        SyncLock _Sync
+                            Return _MaxConcurrentReaders
+                        End SyncLock
+                    End Get
+                End Property
+
+                Public ReadOnly Property PositionedIoCapabilities As PositionedIoCapabilities _
+                    Implements IPositionedStream.PositionedIoCapabilities
+                    Get
+                        Return PositionedIoCapabilities.LockFreeReads
+                    End Get
+                End Property
+
+                Public Function ReadAt(PhysicalOffset As Long,
+                                       Buffer As Byte(),
+                                       BufferOffset As Integer,
+                                       Count As Integer) As Integer Implements IPositionedStream.ReadAt
+
+                    ' Each reader thread rendezvouses exactly once, on its first armed read.
+                    ' Later reads (and any read from another thread once the rendezvous is
+                    ' done) pass straight through, so the peak overlap is exactly the number
+                    ' of threads that met at the gate.
+                    Dim WaitAtGate As Boolean
+
+                    SyncLock _Sync
+                        If _Armed AndAlso _Arrived.CurrentCount > 0 AndAlso
+                           _ArrivedThreads.Add(Thread.CurrentThread.ManagedThreadId) Then
+
+                            WaitAtGate = True
+                            _InFlight += 1
+                            _MaxConcurrentReaders = Math.Max(_MaxConcurrentReaders, _InFlight)
+                            _Arrived.Signal()
+                        End If
+                    End SyncLock
+
+                    If WaitAtGate Then
+                        _Arrived.Wait(GateTimeoutMs)
+                        SyncLock _Sync
+                            _InFlight -= 1
+                        End SyncLock
+                    End If
+
+                    SyncLock _Sync
+                        If PhysicalOffset >= _Inner.Length Then Return 0
+                        _Inner.Position = PhysicalOffset
+                        Return _Inner.Read(Buffer, BufferOffset, Count)
+                    End SyncLock
+
+                End Function
+
+                Public Sub WriteAt(PhysicalOffset As Long,
+                                   Buffer As Byte(),
+                                   BufferOffset As Integer,
+                                   Count As Integer) Implements IPositionedStream.WriteAt
+
+                    SyncLock _Sync
+                        If PhysicalOffset > _Inner.Length Then _Inner.SetLength(PhysicalOffset)
+                        _Inner.Position = PhysicalOffset
+                        _Inner.Write(Buffer, BufferOffset, Count)
+                    End SyncLock
+
+                End Sub
+
+                Public Overrides ReadOnly Property CanRead As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property CanSeek As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property CanWrite As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property Length As Long
+                    Get
+                        SyncLock _Sync
+                            Return _Inner.Length
+                        End SyncLock
+                    End Get
+                End Property
+
+                Public Overrides Property Position As Long
+                    Get
+                        SyncLock _Sync
+                            Return _Inner.Position
+                        End SyncLock
+                    End Get
+                    Set
+                        SyncLock _Sync
+                            _Inner.Position = Value
+                        End SyncLock
+                    End Set
+                End Property
+
+                Public Overrides Sub Flush()
+                    SyncLock _Sync
+                        _Inner.Flush()
+                    End SyncLock
+                End Sub
+
+                Public Overrides Function Read(Buffer As Byte(), Offset As Integer, Count As Integer) As Integer
+                    SyncLock _Sync
+                        Return _Inner.Read(Buffer, Offset, Count)
+                    End SyncLock
+                End Function
+
+                Public Overrides Sub Write(Buffer As Byte(), Offset As Integer, Count As Integer)
+                    SyncLock _Sync
+                        _Inner.Write(Buffer, Offset, Count)
+                    End SyncLock
+                End Sub
+
+                Public Overrides Function Seek(Offset As Long, Origin As SeekOrigin) As Long
+                    SyncLock _Sync
+                        Return _Inner.Seek(Offset, Origin)
+                    End SyncLock
+                End Function
+
+                Public Overrides Sub SetLength(Value As Long)
+                    SyncLock _Sync
+                        _Inner.SetLength(Value)
+                    End SyncLock
+                End Sub
+
+                Protected Overrides Sub Dispose(Disposing As Boolean)
+                    If Disposing Then
+                        _Inner.Dispose()
+                        _Arrived.Dispose()
+                    End If
+                    MyBase.Dispose(Disposing)
+                End Sub
+
+            End Class
 
         End Class
 

@@ -711,6 +711,43 @@ Namespace Streams
                                                                   RunAsync As Boolean,
                                                                   CancellationToken As Threading.CancellationToken) As Task(Of PhysicalRecordEntry)
 
+            Dim Iv(IvSize - 1) As Byte
+            _Rng.GetBytes(Iv)
+
+            Dim Prepared =
+                PrepareChunkRecord(Plain, PlainLength, AllocatePhysicalRecordId(), Iv,
+                                   CompressionMethodToUse, CompressionRatioThreshold, ForceCompression,
+                                   EncryptionMethod, EvaluateFully, _ChunkCipher)
+
+            Return Await PlaceChunkRecordAsync(Prepared, RunAsync, CancellationToken).ConfigureAwait(False)
+
+        End Function
+
+        Private Structure PreparedChunkRecord
+            Public RecordId As Long
+            Public StoredRecord As Byte()
+            Public PlainLength As Integer
+            Public StoredCompressionMethod As ChunkedStreamOptions.CompressionMethods
+        End Structure
+
+        '
+        ' Pure CPU: applies the compression policy, encrypts and authenticates one chunk into
+        ' a complete stored record. Touches no shared stream state - given its own Cipher
+        ' (Nothing only when the chunk is not encrypted) it is safe to run on a worker thread.
+        ' The record id and IV are supplied because those are drawn serially by the caller,
+        ' and MarkCompressionFlag (which mutates the header flags) is left to PlaceChunkRecord.
+        '
+        Private Function PrepareChunkRecord(Plain As Byte(),
+                                            PlainLength As Integer,
+                                            RecordId As Long,
+                                            Iv As Byte(),
+                                            CompressionMethodToUse As ChunkedStreamOptions.CompressionMethods,
+                                            CompressionRatioThreshold As Double,
+                                            ForceCompression As Boolean,
+                                            EncryptionMethod As ChunkEncryptionMethods,
+                                            EvaluateFully As Boolean,
+                                            Cipher As ChunkCipher) As PreparedChunkRecord
+
             If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
             If PlainLength < 0 OrElse PlainLength > Plain.Length Then Throw New ArgumentOutOfRangeException(NameOf(PlainLength))
 
@@ -769,8 +806,6 @@ Namespace Streams
                         PayloadLength = Compressed.Length
                         StoredCompressionMethod = CompressionMethodToUse
 
-                        MarkCompressionFlag(StoredCompressionMethod)
-
                     End If
 
                 End If
@@ -784,7 +819,6 @@ Namespace Streams
                 Flags = Flags Or ChunkFlags.PlaintextAllZero
             End If
 
-            Dim RecordId = AllocatePhysicalRecordId()
             Dim RecordLength = ChunkRecordDataOffset + PayloadLength + MacSize
             Dim StoredRecord(RecordLength - 1) As Byte
 
@@ -799,46 +833,28 @@ Namespace Streams
             StoredRecord(ChunkCompressionEvaluatedPercentOffset) =
                 CompressionEvaluatedPercent
 
-            Dim Iv(IvSize - 1) As Byte
-            _Rng.GetBytes(Iv)
-
-            Buffer.BlockCopy(Iv,
-                             0,
-                             StoredRecord,
-                             ChunkRecordIvOffset,
-                             IvSize)
+            Buffer.BlockCopy(Iv, 0, StoredRecord, ChunkRecordIvOffset, IvSize)
 
             Select Case EncryptionMethod
 
                 Case ChunkEncryptionMethods.None
 
                     If PayloadLength > 0 Then
-                        Buffer.BlockCopy(Payload,
-                                         0,
-                                         StoredRecord,
-                                         ChunkRecordDataOffset,
-                                         PayloadLength)
+                        Buffer.BlockCopy(Payload, 0, StoredRecord, ChunkRecordDataOffset, PayloadLength)
                     End If
 
                 Case ChunkEncryptionMethods.AesCtrFileMasterKey
 
-                    If _ChunkEncryptionKey Is Nothing OrElse _ChunkCipher Is Nothing Then
+                    If Cipher Is Nothing OrElse _ChunkMacKey Is Nothing Then
                         Throw New EncryptionMismatchException(
                             "Encryption is enabled but no file master key is available.")
                     End If
 
-                    _ChunkCipher.Crypt(Iv,
-                                       0,
-                                       Payload,
-                                       0,
-                                       PayloadLength,
-                                       StoredRecord,
-                                       ChunkRecordDataOffset)
+                    Cipher.Crypt(Iv, 0, Payload, 0, PayloadLength, StoredRecord, ChunkRecordDataOffset)
 
                 Case Else
 
-                    Throw New InvalidDataException(
-                        $"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
+                    Throw New InvalidDataException($"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
 
             End Select
 
@@ -848,31 +864,42 @@ Namespace Streams
                    PublicIntegrityKey)
 
             Using Hmac As New HMACSHA256(RecordMacKey)
-
-                Dim Mac =
-                    Hmac.ComputeHash(StoredRecord,
-                                     0,
-                                     ChunkRecordDataOffset + PayloadLength)
-
-                Buffer.BlockCopy(Mac,
-                                 0,
-                                 StoredRecord,
-                                 ChunkRecordDataOffset + PayloadLength,
-                                 MacSize)
-
+                Dim Mac = Hmac.ComputeHash(StoredRecord, 0, ChunkRecordDataOffset + PayloadLength)
+                Buffer.BlockCopy(Mac, 0, StoredRecord, ChunkRecordDataOffset + PayloadLength, MacSize)
             End Using
 
-            Dim NewRecordOffset =
-                GetNextWriteOffset(StoredRecord.Length, Options.NewChunkWriteLocationPolicy, False)
+            Return New PreparedChunkRecord With {
+                .RecordId = RecordId,
+                .StoredRecord = StoredRecord,
+                .PlainLength = PlainLength,
+                .StoredCompressionMethod = StoredCompressionMethod
+            }
 
-            Await WriteAtEitherAsync(RunAsync, NewRecordOffset, StoredRecord, 0, StoredRecord.Length, CancellationToken).ConfigureAwait(False)
+        End Function
+
+        '
+        ' Serial: records the compression method in the header flags, allocates a backing
+        ' span, writes the prepared record and updates the physical-record indexes.
+        '
+        Private Async Function PlaceChunkRecordAsync(Prepared As PreparedChunkRecord,
+                                                     RunAsync As Boolean,
+                                                     CancellationToken As Threading.CancellationToken) As Task(Of PhysicalRecordEntry)
+
+            If Prepared.StoredCompressionMethod <> ChunkedStreamOptions.CompressionMethods.None Then
+                MarkCompressionFlag(Prepared.StoredCompressionMethod)
+            End If
+
+            Dim NewRecordOffset =
+                GetNextWriteOffset(Prepared.StoredRecord.Length, Options.NewChunkWriteLocationPolicy, False)
+
+            Await WriteAtEitherAsync(RunAsync, NewRecordOffset, Prepared.StoredRecord, 0, Prepared.StoredRecord.Length, CancellationToken).ConfigureAwait(False)
 
             Dim Result =
                 New PhysicalRecordEntry With {
-                    .RecordId = RecordId,
+                    .RecordId = Prepared.RecordId,
                     .PhysicalOffset = NewRecordOffset,
-                    .PhysicalLength = StoredRecord.Length,
-                    .PlainLength = PlainLength,
+                    .PhysicalLength = Prepared.StoredRecord.Length,
+                    .PlainLength = Prepared.PlainLength,
                     .RefCount = 1
                 }
 
@@ -883,7 +910,7 @@ Namespace Streams
             AddPhysicalRecordToIndexes(Result, Ordinal)
 
             Dim NewRecordEndOffset =
-                NewRecordOffset + CLng(StoredRecord.Length)
+                NewRecordOffset + CLng(Prepared.StoredRecord.Length)
 
             If NewRecordEndOffset > _IndexOffset Then
                 _IndexOffset = NewRecordEndOffset
@@ -895,7 +922,8 @@ Namespace Streams
 
         End Function
 
-        Private Function ReadPhysicalRecordPlain(Record As PhysicalRecordEntry) As Byte()
+        Private Function ReadPhysicalRecordPlain(Record As PhysicalRecordEntry,
+                                                 Optional Cipher As ChunkCipher = Nothing) As Byte()
 
             If Record.RecordId <= SparsePhysicalRecordId Then Throw New InvalidDataException("Invalid physical record id.")
             If Record.PhysicalOffset < DataStartOffset Then Throw New InvalidDataException($"Invalid physical record offset for record {Record.RecordId}.")
@@ -908,7 +936,7 @@ Namespace Streams
 
             Dim Plain(Record.PlainLength - 1) As Byte
 
-            DecryptPhysicalRecord(Record.RecordId, StoredRecord, Plain)
+            DecryptPhysicalRecord(Record.RecordId, StoredRecord, Plain, Cipher)
 
             Return Plain
 
@@ -920,7 +948,8 @@ Namespace Streams
         ' and shared with the synchronous path.
         '
         Private Async Function ReadPhysicalRecordPlainAsync(Record As PhysicalRecordEntry,
-                                                            CancellationToken As Threading.CancellationToken) As Task(Of Byte())
+                                                            CancellationToken As Threading.CancellationToken,
+                                                            Optional Cipher As ChunkCipher = Nothing) As Task(Of Byte())
 
             If Record.RecordId <= SparsePhysicalRecordId Then Throw New InvalidDataException("Invalid physical record id.")
             If Record.PhysicalOffset < DataStartOffset Then Throw New InvalidDataException($"Invalid physical record offset for record {Record.RecordId}.")
@@ -933,7 +962,7 @@ Namespace Streams
 
             Dim Plain(Record.PlainLength - 1) As Byte
 
-            DecryptPhysicalRecord(Record.RecordId, StoredRecord, Plain)
+            DecryptPhysicalRecord(Record.RecordId, StoredRecord, Plain, Cipher)
 
             Return Plain
 
@@ -943,7 +972,8 @@ Namespace Streams
                                     OffsetInsideExtent As Integer,
                                     Output As Byte(),
                                     OutputOffset As Integer,
-                                    Count As Integer)
+                                    Count As Integer,
+                                    Optional Cipher As ChunkCipher = Nothing)
 
             If Count <= 0 Then Return
 
@@ -953,7 +983,7 @@ Namespace Streams
             End If
 
             Dim Record = GetPhysicalRecord(Extent.PhysicalRecordId)
-            Dim Plain = ReadPhysicalRecordPlain(Record)
+            Dim Plain = ReadPhysicalRecordPlain(Record, Cipher)
             Dim SourceOffset = Extent.PhysicalRecordOffset + OffsetInsideExtent
 
             If SourceOffset < 0 OrElse SourceOffset + Count > Plain.Length Then
@@ -972,7 +1002,8 @@ Namespace Streams
                                                     Output As Byte(),
                                                     OutputOffset As Integer,
                                                     Count As Integer,
-                                                    CancellationToken As Threading.CancellationToken) As Task
+                                                    CancellationToken As Threading.CancellationToken,
+                                                    Optional Cipher As ChunkCipher = Nothing) As Task
 
             If Count <= 0 Then Return
 
@@ -982,7 +1013,7 @@ Namespace Streams
             End If
 
             Dim Record = GetPhysicalRecord(Extent.PhysicalRecordId)
-            Dim Plain = Await ReadPhysicalRecordPlainAsync(Record, CancellationToken).ConfigureAwait(False)
+            Dim Plain = Await ReadPhysicalRecordPlainAsync(Record, CancellationToken, Cipher).ConfigureAwait(False)
             Dim SourceOffset = Extent.PhysicalRecordOffset + OffsetInsideExtent
 
             If SourceOffset < 0 OrElse SourceOffset + Count > Plain.Length Then

@@ -388,9 +388,10 @@ Namespace Tests
             End Sub
 
             ''' <summary>
-            ''' Verifies that a large read decrypted / decompressed on the worker pool
-            ''' (Options.MaxCryptoParallelism > 1) returns exactly the same bytes as the fully
-            ''' serial path, and that a corrupt chunk still surfaces its CryptographicException
+            ''' Verifies that writing and reading a large stream with per-chunk crypto on the
+            ''' worker pool (Options.MaxCryptoParallelism > 1) produces exactly the same logical
+            ''' bytes as the fully serial path - including a sparse chunk in the middle and a
+            ''' reopen - and that a corrupt chunk still surfaces its CryptographicException
             ''' rather than an AggregateException.
             ''' </summary>
             <UnitTester.SimpleTest()>
@@ -408,6 +409,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(SerialMs, Options)
                         Expected = GeneratePartiallyCompressibleData(0.7R, Cs.Options.ChunkSize, 40, 2302)
+                        Array.Clear(Expected, Cs.Options.ChunkSize * 15, Cs.Options.ChunkSize) ' a sparse chunk mid-stream
                         Cs.Write(0, Expected)
                         AssertBytesEqual(Expected, Cs.ToArray(), "Serial read did not round-trip.")
                     End Using
@@ -425,7 +427,18 @@ Namespace Tests
 
                         Cs.Write(0, Expected)
 
-                        AssertBytesEqual(Expected, Cs.ToArray(), "Parallel read did not match the serial result.")
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Parallel write + read did not match the serial result.")
+                        Cs.Validate().ThrowIfErrors()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, New ChunkedStream.ChunkedStreamOptions With {
+                            .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(2301))})
+                        AssertBytesEqual(Expected, Reopened.ToArray(), "Reopen after a parallel write lost data.")
+                        Reopened.Validate().ThrowIfErrors()
+                    End Using
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
 
                         Dim RangeStart = Cs.Options.ChunkSize \ 2
                         Dim RangeLength = Expected.Length - Cs.Options.ChunkSize
