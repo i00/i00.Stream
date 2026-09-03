@@ -1518,14 +1518,31 @@ Namespace Streams
                 AdaptedFlushDurableAction = Sub() FlushDurableAction(BaseStream)
             End If
 
+            Return OpenCore(BaseStream,
+                            If(Options, New ChunkedStreamOptions()),
+                            AllowOpeningWhenRecoveryFails,
+                            AdaptedFlushDurableAction)
+
+        End Function
+
+        '
+        ' Shared open pipeline: create-new for an empty backing store, otherwise select a
+        ' header copy, load its paged metadata and run any pending crash recovery. Takes the
+        ' already-adapted durable-flush action so the in-place fault reload can reuse the
+        ' backing stream's own hook.
+        '
+        Private Shared Function OpenCore(BaseStream As Stream,
+                                        EffectiveOptions As ChunkedStreamOptions,
+                                        AllowOpeningWhenRecoveryFails As Boolean,
+                                        AdaptedFlushDurableAction As Action) As ChunkedStream
+
             If BaseStream.Length < DataStartOffset Then
                 If BaseStream.CanWrite = False Then
                     Throw New NotSupportedException($"Provided {NameOf(BaseStream)} must support {NameOf(BaseStream.CanWrite)}.")
                 End If
-                Return CreateNew(BaseStream, Options, AdaptedFlushDurableAction)
+                Return CreateNew(BaseStream, EffectiveOptions, AdaptedFlushDurableAction)
             End If
 
-            Dim EffectiveOptions = If(Options, New ChunkedStreamOptions())
             Dim Candidates = ReadHeaderCandidates(BaseStream)
 
             If Candidates.Count = 0 Then
@@ -4008,12 +4025,210 @@ Namespace Streams
 
         Private Sub ThrowIfFaulted()
 
-            If _Faulted Then
-                Throw New InvalidOperationException(
-                    "The ChunkedStream faulted when an earlier operation threw partway through, so " &
-                    "its in-memory state may be inconsistent and no further changes will be persisted. " &
-                    "Dispose and reopen the stream, or roll back to a checkpoint created before the failure.")
+            If _Faulted = False Then Return
+
+            If TryAutoRecoverFromFault() Then Return
+
+            Throw New InvalidOperationException(
+                "The ChunkedStream faulted when an earlier operation threw partway through, so " &
+                "its in-memory state may be inconsistent and no further changes will be persisted. " &
+                "Dispose and reopen the stream, or roll back to a checkpoint created before the failure.")
+
+        End Sub
+
+        Private _Recovering As Boolean
+        Private _FaultRecoveryException As Exception
+
+        ''' <summary>
+        ''' The failure captured the last time <see cref="ChunkedStreamOptions.AutoRecoverOnFault" />
+        ''' tried to reload this stream from the backing store after a fault and could not
+        ''' produce a consistent image, or Nothing when the last such attempt succeeded or
+        ''' none has run. The stream stays faulted when this is set.
+        ''' </summary>
+        Public ReadOnly Property FaultRecoveryException As Exception
+            Get
+                Return _FaultRecoveryException
+            End Get
+        End Property
+
+        Private _FaultRecoveryCount As Integer
+
+        ''' <summary>
+        ''' Number of times this stream has been reloaded from the backing store after a
+        ''' fault, whether by <see cref="ChunkedStreamOptions.AutoRecoverOnFault" /> or an
+        ''' explicit <see cref="Recover" /> call.
+        ''' </summary>
+        Public ReadOnly Property FaultRecoveryCount As Integer
+            Get
+                Return _FaultRecoveryCount
+            End Get
+        End Property
+
+        ''' <summary>
+        ''' Discards the in-memory image and reloads it from the backing stream, running the
+        ''' same crash recovery <see cref="Open" /> performs. Brings a faulted stream back
+        ''' into use without disposing and reopening it - the operation
+        ''' <see cref="ChunkedStreamOptions.AutoRecoverOnFault" /> performs automatically.
+        ''' </summary>
+        ''' <remarks>
+        ''' Any work since the last durable metadata publish is discarded, the same outcome
+        ''' as a crash. Throws <see cref="InvalidOperationException" /> when a checkpoint or
+        ''' <see cref="DeferPublish" /> scope is open. When the reload cannot produce a
+        ''' consistent image the stream is left faulted and the reload exception propagates.
+        ''' </remarks>
+        Public Sub Recover()
+
+            Using EnterStateLock()
+
+                ThrowIfDisposed()
+
+                If _CheckpointStack.Count > 0 OrElse _DeferPublishDepth > 0 Then
+                    Throw New InvalidOperationException("Recover cannot run while a checkpoint or DeferPublish scope is open.")
+                End If
+
+                PerformImageReload()
+
+            End Using
+
+        End Sub
+
+        '
+        ' Auto-recovery path for Options.AutoRecoverOnFault, reached from ThrowIfFaulted at
+        ' the start of the next operation after a fault. Returns True when the stream is no
+        ' longer faulted. Assumes the state lock is held. Never throws: a reload that cannot
+        ' produce a consistent image leaves the stream faulted and the original operation's
+        ' exception stands.
+        '
+        Private Function TryAutoRecoverFromFault() As Boolean
+
+            If _Faulted = False Then Return True
+            If _Recovering Then Return False
+            If _Options Is Nothing OrElse _Options.AutoRecoverOnFault = False Then Return False
+            If _Disposed Then Return False
+            If BaseStream Is Nothing OrElse BaseStream.CanRead = False OrElse BaseStream.CanSeek = False Then Return False
+
+            '
+            ' A checkpoint or DeferPublish scope owns its own rollback baseline and clears
+            ' the fault when it closes, so leave that path to them.
+            '
+            If _CheckpointStack.Count > 0 OrElse _DeferPublishDepth > 0 Then Return False
+
+            Try
+                PerformImageReload()
+                Return True
+            Catch ex As Exception
+                _FaultRecoveryException = ex
+                Return False
+            End Try
+
+        End Function
+
+        '
+        ' Reloads every field the open pipeline derives from the backing store into this
+        ' instance and clears the fault. The state lock must be held. Throws when the
+        ' backing store cannot be reopened into a consistent image, leaving _Faulted set.
+        '
+        Private Sub PerformImageReload()
+
+            If BaseStream Is Nothing OrElse BaseStream.CanRead = False OrElse BaseStream.CanSeek = False Then
+                Throw New NotSupportedException("The backing stream must support reading and seeking to reload the stream image.")
             End If
+
+            If BaseStream.Length < DataStartOffset Then
+                Throw New InvalidDataException("The backing stream is too short to contain a chunked stream header.")
+            End If
+
+            _Recovering = True
+
+            Try
+
+                Dim ReloadOptions As New ChunkedStreamOptions() With {.EncryptionInfo = _Options.EncryptionInfo}
+
+                Dim Source = OpenCore(BaseStream, ReloadOptions, AllowOpeningWhenRecoveryFails:=False, AdaptedFlushDurableAction:=_FlushDurableAction)
+
+                Try
+                    AdoptLoadedImage(Source)
+                Finally
+                    Source.Dispose(False)
+                End Try
+
+                _FaultRecoveryException = Nothing
+                _Faulted = False
+                _FaultRecoveryCount += 1
+
+            Finally
+                _Recovering = False
+            End Try
+
+        End Sub
+
+        '
+        ' Copies the freshly opened, crash-recovered image from Source into this instance,
+        ' then rebuilds the derived indexes. Every field the constructor and
+        ' OpenFromHeaderCandidate populate from the backing store must be adopted here.
+        '
+        Private Sub AdoptLoadedImage(Source As ChunkedStream)
+
+            If Source._ChunkSize <> _ChunkSize Then
+                Throw New InvalidDataException(
+                    $"Reloaded chunk size {Source._ChunkSize} does not match the open stream's chunk size {_ChunkSize}.")
+            End If
+
+            Buffer.BlockCopy(Source._Header, 0, _Header, 0, _Header.Length)
+
+            _HeaderSequence = Source._HeaderSequence
+            _ActiveHeaderCopy = Source._ActiveHeaderCopy
+            _HeaderFlags = Source._HeaderFlags
+            _Length = Source._Length
+            _IndexOffset = Source._IndexOffset
+            _MetadataRootOffset = Source._MetadataRootOffset
+            _MetadataRootLength = Source._MetadataRootLength
+            _MetadataRootMac = Source._MetadataRootMac
+            _NextPhysicalRecordId = Source._NextPhysicalRecordId
+            _NextAnchorId = Source._NextAnchorId
+            _IndexPageEntryCount = Source._IndexPageEntryCount
+            _IndexDirectoryEntryCount = Source._IndexDirectoryEntryCount
+
+            _Extents.Clear()
+            _Extents.AddRange(Source._Extents)
+
+            _PhysicalRecords.Clear()
+            For Each pair In Source._PhysicalRecords
+                _PhysicalRecords(pair.Key) = pair.Value
+            Next
+
+            AdoptPageDescriptors(Source._ExtentPageDescriptors, _ExtentPageDescriptors)
+            AdoptPageDescriptors(Source._ExtentDirectoryPageDescriptors, _ExtentDirectoryPageDescriptors)
+            AdoptPageDescriptors(Source._PhysicalRecordPageDescriptors, _PhysicalRecordPageDescriptors)
+            AdoptPageDescriptors(Source._PhysicalRecordDirectoryPageDescriptors, _PhysicalRecordDirectoryPageDescriptors)
+            AdoptPageDescriptors(Source._HoleDirectoryPageDescriptors, _HoleDirectoryPageDescriptors)
+
+            _DirtyExtentPages.Clear()
+            _DirtyPhysicalRecordPages.Clear()
+            _PendingReclaimedPhysicalRecords.Clear()
+            _CompactMetadataWriteOffset = Nothing
+            _CompactMetadataWriteLimit = Nothing
+
+            ClearFreeSpaceMap()
+            For Each pair In Source._FreeSpaces.CloneSpaces()
+                _FreeSpaces.Add(pair.Key, pair.Value)
+            Next
+
+            RebuildPhysicalRecordOrdinals()
+            RebuildAnchorIndex()
+            InvalidateChunkCache()
+
+            _AutoRepairs = Source._AutoRepairs
+
+        End Sub
+
+        Private Shared Sub AdoptPageDescriptors(SourceMap As Dictionary(Of Integer, MetadataPageDescriptor),
+                                               TargetMap As Dictionary(Of Integer, MetadataPageDescriptor))
+
+            TargetMap.Clear()
+            For Each pair In SourceMap
+                TargetMap(pair.Key) = pair.Value
+            Next
 
         End Sub
 

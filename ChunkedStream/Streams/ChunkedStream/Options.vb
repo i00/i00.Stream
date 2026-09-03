@@ -378,6 +378,36 @@ Namespace Streams
             Public Property UseChunkReadCache As Boolean = True
 
             ''' <summary>
+            ''' When True, an operation that faults the stream part-way through - leaving its
+            ''' in-memory extent, physical-record or anchor state half-applied - triggers an
+            ''' automatic reload of the whole in-memory image from the backing stream (the
+            ''' same crash recovery <see cref="ChunkedStream.Open" /> performs) instead of
+            ''' leaving the stream unusable until it is disposed and reopened. The faulting
+            ''' operation still throws; the stream is usable again from the next call. Default
+            ''' is False, which keeps the faulted stream refusing all further calls until it
+            ''' is disposed and reopened.
+            ''' </summary>
+            ''' <remarks>
+            ''' Recovery reloads the last durably published generation, so any work since the
+            ''' last durable metadata publish is discarded - the same outcome as a crash. If
+            ''' the reload cannot produce a consistent image the stream stays faulted, the
+            ''' original exception is raised and <see cref="ChunkedStream.FaultRecoveryException" />
+            ''' holds the reload failure. Auto-recovery does not run while a checkpoint or a
+            ''' <see cref="ChunkedStream.DeferPublish" /> scope is open - those already roll
+            ''' back to their own baseline when they close.
+            '''
+            ''' Auto-recovery is only as sound as the backing stream. Back the ChunkedStream
+            ''' with an unbuffered FileStream (constructed with a buffer size of 1) when
+            ''' enabling this against a file: a write interrupted mid-call can otherwise
+            ''' strand bytes in the FileStream write buffer that the reload cannot see, and
+            ''' seeking flushes rather than discards that buffer. An unbuffered FileStream
+            ''' does not slow ChunkedStream down - it writes whole records and metadata pages
+            ''' and manages its own durable flushing, so the managed write buffer only adds a
+            ''' copy it never gets to amortise.
+            ''' </remarks>
+            Public Property AutoRecoverOnFault As Boolean = False
+
+            ''' <summary>
             ''' Encryption information used for newly written chunks.
             ''' Setting this to Nothing disables encryption for newly written chunks.
             ''' Existing encrypted chunks remain readable if the file master key is available.

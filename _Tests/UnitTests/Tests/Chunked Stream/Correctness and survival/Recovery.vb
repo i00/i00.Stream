@@ -959,6 +959,170 @@ Namespace Tests
             End Sub
 
             ' ================================================================================
+            ' Auto-recovery after a fault (Options.AutoRecoverOnFault / Recover)
+            ' ================================================================================
+
+            ''' <summary>
+            ''' With Options.AutoRecoverOnFault set, the first call after an operation faults
+            ''' the stream reloads the last durably published generation from the backing
+            ''' store: the stream is usable again with no dispose-and-reopen, the faulting
+            ''' operation's work is discarded and the reload is counted.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub AutoRecoverOnFaultReloadsAfterAFaultedWrite()
+
+                Dim Backing As New FailingMemoryStream()
+
+                Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                    .AutoRecoverOnFault = True
+                }
+
+                Using Cs = ChunkedStream.Open(Backing, Options)
+
+                    Dim Baseline = GenerateRandomData(ChunkedStream.DefaultChunkSize * 4, 5100)
+                    Cs.Write(0, Baseline)
+                    Cs.Flush()
+
+                    Backing.FailOnWriteNumber = Backing.WriteCount + 1
+
+                    AssertThrows(Of IOException)(
+                        Sub() Cs.Write(0, GenerateRandomData(ChunkedStream.DefaultChunkSize * 4, 5101)),
+                        "Expected the injected backing failure to surface.")
+
+                    Backing.FailOnWriteNumber = 0
+
+                    Dim AfterRecovery = GenerateRandomData(ChunkedStream.DefaultChunkSize, 5102)
+                    Cs.Write(0, AfterRecovery)
+
+                    AssertEqual(1, Cs.FaultRecoveryCount, "The faulted write should have triggered exactly one auto-recovery.")
+                    AssertTrue(Cs.FaultRecoveryException Is Nothing, "A successful auto-recovery should leave no FaultRecoveryException.")
+
+                    Dim Expected = DirectCast(Baseline.Clone(), Byte())
+                    Overlay(Expected, AfterRecovery, 0)
+
+                    AssertBytesEqual(Expected, Cs.ToArray(), "The auto-recovered stream did not reflect the last durable generation plus the new write.")
+                    Cs.Validate().ThrowIfErrors()
+
+                End Using
+
+                Backing.Position = 0
+
+                Using Reopened = ChunkedStream.Open(Backing)
+                    Reopened.Validate().ThrowIfErrors()
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Recover reloads a faulted stream from the backing store on demand even when
+            ''' Options.AutoRecoverOnFault is left at its default of False.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub RecoverRestoresAFaultedStreamOnDemand()
+
+                Dim Backing As New FailingMemoryStream()
+
+                Using Cs = ChunkedStream.Open(Backing)
+
+                    Dim Baseline = GenerateRandomData(ChunkedStream.DefaultChunkSize * 3, 5200)
+                    Cs.Write(0, Baseline)
+                    Cs.Flush()
+
+                    Backing.FailOnWriteNumber = Backing.WriteCount + 1
+
+                    AssertThrows(Of IOException)(
+                        Sub() Cs.Write(0, GenerateRandomData(ChunkedStream.DefaultChunkSize * 3, 5201)),
+                        "Expected the injected backing failure to surface.")
+
+                    Backing.FailOnWriteNumber = 0
+
+                    AssertThrows(Of InvalidOperationException)(
+                        Sub() Cs.Write(0, New Byte(15) {}),
+                        "A faulted stream without AutoRecoverOnFault should refuse further writes.")
+
+                    Cs.Recover()
+
+                    AssertEqual(1, Cs.FaultRecoveryCount, "Recover should have reloaded the stream once.")
+                    AssertBytesEqual(Baseline, Cs.ToArray(), "Recover did not restore the last durable generation.")
+                    Cs.Validate().ThrowIfErrors()
+
+                    Cs.Write(0, GenerateRandomData(64, 5202))
+                    Cs.Validate().ThrowIfErrors()
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Recover is rejected while a checkpoint is open - the checkpoint owns the
+            ''' rollback baseline and clears the fault itself when it closes.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub RecoverIsRejectedWhileACheckpointIsOpen()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, GenerateRandomData(ChunkedStream.DefaultChunkSize, 5300))
+
+                        Using Cs.CreateCheckpoint()
+
+                            AssertThrows(Of InvalidOperationException)(
+                                Sub() Cs.Recover(),
+                                "Recover should be rejected while a checkpoint is open.")
+
+                        End Using
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' When the backing store cannot be reopened into a consistent image the stream
+            ''' stays faulted, the reload failure is exposed through FaultRecoveryException
+            ''' and it is not counted as a recovery.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub AutoRecoverLeavesStreamFaultedWhenTheReloadCannotComplete()
+
+                Dim Backing As New FailingMemoryStream()
+
+                Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                    .AutoRecoverOnFault = True
+                }
+
+                Using Cs = ChunkedStream.Open(Backing, Options)
+
+                    Cs.Write(0, GenerateRandomData(ChunkedStream.DefaultChunkSize * 2, 5400))
+                    Cs.Flush()
+
+                    Backing.FailOnWriteNumber = Backing.WriteCount + 1
+
+                    AssertThrows(Of IOException)(
+                        Sub() Cs.Write(0, GenerateRandomData(ChunkedStream.DefaultChunkSize * 2, 5401)),
+                        "Expected the injected backing failure to surface.")
+
+                    Backing.FailOnWriteNumber = 0
+
+                    CorruptHeaderCopy(Backing, 0)
+                    CorruptHeaderCopy(Backing, 1)
+
+                    AssertThrows(Of InvalidOperationException)(
+                        Sub() Cs.Write(0, New Byte(15) {}),
+                        "A stream whose reload fails should stay faulted.")
+
+                    AssertTrue(Cs.FaultRecoveryException IsNot Nothing,
+                               "A failed reload should record its exception in FaultRecoveryException.")
+                    AssertEqual(0, Cs.FaultRecoveryCount, "A failed reload should not count as a recovery.")
+
+                End Using
+
+            End Sub
+
+            ' ================================================================================
             ' Recovery helpers
             ' ================================================================================
 

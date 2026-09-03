@@ -4,9 +4,10 @@
         Application.EnableVisualStyles()
         Application.SetCompatibleTextRenderingDefault(False)
 
-        Using fs = New IO.FileStream("Test.efs", IO.FileMode.OpenOrCreate)
+        Using fs = New IO.FileStream("Test.efs", IO.FileMode.OpenOrCreate, IO.FileAccess.ReadWrite, IO.FileShare.Read, bufferSize:=1)
             Dim Options = New i00.Streams.ChunkedStream.ChunkedStreamOptions() With {
-                .CompressionMethod = i00.Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4
+                .CompressionMethod = i00.Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
+                .AutoRecoverOnFault = True
             }
             '.EncryptionInfo = New i00.Streams.ChunkedStream.EncryptionInfo("HelloWorld", System.Text.Encoding.UTF8.GetBytes("HelloWorld"))
             Using cs = i00.Streams.ChunkedStream.Open(fs, Options)

@@ -783,6 +783,74 @@ Namespace Tests
             End Sub
 
             ''' <summary>
+            ''' With Options.AutoRecoverOnFault set, a defragment that fails partway through
+            ''' reloads the stream from the backing store on the next call instead of leaving
+            ''' it faulted: the failed pass is discarded, the logical data is intact and the
+            ''' stream stays usable with no dispose-and-reopen.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DefragmentFailureAutoRecoversWhenEnabled()
+
+                For Each DefragType As ChunkedStream.DefragTypes In
+                    [Enum].GetValues(GetType(ChunkedStream.DefragTypes))
+
+                    Dim Backing As New FailingMemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 1024,
+                        .AutoRecoverOnFault = True
+                    }
+
+                    Using Cs = ChunkedStream.Open(Backing, Options)
+
+                        Dim Expected = CreateFragmentedStream(Cs, 19000 + CInt(DefragType))
+                        Cs.Flush()
+
+                        Backing.FailFromWriteNumber = Backing.WriteCount + 5
+
+                        AssertThrows(Of IOException)(
+                            Sub() Cs.Defragment(DefragType),
+                            $"Expected the injected backing failure to surface. DefragType={DefragType}")
+
+                        Backing.FailFromWriteNumber = 0
+
+                        ' The next call reloads the last durable generation - no fault, no reopen.
+                        Dim Patch = GenerateRandomData(64, 99000 + CInt(DefragType))
+                        Cs.Write(0, Patch)
+                        Overlay(Expected, Patch, 0)
+
+                        AssertTrue(
+                            Cs.FaultRecoveryCount >= 1,
+                            $"The stream should have auto-recovered from the failed defragment. DefragType={DefragType}")
+
+                        AssertBytesEqual(
+                            Expected,
+                            Cs.ToArray(),
+                            $"Auto-recovery after a failed defragment lost or changed logical data. DefragType={DefragType}")
+
+                        Cs.Validate().ThrowIfErrors()
+
+                        ' A follow-up defragment on the recovered stream still succeeds.
+                        Cs.Defragment(DefragType)
+
+                        AssertBytesEqual(
+                            Expected,
+                            Cs.ToArray(),
+                            $"Defragment after auto-recovery changed logical data. DefragType={DefragType}")
+
+                    End Using
+
+                    Backing.Position = 0
+
+                    Using Reopened = ChunkedStream.Open(Backing, Options)
+                        Reopened.Validate().ThrowIfErrors()
+                    End Using
+
+                Next
+
+            End Sub
+
+            ''' <summary>
             ''' A cached physical-data end that has drifted above the real end of the live
             ''' data (observed after heavy churn - the cache only ratchets down when the
             ''' record at the very end is the one that moves) must not make a Move or
