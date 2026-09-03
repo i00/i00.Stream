@@ -41,7 +41,7 @@ Namespace Tests
                                 Cs.ToArray(),
                                 $"Defragmentation changed logical data. DefragType={DefragType}")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -84,7 +84,7 @@ Namespace Tests
                                 AfterDefrag <= Before,
                                 $"Defragmentation increased fragmentation. DefragType={DefragType}, Before={Before}, After={AfterDefrag}")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -134,7 +134,7 @@ Namespace Tests
                                 Cs.ToArray(),
                                 $"Defragmentation changed cloned logical data. DefragType={DefragType}")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -182,7 +182,7 @@ Namespace Tests
                                 Cs.ToArray(),
                                 $"Defragmentation changed compressed data. DefragType={DefragType}")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -225,7 +225,7 @@ Namespace Tests
                                 Cs.ToArray(),
                                 $"Defragmentation changed encrypted data. DefragType={DefragType}")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -261,7 +261,7 @@ Namespace Tests
                                 Cs.ToArray(),
                                 $"Defragmentation changed sparse data. DefragType={DefragType}")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -312,7 +312,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Rebuild changed logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -378,7 +378,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Cancelling after publish should not have altered committed data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -402,7 +402,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Data changed after compacting a previously publish-then-cancelled rebuild.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -495,7 +495,7 @@ Namespace Tests
                                 Cs.ToArray(),
                                 $"Defragmentation changed logical data. DefragType={DefragType}")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -515,7 +515,7 @@ Namespace Tests
                                 Reopened.ToArray(),
                                 $"Reopened stream lost data after defragmentation. DefragType={DefragType}")
 
-                            Reopened.Validate()
+                            Reopened.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -570,7 +570,7 @@ Namespace Tests
                                 Cs.ToArray(),
                                 $"Defragment cycle {Cycle} changed logical data.")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -606,7 +606,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Reopened stream lost data after repeated defragmentation.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -654,7 +654,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Defragment(Move) changed logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -718,6 +718,126 @@ Namespace Tests
                         AssertThrows(Of InvalidOperationException)(
                             Sub() Cs.Defragment(DefragType),
                             $"Defragment should be rejected on a faulted stream. DefragType={DefragType}")
+
+                    End Using
+
+                Next
+
+            End Sub
+
+            ''' <summary>
+            ''' A defragment that fails partway through must fault the stream, so disposing it
+            ''' does not publish the half-relocated in-memory state over the last durably
+            ''' written generation. Reopening the backing store must still succeed with the
+            ''' logical data intact.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DefragmentFailurePartwayFaultsTheStreamAndStaysReopenable()
+
+                For Each DefragType As ChunkedStream.DefragTypes In
+                    [Enum].GetValues(GetType(ChunkedStream.DefragTypes))
+
+                    Dim Backing As New FailingMemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 1024
+                    }
+
+                    Dim Expected As Byte()
+
+                    Using Cs = ChunkedStream.Open(Backing, Options)
+
+                        Expected = CreateFragmentedStream(Cs, 17000 + CInt(DefragType))
+                        Cs.Flush()
+
+                        ' Every backing write fails once the defragment is under way.
+                        Backing.FailFromWriteNumber = Backing.WriteCount + 5
+
+                        AssertThrows(Of IOException)(
+                            Sub() Cs.Defragment(DefragType),
+                            $"Expected the injected backing failure to surface. DefragType={DefragType}")
+
+                        Backing.FailFromWriteNumber = 0
+
+                        AssertThrows(Of InvalidOperationException)(
+                            Sub() Cs.Write(0, New Byte(15) {}),
+                            $"A failed defragment should fault the stream. DefragType={DefragType}")
+
+                    End Using
+
+                    Backing.Position = 0
+
+                    Using Reopened = ChunkedStream.Open(Backing, Options)
+
+                        Reopened.Validate().ThrowIfErrors()
+
+                        AssertBytesEqual(
+                            Expected,
+                            Reopened.ToArray(),
+                            $"A failed defragment changed the logical data. DefragType={DefragType}")
+
+                    End Using
+
+                Next
+
+            End Sub
+
+            ''' <summary>
+            ''' A cached physical-data end that has drifted above the real end of the live
+            ''' data (observed after heavy churn - the cache only ratchets down when the
+            ''' record at the very end is the one that moves) must not make a Move or
+            ''' Sequence pass fail its "data end beyond the backing stream" guard. Every
+            ''' pass recomputes the end from the live records before trimming.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DefragmentIgnoresADriftedPhysicalDataEndCache()
+
+                For Each DefragType In {ChunkedStream.DefragTypes.Move, ChunkedStream.DefragTypes.Sequence}
+
+                    Using Ms As New MemoryStream()
+
+                        Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                            .ChunkSize = 1024
+                        }
+
+                        Dim Expected As Byte()
+
+                        Using Cs = ChunkedStream.Open(Ms, Options)
+
+                            Expected = CreateFragmentedStream(Cs, 18000 + CInt(DefragType))
+
+                            ' Compact to a converged layout, then push the cached end past
+                            ' the backing stream - the exact state a later pass tripped on.
+                            Cs.Defragment(DefragType)
+                            Cs.Debug_CorruptCachedPhysicalDataEnd(Ms.Length + 65536)
+
+                            Cs.Defragment(DefragType)
+
+                            AssertTrue(
+                                Cs.GetStructure().LiveDataEndOffset <= Ms.Length,
+                                $"The live-data end should sit within the backing stream. DefragType={DefragType}")
+
+                            AssertBytesEqual(
+                                Expected,
+                                Cs.ToArray(),
+                                $"Defragment changed the logical data. DefragType={DefragType}")
+
+                            Cs.Validate().ThrowIfErrors()
+
+                        End Using
+
+                        Ms.Position = 0
+
+                        Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                            Reopened.Validate().ThrowIfErrors()
+
+                            AssertBytesEqual(
+                                Expected,
+                                Reopened.ToArray(),
+                                $"Reopened stream lost data. DefragType={DefragType}")
+
+                        End Using
 
                     End Using
 

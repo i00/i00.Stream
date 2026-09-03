@@ -34,7 +34,7 @@ Namespace Tests
                             Cs.ToArray().Length,
                             "New stream should contain no data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -60,7 +60,7 @@ Namespace Tests
                             Reopened.Length,
                             "Empty stream length changed after reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -94,7 +94,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Basic write/read round-trip failed.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -136,7 +136,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Overwrite did not update logical data correctly.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -170,7 +170,7 @@ Namespace Tests
                             Cs.Length,
                             "Length did not track written data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -199,7 +199,7 @@ Namespace Tests
                             Cs.Length,
                             "Writing beyond end did not extend length correctly.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -230,7 +230,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Unwritten logical space did not read as zeroes.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -280,7 +280,7 @@ Namespace Tests
                             Actual,
                             "Partial read returned incorrect data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -318,7 +318,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Reopen did not preserve logical data.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -358,7 +358,7 @@ Namespace Tests
                             Struct.Chunks.Any(Function(chunk) chunk.IsAllocated),
                             "Structure did not report allocated chunks.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -392,7 +392,7 @@ Namespace Tests
                                 500,
                                 1702))
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -416,7 +416,7 @@ Namespace Tests
                     Using Cs = ChunkedStream.Open(Ms)
                         Expected = GenerateRandomData(Cs.Options.ChunkSize * 5, 1801)
                         Cs.Write(0, Expected)
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
                     End Using
 
                     Bytes = Ms.ToArray()
@@ -440,7 +440,7 @@ Namespace Tests
                         Dim Snapshot = Cs.GetStructure()
                         AssertTrue(Snapshot.AllocatedChunkCount > 0, "Expected allocated chunks in the diagnostic snapshot.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         AssertThrows(Of NotSupportedException)(
                             Sub() Cs.Write(0, New Byte(15) {}),

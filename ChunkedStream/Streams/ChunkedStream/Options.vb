@@ -588,6 +588,32 @@ Namespace Streams
                 Return Result
             End If
 
+            Try
+                RunApplyOptions(Types, ProgressCallback, Durable, Result)
+
+            Catch
+
+                '
+                ' A rewrite that fails partway has updated the in-memory extent and
+                ' physical-record tables without publishing them - the single metadata
+                ' publish only happens once the record loop completes. Fault the stream so
+                ' DisposeCore does not persist that half-applied state over the last good
+                ' generation; the caller can dispose and reopen the file unchanged.
+                '
+                _Faulted = True
+                Throw
+
+            End Try
+
+            Return Result
+
+        End Function
+
+        Private Sub RunApplyOptions(Types As ApplyOptionTypes,
+                                    ProgressCallback As StreamProgressCallback,
+                                    Durable As Boolean,
+                                    Result As ApplyOptionsResult)
+
             Dim CancellationToken As New CancellationToken()
             Dim ChunkSizeRewritten = False
 
@@ -598,7 +624,7 @@ Namespace Streams
                 If CancellationToken.Cancel Then
                     Result.WasCancelled = True
                     Result.PhysicalLengthAfter = BaseStream.Length
-                    Return Result
+                    Return
                 End If
 
                 '
@@ -618,7 +644,7 @@ Namespace Streams
                 If CancellationToken.Cancel Then
                     Result.WasCancelled = True
                     Result.PhysicalLengthAfter = BaseStream.Length
-                    Return Result
+                    Return
                 End If
 
             End If
@@ -673,10 +699,7 @@ Namespace Streams
 
             Result.PhysicalLengthAfter = BaseStream.Length
 
-            Return Result
-
-
-        End Function
+        End Sub
 
         Private Function NeedsChunkSizeRewrite() As Boolean
 

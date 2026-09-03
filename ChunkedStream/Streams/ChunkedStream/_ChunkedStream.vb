@@ -1670,12 +1670,14 @@ Namespace Streams
             Dim StoredIndexPageEntryCount = BitConverter.ToInt32(Header, IndexPageEntryCountOffset)
             Dim StoredIndexDirectoryEntryCount = BitConverter.ToInt32(Header, IndexDirectoryEntryCountOffset)
 
-            If FileLength < 0 Then Throw New InvalidDataException("Invalid chunked stream length.")
-            If IndexOffset < DataStartOffset Then Throw New InvalidDataException("Invalid chunked stream index offset.")
-            If IndexOffset > BaseStream.Length Then Throw New InvalidDataException("Chunked stream index offset is beyond end of stream.")
-            If IndexCount < 0 OrElse IndexCount > Integer.MaxValue Then Throw New InvalidDataException("Invalid chunked stream index count.")
+            '
+            ' Page geometry is authoritative - the header HMAC covers it and the metadata
+            ' cannot be parsed without it, so a bad value here is unrecoverable from this
+            ' header copy (the candidate fallback will try the other one).
+            '
             If StoredIndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid index page entry count.")
             If StoredIndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid index directory entry count.")
+            If IndexCount < 0 OrElse IndexCount > Integer.MaxValue Then Throw New InvalidDataException("Invalid chunked stream index count.")
 
             EffectiveOptions.IndexPageEntryCount = StoredIndexPageEntryCount
             EffectiveOptions.IndexDirectoryEntryCount = StoredIndexDirectoryEntryCount
@@ -1684,6 +1686,13 @@ Namespace Streams
 
             Buffer.BlockCopy(Header, IndexMacOffset, RootMac, 0, RootMac.Length)
 
+            '
+            ' The paged metadata (root + pages, each MAC-verified) is the trust root. The
+            ' remaining header scalars - the index-offset allocation hint, the logical
+            ' length and the extent count - are derived from it and only cached in the
+            ' header, so reconcile rather than reject: a process that faulted mid-operation
+            ' can leave them stale over otherwise-intact metadata.
+            '
             Dim Metadata =
                 ReadPagedMetadata(BaseStream,
                                   MetadataRootOffset,
@@ -1692,8 +1701,34 @@ Namespace Streams
                                   EffectiveOptions.IndexPageEntryCount,
                                   EffectiveOptions.IndexDirectoryEntryCount)
 
-            If Metadata.Extents.Count <> CInt(IndexCount) Then
-                Throw New InvalidDataException("Loaded extent count does not match header index count.")
+            Dim Repairs As New List(Of AutoRepair)()
+
+            Dim ExtentSpan As Long = 0
+            If Metadata.Extents.Count > 0 Then
+                Dim LastExtent = Metadata.Extents(Metadata.Extents.Count - 1)
+                ExtentSpan = LastExtent.LogicalOffset + CLng(LastExtent.LogicalLength)
+            End If
+
+            If IndexCount <> CLng(Metadata.Extents.Count) Then
+                Repairs.Add(New AutoRepair("IndexCount", IndexCount, CLng(Metadata.Extents.Count),
+                                           "did not match the loaded extent count"))
+            End If
+
+            If FileLength < 0 OrElse FileLength <> ExtentSpan Then
+                Repairs.Add(New AutoRepair("Length", FileLength, ExtentSpan,
+                                           "did not match the extent chain's logical span"))
+                FileLength = ExtentSpan
+            End If
+
+            If IndexOffset < DataStartOffset OrElse IndexOffset > BaseStream.Length Then
+                Dim Boundary = Math.Min(BaseStream.Length,
+                                        Math.Max(CLng(DataStartOffset),
+                                                 MaxMetadataBoundary(Metadata, MetadataRootOffset, MetadataRootLength)))
+                Repairs.Add(New AutoRepair("IndexOffset", IndexOffset, Boundary,
+                                           If(IndexOffset > BaseStream.Length,
+                                              "was past the end of the backing stream",
+                                              "was below the data start offset")))
+                IndexOffset = Boundary
             End If
 
             Dim Result = New ChunkedStream(BaseStream,
@@ -1714,6 +1749,8 @@ Namespace Streams
                                            EffectiveOptions.IndexDirectoryEntryCount)
 
             Result._FlushDurableAction = AdaptedFlushDurableAction
+
+            If Repairs.Count > 0 Then Result._AutoRepairs = Repairs.AsReadOnly()
 
             If MetadataRootLength > 0 Then
                 Result._MetadataRootMac = RootMac
@@ -1748,6 +1785,45 @@ Namespace Streams
             End If
 
             Return Result
+
+        End Function
+
+        '
+        ' Highest byte offset the loaded metadata actually reaches: the end of every live
+        ' physical record, every metadata page and the metadata root. Used to recompute a
+        ' lost index-offset hint.
+        '
+        Private Shared Function MaxMetadataBoundary(Metadata As MetadataReadResult,
+                                                   MetadataRootOffset As Long,
+                                                   MetadataRootLength As Integer) As Long
+
+            Dim MaxEnd As Long = DataStartOffset
+
+            If MetadataRootOffset > 0 AndAlso MetadataRootLength > 0 Then
+                MaxEnd = Math.Max(MaxEnd, MetadataRootOffset + CLng(MetadataRootLength))
+            End If
+
+            For Each Descriptors In {Metadata.ExtentPageDescriptors,
+                                     Metadata.ExtentDirectoryPageDescriptors,
+                                     Metadata.PhysicalRecordPageDescriptors,
+                                     Metadata.PhysicalRecordDirectoryPageDescriptors,
+                                     Metadata.HoleDirectoryPageDescriptors}
+
+                For Each Descriptor In Descriptors.Values
+                    If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                        MaxEnd = Math.Max(MaxEnd, Descriptor.Offset + CLng(Descriptor.Length))
+                    End If
+                Next
+
+            Next
+
+            For Each Record In Metadata.PhysicalRecords.Values
+                If Record.RefCount > 0 Then
+                    MaxEnd = Math.Max(MaxEnd, Record.PhysicalOffset + CLng(Record.PhysicalLength))
+                End If
+            Next
+
+            Return MaxEnd
 
         End Function
 
@@ -1844,6 +1920,47 @@ Namespace Streams
         Public ReadOnly Property AutoRecoveryException As Exception
             Get
                 Return _AutoRecoveryException
+            End Get
+        End Property
+
+        ''' <summary>
+        ''' Describes one non-authoritative header field that <see cref="Open" /> found
+        ''' inconsistent and recomputed from the metadata while opening the stream.
+        ''' </summary>
+        Public NotInheritable Class AutoRepair
+            Friend Sub New(Field As String, StoredValue As Long, CorrectedValue As Long, Reason As String)
+                Me.Field = Field
+                Me.StoredValue = StoredValue
+                Me.CorrectedValue = CorrectedValue
+                Me.Reason = Reason
+            End Sub
+
+            ''' <summary>Name of the header field that was corrected.</summary>
+            Public ReadOnly Property Field As String
+            ''' <summary>Value read from the header.</summary>
+            Public ReadOnly Property StoredValue As Long
+            ''' <summary>Value the field was set to, recomputed from the loaded metadata.</summary>
+            Public ReadOnly Property CorrectedValue As Long
+            ''' <summary>Why the stored value could not be trusted.</summary>
+            Public ReadOnly Property Reason As String
+
+            Public Overrides Function ToString() As String
+                Return $"{Field}: stored {StoredValue}, corrected to {CorrectedValue} ({Reason})"
+            End Function
+        End Class
+
+        Private _AutoRepairs As IReadOnlyList(Of AutoRepair) = Array.Empty(Of AutoRepair)()
+        ''' <summary>
+        ''' Non-authoritative header fields (the index-offset allocation hint, the logical
+        ''' length, the extent count) that were found inconsistent and recomputed from the
+        ''' metadata while opening. Empty on a clean open. The corrected values are held in
+        ''' memory and written back by the next durable persist; the metadata itself was not
+        ''' in question. A non-empty list means an earlier write left the header stale -
+        ''' usually a process that faulted mid-operation - and is worth logging.
+        ''' </summary>
+        Public ReadOnly Property AutoRepairs As IReadOnlyList(Of AutoRepair)
+            Get
+                Return _AutoRepairs
             End Get
         End Property
 

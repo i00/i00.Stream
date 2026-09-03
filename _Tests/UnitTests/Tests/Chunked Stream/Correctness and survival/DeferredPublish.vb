@@ -49,12 +49,12 @@ Namespace Tests
 
                         End Using
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms)
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -81,14 +81,14 @@ Namespace Tests
                             Scope.Publish()
                         End Using
                         AssertBytesEqual(Expected, Cs.ToArray(), "Deferred-publish data was lost before reopen.")
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms)
                         AssertBytesEqual(Expected, Reopened.ToArray(), "Deferred-publish data did not survive reopen.")
                         AssertEqual(ChunkedStream.RecoveryStates.None, Reopened.RecoveryStateAtOpen,
                                     "A cleanly published DeferPublish scope should not trigger recovery.")
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -133,12 +133,12 @@ Namespace Tests
                         Buffer.BlockCopy(Second, 0, Combined, First.Length, Second.Length)
                         AssertBytesEqual(Combined, Cs.ToArray(), "Work after a mid-scope Flush was lost.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms)
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -177,7 +177,7 @@ Namespace Tests
 
                         Outer.Dispose()
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -217,14 +217,14 @@ Namespace Tests
                         AssertBytesEqual(AfterRollback, Cs.ToArray(0, AfterRollback.Length),
                                          "The stream was not usable after a DeferPublish rollback.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms)
                         AssertEqual(ChunkedStream.RecoveryStates.None, Reopened.RecoveryStateAtOpen,
                                     "A DeferPublish rollback writes no recovery state.")
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -258,12 +258,12 @@ Namespace Tests
                         AssertBytesEqual(Baseline, Cs.ToArray(),
                                          "A failed DeferPublish batch was not rolled back.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms)
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -298,7 +298,7 @@ Namespace Tests
                         AssertBytesEqual(Baseline, Cs.ToArray(),
                                          "An abandoned outermost scope did not roll back nested published work.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -339,7 +339,7 @@ Namespace Tests
                         AssertBytesEqual(Published, Reopened.ToArray(),
                                          "Reopen after an abandoned DeferPublish window did not return the last published data.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                         Dim PhysicalBeforeDefrag = Ms.Length
                         Reopened.Defragment(ChunkedStream.DefragTypes.Move)
@@ -348,7 +348,7 @@ Namespace Tests
                         AssertTrue(Ms.Length < PhysicalBeforeDefrag,
                                    "Defragment did not reclaim the orphaned records left by the abandoned window.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -382,7 +382,7 @@ Namespace Tests
                     Using Reopened = ChunkedStream.Open(Ms)
                         AssertBytesEqual(Baseline, Reopened.ToArray(),
                                          "Stream dispose persisted a leaked scope's unpublished batch.")
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -425,7 +425,7 @@ Namespace Tests
                             Checkpoint.Commit()
                         End Using
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -462,12 +462,12 @@ Namespace Tests
                         AssertBytesEqual(Baseline, Cs.ToArray(),
                                          "A checkpoint rollback did not undo work published inside a nested DeferPublish scope.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms)
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -508,7 +508,7 @@ Namespace Tests
 
                         End Using
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -565,7 +565,7 @@ Namespace Tests
 
                         ' Validate walks every live record and fails on any overlap, so this
                         ' catches a reused span that was not returned to the free map.
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         ' The hole is usable again: a normal write reuses it and stays intact.
                         Dim PhysicalBefore = Ms.Length
@@ -581,7 +581,7 @@ Namespace Tests
                             Ms.Length < PhysicalBefore + (NewData.Length \ 4),
                             "Post-rollback write did not reuse the hole the rollback freed.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -624,12 +624,12 @@ Namespace Tests
 
                         AssertTrue(Cs.ToArray().All(Function(b) b = 0), "Non-sparse Clear did not zero the range.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms)
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -682,7 +682,7 @@ Namespace Tests
                             Content.All(Function(b) b = 0) OrElse Content.SequenceEqual(Baseline),
                             "An interrupted non-sparse Clear left a partially cleared range.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -717,7 +717,7 @@ Namespace Tests
 
                         AssertBytesEqual(Baseline, Cs.ToArray(),
                                          "A checkpoint rollback did not undo a non-sparse Clear.")
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         Using Checkpoint = Cs.CreateCheckpoint()
                             Cs.Clear(0, CLng(Cs.Options.ChunkSize) * 6)
@@ -726,12 +726,12 @@ Namespace Tests
 
                         AssertTrue(Cs.ToArray().All(Function(b) b = 0),
                                    "A committed non-sparse Clear inside a checkpoint was lost.")
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms)
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -772,12 +772,12 @@ Namespace Tests
                             Cs.ToArray(),
                             "An abandoned outer DeferPublish scope did not roll back a nested non-sparse InsertNullBytes.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms)
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using

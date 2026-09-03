@@ -58,7 +58,7 @@ Namespace Tests
                                 Cs.ToArray(),
                                 $"Compression migration changed logical data. CompressionMethod={CompressionMethod}")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -105,7 +105,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Encryption migration changed logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -147,7 +147,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Encryption removal changed logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -200,7 +200,7 @@ Namespace Tests
                             After.EncryptedChunkCount,
                             "No encrypted chunks should remain.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -227,7 +227,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "De-encrypted data did not survive reopen without a key.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -266,7 +266,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Sparseness migration changed logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -327,7 +327,7 @@ Namespace Tests
                             After.Chunks.First.PayloadLength,
                             "Chunk-size migration did not apply the requested chunk size.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -390,7 +390,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Sequential policy migrations changed logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -441,7 +441,7 @@ Namespace Tests
                             OpenOptions.ChunkSize,
                             "Options.ChunkSize was not updated from the stored value.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -526,7 +526,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Format-evolution migration changed logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -569,13 +569,13 @@ Namespace Tests
                             "ApplyOptions returned after the chunk-size rewrite without examining the other categories.")
 
                         AssertBytesEqual(Expected, Cs.ToArray(), "ApplyOptions changed logical data.")
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms)
                         AssertBytesEqual(Expected, Reopened.ToArray(), "Data did not survive reopen after ApplyOptions(All).")
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using

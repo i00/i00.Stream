@@ -317,12 +317,21 @@ Namespace Streams
             End If
 
             If Record.RefCount > 0 Then
-                AddLivePhysicalRecordOffset(Record)
-            End If
 
-            _PhysicalDataEnd =
-                Math.Max(_PhysicalDataEnd,
-                         Record.PhysicalOffset + CLng(Record.PhysicalLength))
+                AddLivePhysicalRecordOffset(Record)
+
+                '
+                ' _PhysicalDataEnd tracks the end of live physical data only. An
+                ' unreferenced record's span is already treated as free space by
+                ' BuildFreeSpaceMapCore, so counting it here would pin the cached end
+                ' above the real data - and, once a defragment trim shortens the backing
+                ' stream, above the stream itself.
+                '
+                _PhysicalDataEnd =
+                    Math.Max(_PhysicalDataEnd,
+                             Record.PhysicalOffset + CLng(Record.PhysicalLength))
+
+            End If
 
         End Sub
 
@@ -404,12 +413,22 @@ Namespace Streams
 
         Private Sub RecalculatePhysicalDataEnd()
 
+            '
+            ' Only live records count towards the physical-data end. Unreferenced records
+            ' are pending reclamation and their spans are already handed back as free
+            ' space, so including them would leave the cached end drifting high above the
+            ' real data.
+            '
             Dim DataEnd = CLng(DataStartOffset)
 
             For Each Record In _PhysicalRecords.Values
+
+                If Record.RefCount <= 0 Then Continue For
+
                 DataEnd =
                     Math.Max(DataEnd,
                              Record.PhysicalOffset + CLng(Record.PhysicalLength))
+
             Next
 
             _PhysicalDataEnd = DataEnd
@@ -449,11 +468,12 @@ Namespace Streams
 
                     _LivePhysicalRecordIdsByOffset.Add(Record.PhysicalOffset, Record.RecordId)
 
-                End If
+                    ' Only live records extend the physical-data end - see RecalculatePhysicalDataEnd.
+                    _PhysicalDataEnd =
+                        Math.Max(_PhysicalDataEnd,
+                                 Record.PhysicalOffset + CLng(Record.PhysicalLength))
 
-                _PhysicalDataEnd =
-                    Math.Max(_PhysicalDataEnd,
-                             Record.PhysicalOffset + CLng(Record.PhysicalLength))
+                End If
 
                 Ordinal += 1
 

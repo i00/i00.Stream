@@ -26,7 +26,7 @@ Namespace Tests
                     Using Cs = ChunkedStream.Open(Ms)
                         Expected = GenerateRandomData(Cs.Options.ChunkSize * 4, 6601)
                         Cs.Write(0, Expected)
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         Dim Failure As Exception = Nothing
 
@@ -44,7 +44,7 @@ Namespace Tests
                                         Dim Snapshot = Cs.GetStructure()
                                         AssertEqual(CLng(Expected.Length), Snapshot.LogicalLength, "Concurrent GetStructure saw wrong length.")
 
-                                        Cs.Validate()
+                                        Cs.Validate().ThrowIfErrors()
                                     Next
                                 Catch Ex As Exception
                                     Interlocked.CompareExchange(Failure, Ex, Nothing)
@@ -127,7 +127,7 @@ Namespace Tests
                         End If
 
                         AssertBytesEqual(Versions(Versions.Count - 1), Cs.ToArray(), "Final content is wrong after the write race.")
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 

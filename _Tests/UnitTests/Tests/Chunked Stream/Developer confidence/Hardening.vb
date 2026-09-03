@@ -107,7 +107,7 @@ Namespace Tests
                                 $"Model mismatch after operation {OperationIndex}.")
 
                             If OperationIndex Mod 10 = 0 Then
-                                Cs.Validate()
+                                Cs.Validate().ThrowIfErrors()
                             End If
 
                         Next
@@ -127,7 +127,7 @@ Namespace Tests
 
                         End While
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -138,7 +138,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Model mismatch after reopening fuzzed stream.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 

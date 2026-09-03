@@ -2921,24 +2921,88 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private Sub tsiScan_Click(sender As Object, e As EventArgs) Handles tsiScan.Click
         Using frmProgress As New frmProgress(
                 Sub(Parameter, ProgressReport)
-                    ProgressReport.SetText("Scanning Files...")
-
-                    Dim Removed = FileSystem.RecoverPendingFiles(EmbeddedFileSystem.PendingFileRecoveryActions.Remove)
-
                     ProgressReport.SetText("Validating...")
 
-                    Dim ValidationException As Exception = Nothing
+                    Dim Report As ChunkedStream.ValidationReport
                     Try
-                        FileSystem.ChunkedStream.Validate(
+                        Report = FileSystem.ChunkedStream.Validate(
                             Sub(ProcessedUnits, TotalUnits, UnitType, CancellationToken)
                                 Dim Progress = If(TotalUnits = 0, 1.0R, ProcessedUnits / CDbl(TotalUnits))
                                 ProgressReport.SetText($"Validating ({Progress:P0})...")
                             End Sub)
                     Catch ex As Exception
-                        ValidationException = ex
+                        MsgBox(ProgressReport.frmProgress, $"Validation could not run.{Environment.NewLine}{ex.GetType.Name}: {ex.Message}", MsgBoxStyle.Critical)
+                        Return
                     End Try
-                    Dim Icon = If(ValidationException Is Nothing, MsgBoxStyle.Information, MsgBoxStyle.Critical)
-                    MsgBox(ProgressReport.frmProgress, $"Partial Files Removed: {Removed}{Environment.NewLine}Validation: {If(ValidationException Is Nothing, "Pass", $"{ValidationException.GetType.Name}: {ValidationException.Message}")}", Icon)
+
+                    If Report.IsValid Then
+                        Dim Tidied = FileSystem.RecoverPendingFiles(Function(x)
+                                                                        Select Case x.State
+                                                                            Case EmbeddedFileSystem.EntryTypes.CorruptData
+                                                                                Return EmbeddedFileSystem.PendingFileRecoveryActions.Finalize
+                                                                            Case EmbeddedFileSystem.EntryTypes.PendingFile
+                                                                                Return EmbeddedFileSystem.PendingFileRecoveryActions.Remove
+                                                                        End Select
+                                                                        Return EmbeddedFileSystem.PendingFileRecoveryActions.None
+                                                                    End Function)
+                        Dim PendingFiles = Tidied.Where(Function(x) x.PreviousState = EmbeddedFileSystem.EntryTypes.PendingFile).ToArray()
+                        Dim PendingFilesText = "None"
+                        If PendingFiles.Any Then
+                            PendingFilesText = Environment.NewLine & String.Join(Environment.NewLine, PendingFiles.Select(Function(x) $"    - {x.Path}"))
+                        End If
+                        Dim CorruptFiles = Tidied.Where(Function(x) x.PreviousState = EmbeddedFileSystem.EntryTypes.CorruptData).ToArray()
+                        Dim CorruptFilesText = "None"
+                        If CorruptFiles.Any Then
+                            CorruptFilesText = Environment.NewLine & String.Join(Environment.NewLine, CorruptFiles.Select(Function(x) $"    - {x.Path} ({x.BytesZeroed.FormatFileSizeFromBytes()} not recovered)"))
+                        End If
+                        If PendingFiles.Any = False Then
+                            MsgBox(ProgressReport.frmProgress, "No problems found.", MsgBoxStyle.Information)
+                        Else
+                            MsgBox(ProgressReport.frmProgress,
+                               $"{Environment.NewLine}Half copied files removed: {PendingFilesText}{Environment.NewLine}Corrupt files partly recovered: {CorruptFilesText}",
+                               If(CorruptFiles.Any, MsgBoxStyle.Critical, MsgBoxStyle.Exclamation))
+                        End If
+                        Return
+                    End If
+
+                    ' Record which files the problems touch before the repair zero-fills the ranges.
+                    ProgressReport.SetText("Marking affected files...")
+                    Dim Marks = FileSystem.Mark(Report)
+
+                    Dim LossyBytes = Report.Problems.Sum(Function(problem) problem.DataLossBytes)
+                    Dim Summary = String.Join(Environment.NewLine,
+                                              Report.Problems.Take(12).Select(Function(problem) $"  - {problem.Message}"))
+                    If Report.Problems.Count > 12 Then Summary &= $"{Environment.NewLine}  ... and {Report.Problems.Count - 12} more"
+
+                    Dim ProceedWithLoss = False
+                    If LossyBytes > 0 Then
+                        Dim Affected = String.Join(Environment.NewLine, Marks.Select(Function(mark) $"  - {mark.Path} ({mark.LostBytes.FormatFileSizeFromBytes})"))
+                        ProceedWithLoss = ProgressReport.ShowMessageBox(
+                            $"{Report.Errors.Count} error(s), {Report.Warnings.Count} warning(s) found:{Environment.NewLine}{Summary}{Environment.NewLine}{Environment.NewLine}" &
+                            $"Repairing replaces {LossyBytes.FormatFileSizeFromBytes} of unreadable data with zeros across {Marks.Count} file(s):{Environment.NewLine}{Affected}{Environment.NewLine}{Environment.NewLine}" &
+                            "Repair now (with data loss)?",
+                            MsgBoxStyle.Exclamation Or MsgBoxStyle.YesNo, "Repair") = MsgBoxResult.Yes
+                    End If
+
+                    ProgressReport.SetText("Repairing...")
+                    Dim Outcome = Report.Repair(If(ProceedWithLoss, ChunkedStream.RepairScope.IncludeDataLoss, ChunkedStream.RepairScope.NonLossy))
+
+                    ' Delete files whose data was lost, finalise the ones that were merely left pending.
+                    Dim Recovered = FileSystem.RecoverPendingFiles(
+                        Function(candidate) If(candidate.State = EmbeddedFileSystem.EntryTypes.CorruptData,
+                                              EmbeddedFileSystem.PendingFileRecoveryActions.Remove,
+                                              EmbeddedFileSystem.PendingFileRecoveryActions.Finalize))
+
+                    Dim RemovedCount = Recovered.Where(Function(entry) entry.Action = EmbeddedFileSystem.PendingFileRecoveryActions.Remove).Count()
+                    Dim Residual = FileSystem.ChunkedStream.Validate()
+
+                    MsgBox(ProgressReport.frmProgress,
+                           $"Problems found: {Report.Problems.Count}{Environment.NewLine}" &
+                           $"Repaired: {Outcome.Repaired.Count}   Skipped: {Outcome.Skipped.Count}{Environment.NewLine}" &
+                           $"Data zeroed: {Outcome.BytesZeroed.FormatFileSizeFromBytes}{Environment.NewLine}" &
+                           $"Files removed: {RemovedCount}   finalised: {Recovered.Count - RemovedCount}{Environment.NewLine}" &
+                           $"Remaining problems: {Residual.Problems.Count}",
+                           If(Residual.HasErrors, MsgBoxStyle.Exclamation, MsgBoxStyle.Information))
                 End Sub, Nothing)
 
             frmProgress.ShowInTaskbar = True

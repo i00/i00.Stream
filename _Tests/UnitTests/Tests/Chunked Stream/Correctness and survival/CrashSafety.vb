@@ -47,7 +47,7 @@ Namespace Tests
                             Overlay(Expected, Patch, 50000)
 
                             Cs.Flush()
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
                     End Using
@@ -65,7 +65,7 @@ Namespace Tests
                                 "A cleanly closed FileStream-backed stream should not be pending recovery.")
 
                             AssertBytesEqual(Expected, Reopened.ToArray(), "FileStream-backed data did not survive reopen.")
-                            Reopened.Validate()
+                            Reopened.Validate().ThrowIfErrors()
 
                         End Using
                     End Using
@@ -113,7 +113,7 @@ Namespace Tests
                             Next
                         Next
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -138,7 +138,7 @@ Namespace Tests
 
                         Using Recovered = ChunkedStream.Open(Backing)
 
-                            Recovered.Validate()
+                            Recovered.Validate().ThrowIfErrors()
 
                             AssertTrue(
                                 Snapshots.Contains(Convert.ToBase64String(Recovered.ToArray())),

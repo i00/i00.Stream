@@ -70,7 +70,7 @@ Namespace Tests
                                 Cs.ToArray(),
                                 $"Allocation policy corrupted logical data. Policy={Policy}")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -183,7 +183,7 @@ Namespace Tests
                             End Select
 
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -259,7 +259,7 @@ Namespace Tests
                                     Cs.ToArray(),
                                     $"Allocation reuse cycle corrupted data. Policy={Policy}, PassIndex={PassIndex}")
 
-                                Cs.Validate()
+                                Cs.Validate().ThrowIfErrors()
 
                             Next
 
@@ -317,7 +317,7 @@ Namespace Tests
                         Dim Fragmentation = Cs.GetFragmentation()
 
                         AssertBytesEqual(Expected, Cs.ToArray(), "Random-write churn corrupted logical data.")
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         AssertTrue(
                             Fragmentation < 0.1R,
@@ -374,7 +374,7 @@ Namespace Tests
                                 Cs.ToArray(),
                                 $"Rollback of an in-checkpoint chunk write changed data. Policy={Policy}")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                             ' Commit: the in-checkpoint write is kept, data intact.
                             Using Checkpoint = Cs.CreateCheckpoint()
@@ -387,12 +387,12 @@ Namespace Tests
                                 Cs.ToArray(),
                                 $"Commit of an in-checkpoint chunk write changed data. Policy={Policy}")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
                         Using Reopened = ChunkedStream.Open(Ms, Options)
-                            Reopened.Validate()
+                            Reopened.Validate().ThrowIfErrors()
                         End Using
 
                     End Using
@@ -444,7 +444,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Split extent overwrite corrupted logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -522,7 +522,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Removing cloned shared range damaged original data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -592,7 +592,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "SetLength shrink removed or damaged original data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -668,7 +668,7 @@ Namespace Tests
 
                                     ' The scan reclaims the record despite the drifted count, so the
                                     ' stream stays consistent and no storage is leaked.
-                                    Cs.Validate()
+                                    Cs.Validate().ThrowIfErrors()
                                     AssertBytesEqual(Expected, Cs.ToArray(), "Scan reclamation corrupted logical data.")
                                     AssertEqual(RecordBytesBeforeDrift,
                                                 Cs.GetStructure().PhysicalChunkRecordBytes,
@@ -678,8 +678,8 @@ Namespace Tests
 
                                     ' RefCount reclamation trusts the drifted count and cannot tell
                                     ' the record is now unreferenced.
-                                    AssertThrows(Of IO.InvalidDataException)(
-                                        Sub() Cs.Validate(),
+                                    AssertThrows(Of ChunkedStream.ValidationException)(
+                                        Sub() Cs.Validate().ThrowIfErrors(),
                                         "RefCount reclamation should leave the drifted reference count inconsistent.")
 
                             End Select
@@ -741,7 +741,7 @@ Namespace Tests
                         ' Shrink away the tail.
                         Cs.SetLength(Options.ChunkSize * 6L)
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         Dim Struct = Cs.GetStructure()
 
@@ -837,7 +837,7 @@ Namespace Tests
                             Chunks.
                             Single(Function(chunk) chunk.Index = 4)
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         Return New HoleReuseResult With {
                             .OriginalChunk1Offset = OriginalChunk1Offset,

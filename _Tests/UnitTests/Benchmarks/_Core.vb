@@ -73,7 +73,7 @@ Namespace Tests
 
                         Expected = Cs.ToArray()
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         Dim StructBeforeReopen = Cs.GetStructure()
 
@@ -95,7 +95,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             $"[{Test.Test}] Data mismatch after reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                         Reopened.Defragment(ChunkedStream.DefragTypes.Sequence)
                         Dim StructAfterReopen = Reopened.GetStructure()

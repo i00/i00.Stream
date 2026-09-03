@@ -960,6 +960,37 @@ Namespace Streams
 
         End Function
 
+        '
+        ' Reads one metadata page after checking it lies within the backing stream. A page
+        ' whose descriptor points past the end means the stream was truncated below its
+        ' metadata (a defragment that failed partway can leave a header referencing pages it
+        ' had appended above the eventual end) - surface that plainly rather than as a bare
+        ' end-of-stream read.
+        '
+        Private Shared Function ReadMetadataPageBytes(BaseStream As Stream,
+                                                     Descriptor As MetadataPageDescriptor) As Byte()
+
+            If Descriptor.Offset < DataStartOffset OrElse Descriptor.Length <= 0 Then
+                Throw New InvalidDataException(
+                    $"Metadata page {Descriptor.PageNumber} has an invalid location ({Descriptor.Offset}, {Descriptor.Length}).")
+            End If
+
+            If Descriptor.Offset + CLng(Descriptor.Length) > BaseStream.Length Then
+                Throw New InvalidDataException(
+                    $"Metadata page {Descriptor.PageNumber} at offset {Descriptor.Offset} extends " &
+                    $"{Descriptor.Offset + CLng(Descriptor.Length) - BaseStream.Length} bytes past the end of the " &
+                    "backing stream, which was truncated below its metadata.")
+            End If
+
+            Dim Page(Descriptor.Length - 1) As Byte
+
+            BaseStream.Position = Descriptor.Offset
+            ReadExactly(BaseStream, Page, 0, Page.Length)
+
+            Return Page
+
+        End Function
+
         Private Shared Function ReadPagedMetadata(BaseStream As Stream,
                                                   RootOffset As Long,
                                                   RootLength As Integer,
@@ -1158,10 +1189,7 @@ Namespace Streams
             Dim Result As New List(Of MetadataPageDescriptor)()
 
             For Each Descriptor In Descriptors.OrderBy(Function(x) x.PageNumber)
-                Dim Page(Descriptor.Length - 1) As Byte
-
-                BaseStream.Position = Descriptor.Offset
-                ReadExactly(BaseStream, Page, 0, Page.Length)
+                Dim Page = ReadMetadataPageBytes(BaseStream, Descriptor)
 
                 Dim Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
 
@@ -1214,10 +1242,7 @@ Namespace Streams
 
             For Each Descriptor In Descriptors.OrderBy(Function(x) x.PageNumber)
 
-                Dim Page(Descriptor.Length - 1) As Byte
-
-                BaseStream.Position = Descriptor.Offset
-                ReadExactly(BaseStream, Page, 0, Page.Length)
+                Dim Page = ReadMetadataPageBytes(BaseStream, Descriptor)
 
                 Dim Mac = ComputeMac(Page,
                                      Page.Length - MacSize,
@@ -1310,10 +1335,7 @@ Namespace Streams
             Dim Result As New Dictionary(Of Long, PhysicalRecordEntry)()
 
             For Each Descriptor In Descriptors.OrderBy(Function(x) x.PageNumber)
-                Dim Page(Descriptor.Length - 1) As Byte
-
-                BaseStream.Position = Descriptor.Offset
-                ReadExactly(BaseStream, Page, 0, Page.Length)
+                Dim Page = ReadMetadataPageBytes(BaseStream, Descriptor)
 
                 Dim Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
 
@@ -1369,10 +1391,7 @@ Namespace Streams
             Dim Result As New List(Of HoleDirectoryRecord)()
 
             For Each Descriptor In Descriptors.OrderBy(Function(x) x.PageNumber)
-                Dim Page(Descriptor.Length - 1) As Byte
-
-                BaseStream.Position = Descriptor.Offset
-                ReadExactly(BaseStream, Page, 0, Page.Length)
+                Dim Page = ReadMetadataPageBytes(BaseStream, Descriptor)
 
                 Dim Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
 

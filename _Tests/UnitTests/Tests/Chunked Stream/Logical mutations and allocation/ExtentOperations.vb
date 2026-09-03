@@ -56,7 +56,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Middle overwrite corrupted logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -99,7 +99,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Beginning extent overwrite corrupted tail data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -145,7 +145,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "End extent overwrite corrupted leading data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -201,7 +201,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Insert operation corrupted logical layout.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -243,7 +243,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Insert at beginning failed.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -293,7 +293,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Middle remove corrupted logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -332,7 +332,7 @@ Namespace Tests
                             Cs.ToArray().Length,
                             "Remove entire stream left logical data behind.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -378,7 +378,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Clear did not replace the range with zeroes.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -419,7 +419,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Clear did not zero the entire stream.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -461,7 +461,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Clear at BOF failed.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -503,7 +503,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Clear at EOF failed.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -573,7 +573,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "InsertNullBytes at BOF failed.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -613,7 +613,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "InsertNullBytes in the middle failed.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -652,7 +652,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "InsertNullBytes at EOF failed.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -684,7 +684,7 @@ Namespace Tests
                             Cs.Length,
                             "InsertNullBytes did not increase length correctly.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -719,7 +719,7 @@ Namespace Tests
                             Struct.Chunks.Any(Function(chunk) Not chunk.IsAllocated),
                             "InsertNullBytes did not create sparse storage.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -763,7 +763,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Clone did not create the expected logical copy.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -816,7 +816,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Copy-on-write did not isolate cloned data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -857,7 +857,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "SetLength extension did not append zeros.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -895,7 +895,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "SetLength shrink did not truncate correctly.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 

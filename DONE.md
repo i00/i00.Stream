@@ -4,7 +4,98 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ---
 
+## 2026-09-03
+
+### Corruption tolerance + `chkdsk`-style repair — DONE
+Built out from the `Defragment(Move)` corruption incident. Five layers:
+
+**1. Open no longer rejects a stale allocation hint.** The paged metadata (root + pages, each
+MAC-verified) is the trust root; the header's index-offset, logical length and extent count
+are derived from it. `Open` now reconciles those against the loaded metadata instead of
+throwing (`IndexOffset > BaseStream.Length` was the exact check that locked out the corrupted
+`Test.efs`), records each correction in the new `ChunkedStream.AutoRepairs`
+(`{Field, StoredValue, CorrectedValue, Reason}`), and persists the fixed value on the next
+durable write. Page geometry and the root MAC stay hard failures (candidate fallback handles
+those).
+
+**2. `Validate()` returns a report instead of throwing.**
+`Validate(...) As ValidationReport` collects every problem (`ValidationProblem`:
+`Severity`, `Kind`, `Message`, `PhysicalRecordId?`, `AffectedRanges`, `CanRepair`,
+`RepairIsLossy`, `DataLossBytes`). `ValidationReport` exposes `Problems` / `Errors` /
+`Warnings` / `IsValid` / `HasErrors`, plus `ThrowIfErrors()` (throws `ValidationException`,
+carrying the report) for the old behaviour. `ValidateAsync` returns `Task(Of ValidationReport)`.
+~280 test call sites migrated to `.Validate().ThrowIfErrors()`.
+
+**3. `ValidationReport.Repair`.** Two overloads:
+`Repair(Optional RepairScope = NonLossy)` and `Repair(Func(Of ValidationProblem, Boolean))`,
+so `Repair(Function(p) p.DataLossBytes = 0)` = non-lossy, `Repair(Function(p) p.Kind = ...)`
+= one kind. `NonLossy` reconciles reference counts, rebuilds the anchor index and recomputes
+the logical length; the lossy path converts every extent backed by an unreadable/missing
+physical record into a sparse (zero) extent of the same logical length - offsets, stream
+length and anchors are preserved, the range just reads as zeros. Every problem is re-verified
+against the live stream before it is acted on (so `Validate → Mark → Repair` is safe - the
+intervening `Mark` writes touch only directory entries), the whole repair is one durable
+publish, and a mid-repair failure faults the stream. A structurally broken extent chain aborts
+the repair untouched. Returns `RepairResult` (`Repaired`, `Skipped` with reasons, `BytesZeroed`).
+
+**4. EFS corruption marking.** New `EmbeddedFileSystem.EntryTypes.CorruptData`.
+`EmbeddedFileSystem.Mark(report)` maps each problem's logical range back to the file that
+contains it and flips the entry to `CorruptData` (returns `CorruptEntryMark`:
+`Path`, `AnchorId`, `LostBytes`). Call it before `Repair`.
+
+**5. `RecoverPendingFiles` returns detail + per-entry selector.** Now
+`IReadOnlyList(Of PendingFileRecoveryResult)` (`Path`, `AnchorId`, `PreviousState`, `Action`,
+`DataLength`, `BytesZeroed`) and sweeps both `PendingFile` and `CorruptData` entries.
+`PendingFileRecoveryActions` gained `None` (skip, omit from result) and `List` (report only, no
+change). `RecoverPendingFiles(Func(Of PendingFileRecoveryCandidate, PendingFileRecoveryActions))`
+picks the action per entry, e.g.
+`Function(c) If(c.State = EntryTypes.CorruptData, Remove, Finalize)`; it enumerates all
+candidates first (one `GetStructure()` for the zeroed-byte counts) then re-locates each by
+anchor id, since `Remove` shifts logical offsets. Sample `EmbeddedFileSystemBrowserForm` "Scan"
+rewritten as Validate → Mark → confirm-if-lossy → Repair → RecoverPendingFiles (Remove corrupt,
+Finalize pending) with a full summary.
+
+**Where it can't help:** if the extent/physical-record *pages themselves* were truncated away
+(the real `Test.efs` - a failed defrag had appended all 147 pages above the eventual end, only
+the 8 KB root survived), there is nothing to reconcile; `ReadMetadataPageBytes` now reports
+that plainly ("truncated below its metadata") instead of a bare end-of-stream read. Deep
+data-area salvage is out of scope (see TODO).
+
+New files: `Streams/ChunkedStream/Repair.vb`. New test seam
+`Debug_CorruptPersistedHeaderIndexOffset`. Tests +6, suite 273 → 278.
+
 ## 2026-09-02
+
+### Defragment(Move) corrupted a heavily-churned file — DONE
+A real `Test.efs` (~250 MB, heavy EFS churn) threw
+`InvalidDataException("Defrag data end is beyond the backing stream length.")` mid-defragment
+and then would not reopen (`Open` rejected both headers: index offset beyond end of stream).
+
+Root cause: the cached `_PhysicalDataEnd` had drifted ~415 KB above the real end of the live
+data (D6 — it only ratchets down in `UpdatePhysicalRecordLocationIndexes` when the record at
+the very end is the one that moves, and the full recompute counted `RefCount = 0` records).
+`TrimAndCommitDefragMetadata` trusted that cache in a hard guard, so once one pass had trimmed
+the backing stream a later pass threw against it. `DefragmentCore` had no `Catch` and never set
+`_Faulted`, so `DisposeCore` then published the half-defragmented state — with `_IndexOffset`
+past EOF — over the last good header generation.
+
+Fix:
+- `RecalculatePhysicalDataEnd` / `RebuildPhysicalRecordOrdinals` / `AddPhysicalRecordToIndexes`
+  now count only `RefCount > 0` records, so the cached end means "end of live data" (D6, first
+  half).
+- `DefragmentCore` recomputes `_PhysicalDataEnd` once up front (after the unreferenced-record
+  sweep), and `TrimAndCommitDefragMetadata` recomputes it before its guard — the guard now
+  only fires on a live record genuinely past the end of the stream. `CommitDefragCheckpoint`
+  / `TrimAndCommitDefragMetadata` lost their now-redundant `DataEnd` parameter.
+- `DefragmentCore` and `ApplyOptionsCore` wrap their body in `Catch : _Faulted = True : Throw`
+  (matching the mutation cores). A defragment / ApplyOptions that fails partway now faults the
+  stream, so `DisposeCore` keeps the last durable generation and the caller can reopen the
+  file exactly as it was. `ApplyOptionsCore`'s body moved to `RunApplyOptions` for the wrap.
+- `DefragmentCore`'s `Finally` skips `BuildFreeSpaceMapCore` on the fault path (it would build
+  from inconsistent state and could mask the original failure).
+Tests: `Physical layout operations/Defragmentation.vb` (+2), suite 271 → 273. New
+`Debug_CorruptCachedPhysicalDataEnd` seam. Not covered: the organic churn-scale drift itself
+(needs the EFS workload) — see TODO D6 for the `Validate()` invariant that would catch it.
 
 ### AES-CTR keystream is now batched — DONE
 `CryptPayload` (`Crypto.vb`) used to reassign `Aes.Key`, call `CreateEncryptor()`, and issue

@@ -58,7 +58,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Modifying source data modified cloned data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -112,7 +112,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Modifying clone data modified source data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -177,7 +177,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Copy-on-write failed with multiple logical references.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -239,7 +239,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Partial copy-on-write modified unrelated logical ranges.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -282,7 +282,7 @@ Namespace Tests
                             PhysicalRecords.Any(Function(record) record.Count > 1),
                             "Clone did not create any shared physical records.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -328,7 +328,7 @@ Namespace Tests
                                 256,
                                 4102))
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         Dim After =
                             Cs.GetStructure()
@@ -390,7 +390,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Checkpoint rollback did not restore original copy-on-write state.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -479,7 +479,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Copy-on-write after reopen corrupted logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 

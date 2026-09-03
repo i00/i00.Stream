@@ -40,7 +40,7 @@ Namespace Tests
                             AssertEqual(CLng(Payload.Length), FileEntry.LengthOfDataAtEntry, "Renaming the file changed its length.")
                             AssertBytesEqual(Payload, Basics.ReadWholeFile(Efs, FileId), "Renaming the file changed its content.")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
                     End Using
@@ -60,7 +60,7 @@ Namespace Tests
 
                             AssertEqual("README", Efs.FindEntry(Efs.RootAnchorId, "readme").Name, "The case change was not stored.")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
                     End Using
@@ -111,7 +111,7 @@ Namespace Tests
                             Efs.RenameEntry(Efs.RootAnchorId, "a", "alpha")
                             Efs.RenameEntry(Dir, "first.bin", "second.bin")
                         End Using
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
                     End Using
 
                     Using Cs = ChunkedStream.Open(Ms)
@@ -124,7 +124,7 @@ Namespace Tests
                             AssertBytesEqual(Payload, Basics.ReadWholeFile(Efs, FileEntry.ChildAnchorId), "The reopened renamed file lost its content.")
 
                         End Using
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
                     End Using
 
                 End Using

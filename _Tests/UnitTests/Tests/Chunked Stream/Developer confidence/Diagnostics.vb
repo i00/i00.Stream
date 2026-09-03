@@ -319,7 +319,7 @@ Namespace Tests
                             Struct.Regions.Any(Function(region) region.RegionType = ChunkedStreamStructure.RegionTypes.MetadataRoot),
                             "Structure snapshot after reopen did not contain a metadata-root region.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -421,7 +421,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Diagnostic rewritten-layout setup corrupted logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -462,7 +462,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Reopened rewritten-layout stream did not preserve logical data.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 

@@ -1,8 +1,214 @@
 ﻿Imports System.IO
+Imports System.Linq
 Imports System.Security.Cryptography
 
 Namespace Streams
     Partial Class ChunkedStream
+
+        ''' <summary>Severity of a <see cref="ValidationProblem" />.</summary>
+        Public Enum ValidationSeverity
+            ''' <summary>A recoverable inconsistency in derived state. The stream is usable.</summary>
+            Warning
+            ''' <summary>A structural or data-integrity failure.</summary>
+            [Error]
+        End Enum
+
+        ''' <summary>Classifies a <see cref="ValidationProblem" /> and determines how it is repaired.</summary>
+        Public Enum ValidationProblemKind
+            ''' <summary>A gap, overlap or invalid field in the extent chain. Not automatically repairable.</summary>
+            ExtentChainStructure
+            ''' <summary>An extent references a physical record that is not in the record table. Repaired by zero-filling the range.</summary>
+            MissingPhysicalRecord
+            ''' <summary>An extent references data beyond the end of its physical record. Repaired by zero-filling the range.</summary>
+            ExtentBeyondPhysicalRecord
+            ''' <summary>A physical record's header is malformed or its authentication tag is invalid. Repaired by zero-filling every range that references it.</summary>
+            PhysicalRecordUnreadable
+            ''' <summary>An encrypted physical record exists but no file master key is available to authenticate it. Not automatically repairable.</summary>
+            PhysicalRecordKeyUnavailable
+            ''' <summary>A physical-record reference count disagrees with the extent table. Repaired by recomputing it.</summary>
+            RefCountMismatch
+            ''' <summary>The anchor index does not match the anchored extents. Repaired by rebuilding it.</summary>
+            AnchorIndexMismatch
+            ''' <summary>The logical length disagrees with the extent chain. Repaired by recomputing it.</summary>
+            LogicalLengthMismatch
+        End Enum
+
+        ''' <summary>A contiguous span of the logical stream.</summary>
+        Public Structure LogicalRange
+            Friend Sub New(Offset As Long, Length As Long)
+                Me.Offset = Offset
+                Me.Length = Length
+            End Sub
+            ''' <summary>Logical offset of the first affected byte.</summary>
+            Public ReadOnly Property Offset As Long
+            ''' <summary>Number of affected bytes.</summary>
+            Public ReadOnly Property Length As Long
+            Public Overrides Function ToString() As String
+                Return $"[{Offset}, {Offset + Length})"
+            End Function
+        End Structure
+
+        ''' <summary>One problem found by <see cref="ChunkedStream.Validate" />.</summary>
+        Public NotInheritable Class ValidationProblem
+
+            Friend Sub New(Severity As ValidationSeverity,
+                           Kind As ValidationProblemKind,
+                           Message As String,
+                           PhysicalRecordId As Long?,
+                           AffectedRanges As IReadOnlyList(Of LogicalRange),
+                           CanRepair As Boolean,
+                           RepairIsLossy As Boolean)
+
+                Me.Severity = Severity
+                Me.Kind = Kind
+                Me.Message = Message
+                Me.PhysicalRecordId = PhysicalRecordId
+                Me.AffectedRanges = If(AffectedRanges, DirectCast(Array.Empty(Of LogicalRange)(), IReadOnlyList(Of LogicalRange)))
+                Me.CanRepair = CanRepair
+                Me.RepairIsLossy = RepairIsLossy
+                Me.DataLossBytes = If(RepairIsLossy, Me.AffectedRanges.Sum(Function(range) range.Length), 0L)
+            End Sub
+
+            ''' <summary>How serious the problem is.</summary>
+            Public ReadOnly Property Severity As ValidationSeverity
+            ''' <summary>What kind of problem this is.</summary>
+            Public ReadOnly Property Kind As ValidationProblemKind
+            ''' <summary>A human-readable description.</summary>
+            Public ReadOnly Property Message As String
+            ''' <summary>The physical record the problem concerns, or Nothing when it is not record-specific.</summary>
+            Public ReadOnly Property PhysicalRecordId As Long?
+            ''' <summary>The logical byte ranges that would be lost if this problem is repaired.</summary>
+            Public ReadOnly Property AffectedRanges As IReadOnlyList(Of LogicalRange)
+            ''' <summary>Whether <see cref="ValidationReport.Repair" /> can address this problem.</summary>
+            Public ReadOnly Property CanRepair As Boolean
+            ''' <summary>Whether repairing this problem discards data (zero-fills a logical range).</summary>
+            Public ReadOnly Property RepairIsLossy As Boolean
+            ''' <summary>Bytes that would be replaced with zeros if this problem is repaired.</summary>
+            Public ReadOnly Property DataLossBytes As Long
+
+            Public Overrides Function ToString() As String
+                Return $"{Severity} {Kind}: {Message}"
+            End Function
+        End Class
+
+        ''' <summary>Controls how much <see cref="ValidationReport.Repair" /> is allowed to do.</summary>
+        Public Enum RepairScope
+            ''' <summary>Only apply repairs that do not discard any data. Lossy problems are left unrepaired.</summary>
+            NonLossy
+            ''' <summary>Also zero-fill logical ranges backed by unreadable data.</summary>
+            IncludeDataLoss
+        End Enum
+
+        ''' <summary>Records what one <see cref="ValidationProblem" /> could not be repaired, and why.</summary>
+        Public NotInheritable Class RepairSkip
+            Friend Sub New(Problem As ValidationProblem, Reason As String)
+                Me.Problem = Problem
+                Me.Reason = Reason
+            End Sub
+            ''' <summary>The problem that was not repaired.</summary>
+            Public ReadOnly Property Problem As ValidationProblem
+            ''' <summary>Why it was not repaired.</summary>
+            Public ReadOnly Property Reason As String
+        End Class
+
+        ''' <summary>The outcome of <see cref="ValidationReport.Repair" />.</summary>
+        Public NotInheritable Class RepairResult
+            Friend Sub New(Repaired As IReadOnlyList(Of ValidationProblem),
+                           Skipped As IReadOnlyList(Of RepairSkip),
+                           BytesZeroed As Long)
+                Me.Repaired = Repaired
+                Me.Skipped = Skipped
+                Me.BytesZeroed = BytesZeroed
+            End Sub
+            ''' <summary>Problems that were repaired.</summary>
+            Public ReadOnly Property Repaired As IReadOnlyList(Of ValidationProblem)
+            ''' <summary>Problems that were not repaired, each with a reason.</summary>
+            Public ReadOnly Property Skipped As IReadOnlyList(Of RepairSkip)
+            ''' <summary>Total number of logical bytes replaced with zeros.</summary>
+            Public ReadOnly Property BytesZeroed As Long
+        End Class
+
+        ''' <summary>Thrown by <see cref="ValidationReport.ThrowIfErrors" />.</summary>
+        Public NotInheritable Class ValidationException
+            Inherits Exception
+
+            Friend Sub New(Report As ValidationReport)
+                MyBase.New($"The chunked stream failed validation with {Report.Errors.Count} error(s): " &
+                           String.Join("; ", Report.Errors.Select(Function(problem) problem.Message)))
+                Me.Report = Report
+            End Sub
+
+            ''' <summary>The full validation report.</summary>
+            Public ReadOnly Property Report As ValidationReport
+        End Class
+
+        ''' <summary>The result of validating a <see cref="ChunkedStream" />.</summary>
+        Public NotInheritable Class ValidationReport
+
+            Private ReadOnly _Owner As ChunkedStream
+
+            Friend Sub New(Owner As ChunkedStream, Problems As IReadOnlyList(Of ValidationProblem))
+                _Owner = Owner
+                Me.Problems = Problems
+                Errors = Problems.Where(Function(problem) problem.Severity = ValidationSeverity.[Error]).ToList()
+                Warnings = Problems.Where(Function(problem) problem.Severity = ValidationSeverity.Warning).ToList()
+            End Sub
+
+            ''' <summary>Every problem found, most structural first.</summary>
+            Public ReadOnly Property Problems As IReadOnlyList(Of ValidationProblem)
+            ''' <summary>The <see cref="ValidationSeverity.[Error]" />-severity problems.</summary>
+            Public ReadOnly Property Errors As IReadOnlyList(Of ValidationProblem)
+            ''' <summary>The <see cref="ValidationSeverity.Warning" />-severity problems.</summary>
+            Public ReadOnly Property Warnings As IReadOnlyList(Of ValidationProblem)
+
+            ''' <summary>True when no problems were found.</summary>
+            Public ReadOnly Property IsValid As Boolean
+                Get
+                    Return Problems.Count = 0
+                End Get
+            End Property
+
+            ''' <summary>True when at least one <see cref="ValidationSeverity.[Error]" />-severity problem was found.</summary>
+            Public ReadOnly Property HasErrors As Boolean
+                Get
+                    Return Errors.Count > 0
+                End Get
+            End Property
+
+            ''' <summary>Throws <see cref="ValidationException" /> when <see cref="HasErrors" /> is true.</summary>
+            Public Sub ThrowIfErrors()
+                If HasErrors Then Throw New ValidationException(Me)
+            End Sub
+
+            ''' <summary>
+            ''' Repairs the problems in this report that fall within <paramref name="RepairScope" />.
+            ''' Each problem is re-verified against the current stream before it is acted on, so a
+            ''' problem that has since been fixed (or the stream mutated away from) is skipped. The
+            ''' repair is applied as one durable metadata publish.
+            ''' </summary>
+            ''' <param name="RepairScope">
+            ''' <see cref="RepairScope.NonLossy" /> (the default) rebuilds indexes and recomputes
+            ''' counts only; <see cref="RepairScope.IncludeDataLoss" /> also replaces logical ranges
+            ''' backed by unreadable data with zeros.
+            ''' </param>
+            Public Function Repair(Optional RepairScope As RepairScope = RepairScope.NonLossy) As RepairResult
+                Dim IncludeLossy = (RepairScope = ChunkedStream.RepairScope.IncludeDataLoss)
+                Return _Owner.ExecuteRepair(Me, Function(problem) Not problem.RepairIsLossy OrElse IncludeLossy)
+            End Function
+
+            ''' <summary>
+            ''' Repairs only the problems for which <paramref name="Selector" /> returns True. The
+            ''' selector replaces the <see cref="RepairScope" /> gate, so
+            ''' <c>Repair(Function(p) p.DataLossBytes = 0)</c> is the non-lossy set,
+            ''' <c>Repair(Function(p) p.Kind = ValidationProblemKind.RefCountMismatch)</c> is one
+            ''' kind, and so on. Re-verification and the single-publish behaviour are unchanged.
+            ''' </summary>
+            Public Function Repair(Selector As Func(Of ValidationProblem, Boolean)) As RepairResult
+                If Selector Is Nothing Then Throw New ArgumentNullException(NameOf(Selector))
+                Return _Owner.ExecuteRepair(Me, Selector)
+            End Function
+
+        End Class
 
         Private NotInheritable Class DiagnosticsSnapshot
             Public LogicalLength As Long
@@ -69,12 +275,14 @@ Namespace Streams
 
         ''' <summary>
         ''' Validates the extent layout, physical-record reference counts, anchor index and
-        ''' every live physical record, throwing if the stream structure is inconsistent or
-        ''' a physical record fails authentication.
+        ''' every live physical record, returning a report of every problem found rather
+        ''' than throwing at the first one. Call <see cref="ValidationReport.ThrowIfErrors" />
+        ''' for the old throw-on-corruption behaviour, or <see cref="ValidationReport.Repair" />
+        ''' to fix what can be fixed.
         ''' </summary>
         ''' <param name="ProgressCallback">Optional callback invoked as physical records are validated.</param>
         ''' <param name="CancellationToken">Token used to cancel validation.</param>
-        Public Sub Validate(Optional ProgressCallback As StreamProgressCallback = Nothing, Optional CancellationToken As Threading.CancellationToken = Nothing)
+        Public Function Validate(Optional ProgressCallback As StreamProgressCallback = Nothing, Optional CancellationToken As Threading.CancellationToken = Nothing) As ValidationReport
 
             Dim Snapshot As DiagnosticsSnapshot
 
@@ -84,20 +292,20 @@ Namespace Streams
 
             CancellationToken.ThrowIfCancellationRequested()
 
-            ValidateCore(Snapshot, ProgressCallback, CancellationToken)
+            Return New ValidationReport(Me, CollectValidationProblems(Snapshot, ProgressCallback, CancellationToken))
 
-        End Sub
+        End Function
 
         ''' <summary>
         ''' Asynchronously validates the stream structure and every live physical record.
         ''' </summary>
         ''' <param name="ProgressCallback">Optional callback invoked as physical records are validated.</param>
         ''' <param name="CancellationToken">Token used to cancel validation.</param>
-        Public Async Function ValidateAsync(Optional ProgressCallback As StreamProgressCallback = Nothing, Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
-            Await Task.Run(
-                Sub()
-                    Validate(ProgressCallback, CancellationToken)
-                End Sub, CancellationToken).ConfigureAwait(False)
+        Public Async Function ValidateAsync(Optional ProgressCallback As StreamProgressCallback = Nothing, Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of ValidationReport)
+            Return Await Task.Run(
+                Function()
+                    Return Validate(ProgressCallback, CancellationToken)
+                End Function, CancellationToken).ConfigureAwait(False)
         End Function
 
         Private Function CaptureDiagnosticsSnapshotCore(IncludeStoredRecords As Boolean) As DiagnosticsSnapshot
@@ -131,55 +339,104 @@ Namespace Streams
 
         End Function
 
-        Private Sub ValidateCore(Snapshot As DiagnosticsSnapshot,
-                                 Optional ProgressCallback As StreamProgressCallback = Nothing,
-                                 Optional CancellationToken As Threading.CancellationToken = Nothing)
+        '
+        ' The affected logical ranges for a physical-record problem: every extent that
+        ' points at the record, each contributing its logical offset and length. Repairing
+        ' the record zero-fills exactly these ranges.
+        '
+        Private Shared Function RangesReferencing(Snapshot As DiagnosticsSnapshot, RecordId As Long) As IReadOnlyList(Of LogicalRange)
+
+            Dim Ranges As New List(Of LogicalRange)()
+
+            For Each Extent In Snapshot.Extents
+                If Extent.PhysicalRecordId = RecordId Then
+                    Ranges.Add(New LogicalRange(Extent.LogicalOffset, Extent.LogicalLength))
+                End If
+            Next
+
+            Return Ranges
+
+        End Function
+
+        Private Function CollectValidationProblems(Snapshot As DiagnosticsSnapshot,
+                                                   ProgressCallback As StreamProgressCallback,
+                                                   ThreadingCancellationToken As Threading.CancellationToken) As List(Of ValidationProblem)
 
             If Snapshot Is Nothing Then Throw New ArgumentNullException(NameOf(Snapshot))
 
-            ValidateExtentSnapshot(Snapshot)
-            ValidatePhysicalRecordRefCountSnapshot(Snapshot)
-            ValidateAnchorSnapshot(Snapshot)
+            Dim Problems As New List(Of ValidationProblem)()
 
-            ValidateAllLivePhysicalRecordsSnapshot(Snapshot, ProgressCallback, CancellationToken)
+            CollectExtentProblems(Snapshot, Problems)
+            CollectRefCountProblems(Snapshot, Problems)
+            CollectAnchorProblems(Snapshot, Problems)
+            CollectPhysicalRecordProblems(Snapshot, Problems, ProgressCallback, ThreadingCancellationToken)
 
-        End Sub
+            Return Problems
 
-        Private Shared Sub ValidateExtentSnapshot(Snapshot As DiagnosticsSnapshot)
+        End Function
+
+        Private Shared Sub CollectExtentProblems(Snapshot As DiagnosticsSnapshot, Problems As List(Of ValidationProblem))
 
             Dim ExpectedOffset As Long = 0
             Dim AnchorIds As New HashSet(Of Long)()
             Dim AnchorOffsets As New HashSet(Of Long)()
 
             For Each Extent In Snapshot.Extents
-                If Extent.LogicalOffset < 0 Then Throw New InvalidDataException("Extent has a negative logical offset.")
-                If Extent.LogicalOffset <> ExpectedOffset Then Throw New InvalidDataException($"Extent layout contains a gap or overlap at logical offset {ExpectedOffset}.")
-                If Extent.LogicalLength <= 0 Then Throw New InvalidDataException("Extent has an invalid logical length.")
-                If Extent.PhysicalRecordOffset < 0 Then Throw New InvalidDataException("Extent has a negative physical record offset.")
-                If Extent.AnchorId < 0 Then Throw New InvalidDataException("Extent has a negative anchor id.")
+
+                If Extent.LogicalOffset < 0 Then
+                    Problems.Add(StructureProblem("An extent has a negative logical offset."))
+                ElseIf Extent.LogicalOffset <> ExpectedOffset Then
+                    Problems.Add(StructureProblem($"The extent chain has a gap or overlap at logical offset {ExpectedOffset}."))
+                End If
+
+                If Extent.LogicalLength <= 0 Then Problems.Add(StructureProblem("An extent has an invalid logical length."))
+                If Extent.PhysicalRecordOffset < 0 Then Problems.Add(StructureProblem("An extent has a negative physical-record offset."))
+                If Extent.AnchorId < 0 Then Problems.Add(StructureProblem("An extent has a negative anchor id."))
 
                 If Extent.AnchorId > 0 Then
-                    If AnchorIds.Add(Extent.AnchorId) = False Then Throw New InvalidDataException($"Duplicate anchor id {Extent.AnchorId}.")
-                    If AnchorOffsets.Add(Extent.LogicalOffset) = False Then Throw New InvalidDataException($"Multiple anchors identify logical offset {Extent.LogicalOffset}.")
+                    If AnchorIds.Add(Extent.AnchorId) = False Then Problems.Add(StructureProblem($"Duplicate anchor id {Extent.AnchorId}."))
+                    If AnchorOffsets.Add(Extent.LogicalOffset) = False Then Problems.Add(StructureProblem($"Multiple anchors identify logical offset {Extent.LogicalOffset}."))
                 End If
 
                 If Extent.PhysicalRecordId = SparsePhysicalRecordId Then
-                    If Extent.PhysicalRecordOffset <> 0 Then Throw New InvalidDataException("Sparse extent has a non-zero physical record offset.")
+                    If Extent.PhysicalRecordOffset <> 0 Then Problems.Add(StructureProblem("A sparse extent has a non-zero physical-record offset."))
                 Else
                     Dim Record As PhysicalRecordEntry
-                    If Snapshot.PhysicalRecords.TryGetValue(Extent.PhysicalRecordId, Record) = False Then Throw New InvalidDataException($"Missing physical record {Extent.PhysicalRecordId}.")
-                    If Extent.PhysicalRecordOffset > Record.PlainLength - Extent.LogicalLength Then Throw New InvalidDataException($"Extent references beyond physical record {Extent.PhysicalRecordId}.")
+                    If Snapshot.PhysicalRecords.TryGetValue(Extent.PhysicalRecordId, Record) = False Then
+                        Problems.Add(New ValidationProblem(ValidationSeverity.[Error], ValidationProblemKind.MissingPhysicalRecord,
+                                                           $"Extent at logical offset {Extent.LogicalOffset} references physical record {Extent.PhysicalRecordId}, which is not in the record table.",
+                                                           Extent.PhysicalRecordId,
+                                                           {New LogicalRange(Extent.LogicalOffset, Extent.LogicalLength)},
+                                                           CanRepair:=True, RepairIsLossy:=True))
+                    ElseIf Extent.PhysicalRecordOffset > Record.PlainLength - Extent.LogicalLength Then
+                        Problems.Add(New ValidationProblem(ValidationSeverity.[Error], ValidationProblemKind.ExtentBeyondPhysicalRecord,
+                                                           $"Extent at logical offset {Extent.LogicalOffset} references data beyond the end of physical record {Extent.PhysicalRecordId}.",
+                                                           Extent.PhysicalRecordId,
+                                                           {New LogicalRange(Extent.LogicalOffset, Extent.LogicalLength)},
+                                                           CanRepair:=True, RepairIsLossy:=True))
+                    End If
                 End If
 
-                If Extent.LogicalOffset > Long.MaxValue - CLng(Extent.LogicalLength) Then Throw New InvalidDataException("Extent logical end offset overflowed.")
-                ExpectedOffset = Extent.LogicalOffset + CLng(Extent.LogicalLength)
+                If Extent.LogicalLength > 0 AndAlso Extent.LogicalOffset <= Long.MaxValue - CLng(Extent.LogicalLength) Then
+                    ExpectedOffset = Extent.LogicalOffset + CLng(Extent.LogicalLength)
+                End If
+
             Next
 
-            If ExpectedOffset <> Snapshot.LogicalLength Then Throw New InvalidDataException($"Extent logical length mismatch. Expected {Snapshot.LogicalLength}, found {ExpectedOffset}.")
+            If ExpectedOffset <> Snapshot.LogicalLength Then
+                Problems.Add(New ValidationProblem(ValidationSeverity.Warning, ValidationProblemKind.LogicalLengthMismatch,
+                                                   $"The logical length is {Snapshot.LogicalLength} but the extent chain spans {ExpectedOffset}.",
+                                                   Nothing, Nothing, CanRepair:=True, RepairIsLossy:=False))
+            End If
 
         End Sub
 
-        Private Shared Sub ValidatePhysicalRecordRefCountSnapshot(Snapshot As DiagnosticsSnapshot)
+        Private Shared Function StructureProblem(Message As String) As ValidationProblem
+            Return New ValidationProblem(ValidationSeverity.[Error], ValidationProblemKind.ExtentChainStructure,
+                                         Message, Nothing, Nothing, CanRepair:=False, RepairIsLossy:=False)
+        End Function
+
+        Private Shared Sub CollectRefCountProblems(Snapshot As DiagnosticsSnapshot, Problems As List(Of ValidationProblem))
 
             Dim ActualCounts As New Dictionary(Of Long, Integer)()
 
@@ -193,74 +450,108 @@ Namespace Streams
             For Each Pair In Snapshot.PhysicalRecords
                 Dim ActualCount As Integer = 0
                 ActualCounts.TryGetValue(Pair.Key, ActualCount)
-                If Pair.Value.RefCount <> ActualCount Then Throw New InvalidDataException($"Refcount mismatch for physical record {Pair.Key}. Expected {ActualCount}, found {Pair.Value.RefCount}.")
+                If Pair.Value.RefCount <> ActualCount Then
+                    ' A too-low count lets the record be reclaimed while still referenced,
+                    ' so a mismatch is an integrity error even though the fix is non-lossy.
+                    Problems.Add(New ValidationProblem(ValidationSeverity.[Error], ValidationProblemKind.RefCountMismatch,
+                                                       $"Physical record {Pair.Key} has a stored reference count of {Pair.Value.RefCount}; {ActualCount} extents reference it.",
+                                                       Pair.Key, Nothing, CanRepair:=True, RepairIsLossy:=False))
+                End If
             Next
 
         End Sub
 
-        Private Shared Sub ValidateAnchorSnapshot(Snapshot As DiagnosticsSnapshot)
+        Private Shared Sub CollectAnchorProblems(Snapshot As DiagnosticsSnapshot, Problems As List(Of ValidationProblem))
 
             Dim SeenAnchorIds As New HashSet(Of Long)()
-            Dim SeenOffsets As New HashSet(Of Long)()
 
             For Each Extent In Snapshot.Extents
-                If Extent.AnchorId < 0 Then Throw New InvalidDataException("Extent has a negative anchor id.")
-                If Extent.AnchorId = 0 Then Continue For
-                If SeenAnchorIds.Add(Extent.AnchorId) = False Then Throw New InvalidDataException($"Duplicate anchor id {Extent.AnchorId}.")
-                If SeenOffsets.Add(Extent.LogicalOffset) = False Then Throw New InvalidDataException($"Multiple anchors identify logical offset {Extent.LogicalOffset}.")
+                If Extent.AnchorId <= 0 Then Continue For
+                SeenAnchorIds.Add(Extent.AnchorId)
             Next
 
-            If SeenAnchorIds.Count <> Snapshot.AnchorIndexCount Then Throw New InvalidDataException("Anchor index count does not match the anchored extent count.")
+            If SeenAnchorIds.Count <> Snapshot.AnchorIndexCount Then
+                Problems.Add(New ValidationProblem(ValidationSeverity.Warning, ValidationProblemKind.AnchorIndexMismatch,
+                                                   $"The anchor index holds {Snapshot.AnchorIndexCount} entries; {SeenAnchorIds.Count} extents are anchored.",
+                                                   Nothing, Nothing, CanRepair:=True, RepairIsLossy:=False))
+            End If
 
         End Sub
 
-        Private Sub ValidateAllLivePhysicalRecordsSnapshot(Snapshot As DiagnosticsSnapshot,
-                                                           ProgressCallback As StreamProgressCallback,
-                                                           ThreadingCancellationToken As Threading.CancellationToken)
+        Private Sub CollectPhysicalRecordProblems(Snapshot As DiagnosticsSnapshot,
+                                                  Problems As List(Of ValidationProblem),
+                                                  ProgressCallback As StreamProgressCallback,
+                                                  ThreadingCancellationToken As Threading.CancellationToken)
+
             Dim TotalRecords = Math.Max(1, Snapshot.PhysicalRecords.Count)
             Dim ProcessedRecords As Long = 0
-
             Dim CancellationToken = If(ProgressCallback Is Nothing, Nothing, New CancellationToken)
+
             For Each Pair In Snapshot.PhysicalRecords.OrderBy(Function(Item) Item.Key)
+
                 If CancellationToken?.Cancel Then Return
                 ThreadingCancellationToken.ThrowIfCancellationRequested()
-                If Pair.Value.RefCount > 0 Then ValidatePhysicalRecordSnapshot(Snapshot, Pair.Value)
+
+                If Pair.Value.RefCount > 0 Then
+                    Dim Problem = InspectPhysicalRecordSnapshot(Snapshot, Pair.Value)
+                    If Problem IsNot Nothing Then Problems.Add(Problem)
+                End If
+
                 ProcessedRecords += 1
                 ProgressCallback?.Invoke(ProcessedRecords, TotalRecords, ProcessUnitTypes.Chunks, CancellationToken)
+
             Next
 
         End Sub
 
-        Private Sub ValidatePhysicalRecordSnapshot(Snapshot As DiagnosticsSnapshot,
-                                                   Record As PhysicalRecordEntry)
+        Private Function InspectPhysicalRecordSnapshot(Snapshot As DiagnosticsSnapshot,
+                                                       Record As PhysicalRecordEntry) As ValidationProblem
 
-            If Record.RecordId <= SparsePhysicalRecordId Then Throw New InvalidDataException("Invalid physical record id.")
-            If Record.PhysicalOffset < DataStartOffset Then Throw New InvalidDataException("Invalid physical record offset.")
-            If Record.PhysicalLength < MinChunkRecordSize Then Throw New InvalidDataException("Invalid physical record length.")
+            Dim Unreadable = Function(message As String) _
+                New ValidationProblem(ValidationSeverity.[Error], ValidationProblemKind.PhysicalRecordUnreadable,
+                                      message, Record.RecordId, RangesReferencing(Snapshot, Record.RecordId),
+                                      CanRepair:=True, RepairIsLossy:=True)
+
+            If Record.RecordId <= SparsePhysicalRecordId Then Return Unreadable($"Physical record {Record.RecordId} has an invalid id.")
+            If Record.PhysicalOffset < DataStartOffset Then Return Unreadable($"Physical record {Record.RecordId} has an invalid offset.")
+            If Record.PhysicalLength < MinChunkRecordSize Then Return Unreadable($"Physical record {Record.RecordId} has an invalid length.")
 
             Dim Buffer As Byte() = Nothing
-            If Snapshot.StoredRecords.TryGetValue(Record.RecordId, Buffer) = False Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the captured backing stream.")
-            If BitConverter.ToInt64(Buffer, 0) <> Record.RecordId Then Throw New InvalidDataException("Physical record id mismatch.")
+            If Snapshot.StoredRecords.TryGetValue(Record.RecordId, Buffer) = False Then
+                Return Unreadable($"Physical record {Record.RecordId} extends beyond the end of the backing stream.")
+            End If
+            If BitConverter.ToInt64(Buffer, 0) <> Record.RecordId Then Return Unreadable($"Physical record {Record.RecordId} has a mismatched id in its stored header.")
 
             Dim EncryptionMethod = CType(BitConverter.ToInt32(Buffer, ChunkEncryptionMethodOffset), ChunkEncryptionMethods)
             Dim PayloadLength = BitConverter.ToInt32(Buffer, ChunkPayloadLengthOffset)
             Dim Flags = CType(BitConverter.ToInt32(Buffer, ChunkFlagsOffset), ChunkFlags)
             Dim CompressionEvaluatedPercent = CInt(Buffer(ChunkCompressionEvaluatedPercentOffset))
 
-            If PayloadLength < 0 Then Throw New InvalidDataException("Invalid physical record payload length.")
-            If ChunkRecordDataOffset + PayloadLength + MacSize <> Buffer.Length Then Throw New InvalidDataException("Invalid physical record length.")
-            If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then Throw New InvalidDataException($"Unsupported chunk flags for physical record {Record.RecordId}: {CInt(Flags)}.")
-            If CompressionEvaluatedPercent < MinimumCompressionEvaluatedPercent OrElse CompressionEvaluatedPercent > MaximumCompressionEvaluatedPercent Then Throw New InvalidDataException($"Invalid compression evaluated percent for physical record {Record.RecordId}: {CompressionEvaluatedPercent}.")
+            If PayloadLength < 0 Then Return Unreadable($"Physical record {Record.RecordId} has an invalid payload length.")
+            If ChunkRecordDataOffset + PayloadLength + MacSize <> Buffer.Length Then Return Unreadable($"Physical record {Record.RecordId} has an inconsistent stored length.")
+            If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then Return Unreadable($"Physical record {Record.RecordId} has unsupported chunk flags {CInt(Flags)}.")
+            If CompressionEvaluatedPercent < MinimumCompressionEvaluatedPercent OrElse CompressionEvaluatedPercent > MaximumCompressionEvaluatedPercent Then
+                Return Unreadable($"Physical record {Record.RecordId} has an invalid compression-evaluated percent {CompressionEvaluatedPercent}.")
+            End If
 
             Dim RecordMacKey = If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey, Snapshot.ChunkMacKey, PublicIntegrityKey)
-            If RecordMacKey Is Nothing Then Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
+            If RecordMacKey Is Nothing Then
+                Return New ValidationProblem(ValidationSeverity.[Error], ValidationProblemKind.PhysicalRecordKeyUnavailable,
+                                             $"Physical record {Record.RecordId} is encrypted but no file master key is available to authenticate it.",
+                                             Record.RecordId, RangesReferencing(Snapshot, Record.RecordId),
+                                             CanRepair:=False, RepairIsLossy:=False)
+            End If
 
             Using Hmac As New HMACSHA256(RecordMacKey)
                 Dim ExpectedMac = Hmac.ComputeHash(Buffer, 0, ChunkRecordDataOffset + PayloadLength)
-                If FixedTimeEquals(ExpectedMac, 0, Buffer, ChunkRecordDataOffset + PayloadLength, MacSize) = False Then Throw New CryptographicException($"Physical record MAC invalid for record {Record.RecordId}.")
+                If FixedTimeEquals(ExpectedMac, 0, Buffer, ChunkRecordDataOffset + PayloadLength, MacSize) = False Then
+                    Return Unreadable($"Physical record {Record.RecordId} failed authentication.")
+                End If
             End Using
 
-        End Sub
+            Return Nothing
+
+        End Function
 
     End Class
 End Namespace

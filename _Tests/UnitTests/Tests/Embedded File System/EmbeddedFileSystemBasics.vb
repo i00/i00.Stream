@@ -56,7 +56,7 @@ Namespace Tests
                             AssertEqual(Efs.RootAnchorId, Efs.GetParentAnchorId(Docs), "docs parent should be the root.")
                             AssertEqual(Docs, Efs.GetParentAnchorId(Efs.CreateFile(Docs, "a.txt")), "nested file parent is wrong.")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
                     End Using
@@ -116,7 +116,7 @@ Namespace Tests
                                 Sub() Cs.GetAnchor(Src),
                                 "The removed subdirectory anchor should be gone.")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
                     End Using
@@ -170,7 +170,7 @@ Namespace Tests
                             Dim FileId = Efs.CreateFile(Sub1, "deep.bin", CreateAsPending:=False)
                             WriteWholeFile(Efs, FileId, Payload)
                         End Using
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
                     End Using
 
                     Using Cs = ChunkedStream.Open(Ms)
@@ -185,7 +185,7 @@ Namespace Tests
                             AssertBytesEqual(Payload, ReadWholeFile(Efs, FileEntry.ChildAnchorId), "Reopened file content is wrong.")
 
                         End Using
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
                     End Using
 
                 End Using

@@ -31,7 +31,7 @@ Namespace Tests
                                 Cs.options.ChunkSize * 4,
                                 1001))
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -59,7 +59,7 @@ Namespace Tests
 
                     Using Reopened = ChunkedStream.Open(Ms)
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -88,7 +88,7 @@ Namespace Tests
                                 Cs.options.ChunkSize * 4,
                                 1003))
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -119,7 +119,7 @@ Namespace Tests
                                 8,
                                 1004))
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -140,7 +140,7 @@ Namespace Tests
                         Cs.SetLength(
                             Cs.options.ChunkSize * 16)
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -170,7 +170,7 @@ Namespace Tests
                             Cs.options.ChunkSize * 2,
                             Cs.options.ChunkSize)
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -208,7 +208,7 @@ Namespace Tests
                         Cs.Defragment(
                             ChunkedStream.DefragTypes.Sequence)
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -244,7 +244,7 @@ Namespace Tests
                         Cs.ApplyOptions(
                             ChunkedStream.ApplyOptionTypes.Compression)
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -289,7 +289,7 @@ Namespace Tests
 
                         AssertThrows(Of Exception)(
                             Sub()
-                                Cs.Validate()
+                                Cs.Validate().ThrowIfErrors()
                             End Sub,
                             "Validation should fail for corrupted chunk data.")
 
@@ -330,9 +330,9 @@ Namespace Tests
                         Ms.Position = Chunk.PhysicalOffset.Value
                         Ms.WriteByte(CByte(Original(0) Xor &HFF))
 
-                        AssertThrows(Of InvalidDataException)(
+                        AssertThrows(Of ChunkedStream.ValidationException)(
                             Sub()
-                                Cs.Validate()
+                                Cs.Validate().ThrowIfErrors()
                             End Sub,
                             "Validation should fail when the stored physical-record id is corrupted.")
 
@@ -379,9 +379,15 @@ Namespace Tests
                         Ms.Position = MacOffset
                         Ms.WriteByte(CByte(OriginalByte Xor &HFF))
 
-                        AssertThrows(Of CryptographicException)(
+                        Dim Report = Cs.Validate()
+
+                        AssertTrue(
+                            Report.Errors.Any(Function(problem) problem.Kind = ChunkedStream.ValidationProblemKind.PhysicalRecordUnreadable),
+                            "Validation should report an unreadable physical record when the chunk MAC is corrupted.")
+
+                        AssertThrows(Of ChunkedStream.ValidationException)(
                             Sub()
-                                Cs.Validate()
+                                Report.ThrowIfErrors()
                             End Sub,
                             "Validation should fail when the chunk MAC is corrupted.")
 
@@ -505,9 +511,9 @@ Namespace Tests
                             ChunkedStream.ChunkFlagsOffset,
                             &H7FFFFFFF)
 
-                        AssertThrows(Of InvalidDataException)(
+                        AssertThrows(Of ChunkedStream.ValidationException)(
                             Sub()
-                                Cs.Validate()
+                                Cs.Validate().ThrowIfErrors()
                             End Sub,
                             "Validation should fail when unsupported chunk flags are present.")
 
@@ -553,9 +559,9 @@ Namespace Tests
                             ChunkedStream.ChunkCompressionEvaluatedPercentOffset,
                             255)
 
-                        AssertThrows(Of InvalidDataException)(
+                        AssertThrows(Of ChunkedStream.ValidationException)(
                             Sub()
-                                Cs.Validate()
+                                Cs.Validate().ThrowIfErrors()
                             End Sub,
                             "Validation should fail when compression evaluated percent exceeds 100.")
 
@@ -597,11 +603,223 @@ Namespace Tests
 
                         Cs.Debug_CorruptPhysicalRecordMetadataRefCount(SharedRecord.Key.Value, 12345)
 
-                        AssertThrows(Of InvalidDataException)(
+                        AssertThrows(Of ChunkedStream.ValidationException)(
                             Sub()
-                                Cs.Validate()
+                                Cs.Validate().ThrowIfErrors()
                             End Sub,
                             "Validation should fail when stored metadata refcounts do not match extent usage.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ' ================================================================================
+            ' Open-time auto-repair
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Verifies that opening a stream whose header carries a stale index-offset hint
+            ''' (past the end of the backing stream) recomputes it, records the correction in
+            ''' <see cref="ChunkedStream.AutoRepairs" />, and persists the corrected value.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub OpenRecomputesAStalePersistedIndexOffset()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Expected As Byte()
+
+                    Dim Cs = ChunkedStream.Open(Ms)
+                    Expected = GenerateRandomData(Cs.Options.ChunkSize * 6, 4100)
+                    Cs.Write(0, Expected)
+                    Cs.Flush()
+                    Cs.Debug_CorruptPersistedHeaderIndexOffset(Ms.Length + 500000)
+                    Cs = Nothing ' abandon without disposing so the stale header stays on disk
+
+                    Ms.Position = 0
+                    Using Reopened = ChunkedStream.Open(Ms)
+
+                        AssertTrue(
+                            Reopened.AutoRepairs.Any(Function(repair) repair.Field = "IndexOffset"),
+                            "Open should record an IndexOffset auto-repair.")
+
+                        AssertBytesEqual(Expected, Reopened.ToArray(), "Auto-repair changed the logical data.")
+                        Reopened.Validate().ThrowIfErrors()
+
+                        ' A subsequent write still works and persists the corrected header.
+                        Reopened.Write(0, GenerateZeroedData(16))
+                        Overlay(Expected, GenerateZeroedData(16), 0)
+
+                    End Using
+
+                    Ms.Position = 0
+                    Using Again = ChunkedStream.Open(Ms)
+                        AssertEqual(0, Again.AutoRepairs.Count, "The corrected header should persist, so the next open is clean.")
+                        AssertBytesEqual(Expected, Again.ToArray(), "Reopen after auto-repair lost data.")
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ' ================================================================================
+            ' Report-driven repair
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Verifies that a drifted physical-record reference count is reported and that a
+            ''' non-lossy <see cref="ChunkedStream.ValidationReport.Repair" /> reconciles it.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub RepairReconcilesADriftedReferenceCount()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Expected As Byte()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Expected = GenerateRandomData(Cs.Options.ChunkSize * 4, 4200)
+                        Cs.Write(0, Expected)
+
+                        Dim RecordId =
+                            Cs.GetStructure().Chunks.
+                               First(Function(chunk) chunk.PhysicalOffset.HasValue).PhysicalRecordId.Value
+
+                        Cs.Debug_CorruptPhysicalRecordMetadataRefCount(RecordId, 999)
+
+                        Dim Report = Cs.Validate()
+
+                        AssertTrue(Report.HasErrors, "A refcount mismatch should be an error.")
+                        AssertTrue(
+                            Report.Errors.All(Function(problem) problem.Kind = ChunkedStream.ValidationProblemKind.RefCountMismatch),
+                            "The only problem should be the refcount mismatch.")
+
+                        Dim Outcome = Report.Repair()
+
+                        AssertEqual(0L, Outcome.BytesZeroed, "Reconciling a reference count discards no data.")
+                        AssertEqual(1, Outcome.Repaired.Count, "The refcount problem should have been repaired.")
+
+                        Cs.Validate().ThrowIfErrors()
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Repair changed the logical data.")
+
+                    End Using
+
+                    Ms.Position = 0
+                    Using Reopened = ChunkedStream.Open(Ms)
+                        Reopened.Validate().ThrowIfErrors()
+                        AssertBytesEqual(Expected, Reopened.ToArray(), "Reopen after repair lost data.")
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that an unreadable chunk is left alone by a non-lossy repair, and that
+            ''' <see cref="ChunkedStream.RepairScope.IncludeDataLoss" /> replaces its logical
+            ''' range with zeros while leaving every other range intact.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub RepairZeroFillsAnUnreadableChunkOnlyWhenDataLossIsAllowed()
+
+                Using Ms As New MemoryStream()
+
+                    Dim ChunkSize As Integer
+                    Dim Expected As Byte()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        ChunkSize = Cs.Options.ChunkSize
+                        Expected = GenerateRandomData(ChunkSize * 4, 4300)
+                        Cs.Write(0, Expected)
+
+                        Dim Chunk =
+                            Cs.GetStructure().Chunks.
+                               First(Function(item) item.PhysicalOffset.HasValue AndAlso item.LogicalOffset = ChunkSize)
+
+                        Dim MacOffset = Chunk.PhysicalOffset.Value + Chunk.PhysicalLength.Value - ChunkedStream.MacSize
+                        Ms.Position = MacOffset
+                        Dim OriginalByte = Ms.ReadByte()
+                        Ms.Position = MacOffset
+                        Ms.WriteByte(CByte(OriginalByte Xor &HFF))
+
+                        Dim Report = Cs.Validate()
+
+                        Dim Problem =
+                            Report.Errors.Single(Function(item) item.Kind = ChunkedStream.ValidationProblemKind.PhysicalRecordUnreadable)
+
+                        AssertTrue(Problem.RepairIsLossy, "Repairing an unreadable chunk discards data.")
+                        AssertEqual(CLng(ChunkSize), Problem.DataLossBytes, "The whole chunk would be lost.")
+
+                        Dim NonLossy = Report.Repair(ChunkedStream.RepairScope.NonLossy)
+                        AssertEqual(0, NonLossy.Repaired.Count, "A non-lossy repair must not touch a lossy problem.")
+                        AssertEqual(1, NonLossy.Skipped.Count, "The lossy problem should be reported as skipped.")
+
+                        Dim Lossy = Cs.Validate().Repair(ChunkedStream.RepairScope.IncludeDataLoss)
+                        AssertEqual(CLng(ChunkSize), Lossy.BytesZeroed, "The unreadable chunk's range should be zeroed.")
+
+                        Cs.Validate().ThrowIfErrors()
+
+                        Dim ExpectedAfter = CType(Expected.Clone(), Byte())
+                        Array.Clear(ExpectedAfter, ChunkSize, ChunkSize)
+                        AssertBytesEqual(ExpectedAfter, Cs.ToArray(), "Repair should have zeroed only the unreadable chunk.")
+
+                    End Using
+
+                    Ms.Position = 0
+                    Using Reopened = ChunkedStream.Open(Ms)
+                        Reopened.Validate().ThrowIfErrors()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies the predicate overload: with both a non-lossy and a lossy problem present,
+            ''' <c>Repair(Function(p) p.DataLossBytes = 0)</c> fixes only the non-lossy one, and a
+            ''' second unrestricted pass then handles the rest.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub RepairSelectorChoosesWhichProblemsToFix()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Dim ChunkSize = Cs.Options.ChunkSize
+                        Cs.Write(0, GenerateRandomData(ChunkSize * 4, 4400))
+
+                        Dim Chunks = Cs.GetStructure().Chunks.Where(Function(chunk) chunk.PhysicalOffset.HasValue).ToList()
+
+                        ' problem 1 (non-lossy): drift a refcount.  problem 2 (lossy): corrupt a MAC.
+                        Cs.Debug_CorruptPhysicalRecordMetadataRefCount(Chunks(0).PhysicalRecordId.Value, 42)
+
+                        Dim MacOffset = Chunks(2).PhysicalOffset.Value + Chunks(2).PhysicalLength.Value - ChunkedStream.MacSize
+                        Ms.Position = MacOffset
+                        Dim OriginalByte = Ms.ReadByte()
+                        Ms.Position = MacOffset
+                        Ms.WriteByte(CByte(OriginalByte Xor &HFF))
+
+                        Dim Report = Cs.Validate()
+                        AssertEqual(2, Report.Errors.Count, "Both problems should be reported.")
+
+                        Dim NonLossyOnly = Report.Repair(Function(problem) problem.DataLossBytes = 0)
+                        AssertEqual(1, NonLossyOnly.Repaired.Count, "Only the non-lossy problem should be repaired.")
+                        AssertEqual(1, NonLossyOnly.Skipped.Count, "The lossy problem should be skipped.")
+                        AssertEqual(0L, NonLossyOnly.BytesZeroed, "No data should have been zeroed yet.")
+
+                        Dim Remaining = Cs.Validate()
+                        AssertEqual(1, Remaining.Errors.Count, "The lossy problem should remain.")
+                        AssertEqual(ChunkedStream.ValidationProblemKind.PhysicalRecordUnreadable, Remaining.Errors(0).Kind, "...")
+
+                        Dim Rest = Remaining.Repair(Function(problem) True)
+                        AssertEqual(CLng(ChunkSize), Rest.BytesZeroed, "The remaining lossy problem should now be zeroed.")
+
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 

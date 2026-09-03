@@ -39,7 +39,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Backing)
                         Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * 4, 5511))
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
                         Dim RoundTrip = Cs.ToArray()
                         AssertEqual(CLng(Cs.Options.ChunkSize * 4), CLng(RoundTrip.Length), "Unexpected logical length.")
                     End Using
@@ -60,7 +60,7 @@ Namespace Tests
                 Using Backing As New PositionedMemoryStream(PositionedIoCapabilities.Full)
                     Using Cs = ChunkedStream.Open(Backing)
                         Cs.Write(0, Expected)
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
                     End Using
                     Bytes = Backing.ToArray()
                 End Using
@@ -68,7 +68,7 @@ Namespace Tests
                 Using Backing As New PositionedMemoryStream(PositionedIoCapabilities.Full, Bytes)
                     Using Reopened = ChunkedStream.Open(Backing)
                         AssertBytesEqual(Expected, Reopened.ToArray(), "Positioned-stream data did not survive reopen.")
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
                 End Using
 
@@ -99,7 +99,7 @@ Namespace Tests
                         Cs.Defragment(ChunkedStream.DefragTypes.Sequence)
 
                         AssertBytesEqual(Expected, Cs.ToArray(), "Edits over a positioned stream did not match the model.")
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -127,13 +127,13 @@ Namespace Tests
                         Overlay(Expected, Patch, ChunkedStream.DefaultChunkSize + 100)
 
                         AssertBytesEqual(Expected, Cs.ToArray(), "Positioned-stream round-trip mismatch.")
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Backing)
                         AssertBytesEqual(Expected, Reopened.ToArray(), "Positioned-stream data lost across reopen.")
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using

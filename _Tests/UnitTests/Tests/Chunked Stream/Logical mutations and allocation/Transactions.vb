@@ -46,7 +46,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Checkpoint dispose did not roll back changes.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -82,7 +82,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Checkpoint commit did not preserve changes.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -129,7 +129,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Dispose after rollback changed baseline.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -272,7 +272,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Outer rollback did not undo committed inner checkpoint.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -314,7 +314,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Nested commits did not preserve final state.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -354,7 +354,7 @@ Namespace Tests
                             Cs.Length,
                             "Checkpoint rollback did not restore length.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -386,7 +386,7 @@ Namespace Tests
                             Cs.Length,
                             "Committed length change was not preserved.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -452,13 +452,13 @@ Namespace Tests
 
                         Next
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms, Options)
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                         AssertEqual(
                             0,
@@ -519,7 +519,7 @@ Namespace Tests
                             Cs.Debug_GetUnreferencedPhysicalRecordCount(),
                             "Outermost checkpoint commit did not reclaim records freed by the nested checkpoints.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -579,7 +579,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Data changed after the rolled-back checkpoint was disposed.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -627,12 +627,12 @@ Namespace Tests
                             Ms.Length < PhysicalBefore + (NewData.Length \ 4),
                             $"In-checkpoint write did not reuse the free hole: backing store grew from {PhysicalBefore:N0} to {Ms.Length:N0} for a {NewData.Length:N0}-byte write.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms)
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -690,7 +690,7 @@ Namespace Tests
                             Ms.Length < PhysicalBefore + (NewData.Length \ 4),
                             "Post-rollback write did not reuse the hole the rollback freed.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -737,7 +737,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Checkpoint recovery did not roll back the in-checkpoint hole-filling write.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -780,7 +780,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Clone rollback did not restore original layout.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -820,7 +820,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Insert rollback did not restore original layout.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -858,7 +858,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Remove rollback did not restore original layout.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -910,7 +910,7 @@ Namespace Tests
 
                         End Try
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -944,7 +944,7 @@ Namespace Tests
                             Sub() Checkpoint.Rollback(),
                             "Rolling back a disposed checkpoint should throw.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 

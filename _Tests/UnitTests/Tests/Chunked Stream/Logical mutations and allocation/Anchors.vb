@@ -864,7 +864,7 @@ Namespace Tests
                             Cs.TryGetAnchor(RolledBackId, StaleHandle),
                             "The rolled-back anchor id must not resolve to the newly created anchor.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -900,7 +900,7 @@ Namespace Tests
                             AfterAnchor.AnchorId > RolledBackId,
                             "An anchor id issued inside an abandoned DeferPublish scope was reused.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 

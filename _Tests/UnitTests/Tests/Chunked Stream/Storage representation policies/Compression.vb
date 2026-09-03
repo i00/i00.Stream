@@ -61,7 +61,7 @@ Namespace Tests
                                 Struct.CompressedChunkCount > 0,
                                 $"Expected compressed chunks. CompressionMethod={CompressionMethod}")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -112,7 +112,7 @@ Namespace Tests
                                 Reopened.ToArray(),
                                 $"Compressed data did not survive reopen. CompressionMethod={CompressionMethod}")
 
-                            Reopened.Validate()
+                            Reopened.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -175,7 +175,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Compression-threshold test corrupted logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -237,7 +237,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Compression threshold migration corrupted logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -288,7 +288,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "No-op compression ApplyOptions corrupted data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -372,7 +372,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Selective compression rewrite corrupted logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -425,7 +425,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Compressed zero chunk did not read back as zeroes.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -480,13 +480,13 @@ Namespace Tests
                             Chunks(1).CompressionMethod,
                             "Compressible chunk should still be stored compressed.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms, Options)
                         AssertBytesEqual(Expected, Reopened.ToArray(), "Sampled-evaluation data did not survive reopen.")
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -530,13 +530,13 @@ Namespace Tests
                         AssertTrue(Chunk.IsCompressionEvaluationEstimated = False, "ApplyOptions left the chunk flagged as an estimated evaluation.")
                         AssertBytesEqual(Expected, Cs.ToArray(), "ApplyOptions changed the logical content of a sampled stream.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms, Options)
                         AssertBytesEqual(Expected, Reopened.ToArray(), "Data lost after ApplyOptions on a sampled stream.")
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using

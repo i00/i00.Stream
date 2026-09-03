@@ -40,7 +40,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Plain stream data did not survive reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -81,7 +81,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Compressed stream data did not survive reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -120,7 +120,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Encrypted stream data did not survive reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -150,7 +150,7 @@ Namespace Tests
                             Reopened.Length,
                             "Sparse logical length did not survive reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -197,7 +197,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Clone data did not survive reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -242,7 +242,7 @@ Namespace Tests
                                 Cs.ToArray(),
                                 $"Shared record durability failed after reopen {ReopenIndex}.")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -292,7 +292,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Compression migration did not survive reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -339,7 +339,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Encryption migration did not survive reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -377,7 +377,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Sparseness migration did not survive reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -464,7 +464,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Cancelling ApplyOptions should not have altered logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -487,7 +487,7 @@ Namespace Tests
                             Reopened.GetStructure().Chunks(1).CompressionMethod,
                             "Expected the second chunk to be converted to Deflate on the follow-up call.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -582,7 +582,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Cancelling the chunk-size rewrite must not alter logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         ' The rollback must also have rebuilt the free-space map. Abandon the
                         ' rewrite, then append one more full chunk: its physical record should
@@ -629,7 +629,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Follow-up chunk-size rewrite changed logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -640,7 +640,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Data did not survive reopen after a cancelled then completed chunk-size rewrite.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -765,7 +765,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Paged metadata data mismatch before reopen.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -776,7 +776,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Paged metadata data mismatch after reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                         Reopened.Defragment(ChunkedStream.DefragTypes.Sequence)
 
@@ -785,7 +785,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Paged metadata data mismatch after sequence defrag.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -846,7 +846,7 @@ Namespace Tests
 
                         Next
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -884,7 +884,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Hole-directory reuse corrupted logical data.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -946,7 +946,7 @@ Namespace Tests
                         ReusedOffsetBelowThreshold =
                             ReopenedChunks(ReopenedChunks.Count - 1).PhysicalOffset
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -993,7 +993,7 @@ Namespace Tests
                         ReusedOffsetAboveThreshold =
                             ReopenedChunks(ReopenedChunks.Count - 1).PhysicalOffset
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -1054,12 +1054,12 @@ Namespace Tests
                             Ms.Length,
                             "A no-op persist grew the backing store by rewriting the unchanged metadata root.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms, Options)
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -1102,7 +1102,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Committed checkpoint data did not survive reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -1146,7 +1146,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Checkpoint rollback did not survive reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -1200,7 +1200,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             $"{DefragType} durability failed after reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 

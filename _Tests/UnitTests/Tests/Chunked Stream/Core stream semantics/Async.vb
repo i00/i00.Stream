@@ -62,7 +62,7 @@ Namespace Tests
                             Dim Range = Cs.ToArrayAsync(10, 4321).GetAwaiter().GetResult()
                             AssertBytesEqual(Slice(SyncAll, 10, 4321), Range, $"ToArrayAsync(range) mismatch (case {CaseIndex}).")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
 
@@ -99,7 +99,7 @@ Namespace Tests
                         Dim Eof(9) As Byte
                         AssertEqual(0, Cs.ReadAsync(Eof, 0, Eof.Length).GetAwaiter().GetResult(), "ReadAsync past end should return 0.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -125,7 +125,7 @@ Namespace Tests
                         Dim AsyncCalls = Backing.ReadAtAsyncCalls
                         Dim SyncCalls = Backing.SyncReadAtCallsSinceReset
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         AssertTrue(AsyncCalls > 0, "ChunkedStream never used IPositionedStreamAsync.ReadAtAsync.")
                         AssertEqual(0, SyncCalls, "ChunkedStream fell back to the synchronous ReadAt on the async path.")
@@ -162,7 +162,7 @@ Namespace Tests
 
                         ' The stream is still usable after a cancelled async call.
                         AssertEqual(5000, Cs.ToArray().Length, "Stream unusable after a cancelled ReadAsync.")
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -197,7 +197,7 @@ Namespace Tests
                             Cs.Clone(100, 900, Cs.Length)
                             Cs.Flush()
                             SyncBytes = Cs.ToArray()
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
                         End Using
                     End Using
 
@@ -214,7 +214,7 @@ Namespace Tests
                             Cs.CloneAsync(100, 900, Cs.Length).GetAwaiter().GetResult()
                             Cs.FlushAsync(CancellationToken.None).GetAwaiter().GetResult()
                             AsyncBytes = Cs.ToArrayAsync().GetAwaiter().GetResult()
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
                         End Using
                     End Using
 
@@ -234,12 +234,12 @@ Namespace Tests
                     Using Cs = ChunkedStream.Open(Ms)
                         Cs.WriteAsync(0, Expected).GetAwaiter().GetResult()
                         Cs.FlushAsync(CancellationToken.None).GetAwaiter().GetResult()
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
                     End Using
 
                     Using Reopened = ChunkedStream.Open(Ms)
                         AssertBytesEqual(Expected, Reopened.ToArray(), "Async-written data did not survive reopen.")
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -263,7 +263,7 @@ Namespace Tests
                         Dim SyncWriteCalls = Backing.SyncWriteAtCallsSinceReset
 
                         AssertBytesEqual(Expected, Cs.ToArrayAsync().GetAwaiter().GetResult(), "Async positioned write round-trip mismatch.")
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         AssertTrue(AsyncWriteCalls > 0, "ChunkedStream never used IPositionedStreamAsync.WriteAtAsync.")
                         AssertEqual(0, SyncWriteCalls, "ChunkedStream fell back to the synchronous WriteAt on the async write path.")
@@ -293,7 +293,7 @@ Namespace Tests
 
                         ' An argument guard rejects before any state mutation, so the stream stays usable.
                         AssertEqual(1000, Cs.ToArray().Length, "Stream unusable after a rejected WriteAsync.")
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -318,7 +318,7 @@ Namespace Tests
 
                     Using Reopened = ChunkedStream.OpenAsync(Ms).GetAwaiter().GetResult()
                         AssertBytesEqual(Expected, Reopened.ToArrayAsync().GetAwaiter().GetResult(), "OpenAsync produced different content.")
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using
@@ -349,7 +349,7 @@ Namespace Tests
                         ' The anchor's absolute offset moved by the insert length.
                         AssertEqual(2300L, Cs.GetAnchorOffset(Anchor.AnchorId), "Anchor offset did not track the insert.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -384,7 +384,7 @@ Namespace Tests
                             Cp.CloseAsync().GetAwaiter().GetResult()
                         End Try
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -409,7 +409,7 @@ Namespace Tests
                         Dim Saved = Cs.DefragmentAsync(ChunkedStream.DefragTypes.Sequence).GetAwaiter().GetResult()
                         AssertTrue(Saved >= 0, "DefragmentAsync reported a negative result without cancellation.")
                         AssertBytesEqual(Expected, Cs.ToArray(), "DefragmentAsync changed the logical content.")
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         ' A pre-cancelled token makes the async defrag return the cancelled result.
                         Using Cts As New CancellationTokenSource()
@@ -419,7 +419,7 @@ Namespace Tests
                         End Using
 
                         AssertBytesEqual(Expected, Cs.ToArray(), "Cancelled DefragmentAsync corrupted the stream.")
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 

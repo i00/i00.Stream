@@ -87,6 +87,7 @@
     <Compile Include="Streams\ChunkedStream\Options.vb" />
     <Compile Include="Streams\ChunkedStream\Positioned Storage Interface.vb" />
     <Compile Include="Streams\ChunkedStream\Recovery.vb" />
+    <Compile Include="Streams\ChunkedStream\Repair.vb" />
     <Compile Include="Streams\ChunkedStream\Defrag.vb" />
     <Compile Include="Streams\ChunkedStream\Crypto.vb" />
     <Compile Include="Streams\ChunkedStream\Storage.vb" />

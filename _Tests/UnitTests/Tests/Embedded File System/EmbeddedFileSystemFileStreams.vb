@@ -60,7 +60,7 @@ Namespace Tests
                             End Using
 
                             AssertEqual(3000L, Efs.FindEntry(Efs.RootAnchorId, "data.bin").LengthOfDataAtEntry, "Persisted length is wrong after close.")
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
                     End Using
@@ -102,7 +102,7 @@ Namespace Tests
                                 Efs.FindEntry(Efs.RootAnchorId, "f.txt").EntryType,
                                 "Closing the stream should finalise the file.")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
                     End Using
@@ -158,7 +158,7 @@ Namespace Tests
                             Expected("file3.bin") = Rewrite
                             Basics.WriteWholeFile(Efs, Efs.FindEntry(Dir, "file3.bin").ChildAnchorId, Rewrite)
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                         End Using
                     End Using
@@ -175,7 +175,7 @@ Namespace Tests
                             Next
 
                         End Using
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
                     End Using
 
                 End Using

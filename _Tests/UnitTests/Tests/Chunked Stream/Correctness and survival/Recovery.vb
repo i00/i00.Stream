@@ -31,7 +31,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
                         Cs.Write(0, Data)
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
                     End Using
 
                     CorruptHeaderCopy(Ms, 0)
@@ -43,7 +43,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Opening with corrupt header copy 0 did not recover from header copy 1.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -67,7 +67,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
                         Cs.Write(0, Data)
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
                     End Using
 
                     CorruptHeaderCopy(Ms, 1)
@@ -79,7 +79,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Opening with corrupt header copy 1 did not recover from header copy 0.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -103,7 +103,7 @@ Namespace Tests
                                 Cs.options.ChunkSize,
                                 1003))
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -149,7 +149,7 @@ Namespace Tests
 
                         Cs.Write(0, Data0)
                         Cs.Write(Data0.Length, Data1)
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -164,7 +164,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Opening after corrupting the older header copy did not select the newest valid copy.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -206,7 +206,7 @@ Namespace Tests
 
                         Cs.Write(0, Data0)
                         Cs.Write(Data0.Length, Data1)
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -224,7 +224,7 @@ Namespace Tests
                             BytesEqual(LatestCommitted, Actual),
                             "Opening after corrupting the newest header copy did not fall back to a known committed state.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -290,7 +290,7 @@ Namespace Tests
                             Reopened.Length,
                             "Recovered stream length was incorrect.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -419,7 +419,7 @@ Namespace Tests
 
                     Using Reopened = ChunkedStream.Open(Ms)
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                         Dim Recovered = Reopened.ToArray()
 
@@ -492,7 +492,7 @@ Namespace Tests
 
                     Using Reopened = ChunkedStream.Open(Ms)
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                         Dim Recovered = Reopened.ToArray()
 
@@ -529,7 +529,7 @@ Namespace Tests
                     Using Cs = ChunkedStream.Open(Ms)
 
                         Cs.Write(0, Original)
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                         OriginalPhysicalLength = Ms.Length
 
@@ -571,7 +571,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Chunk-size rebuild recovery corrupted committed data.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -647,7 +647,7 @@ Namespace Tests
                         ChunkedStream.Open(Ms)
 
                     Cs.Write(0, Data)
-                    Cs.Validate()
+                    Cs.Validate().ThrowIfErrors()
 
                     Dim Chunk =
                         GetFirstAllocatedChunk(Cs)
@@ -700,7 +700,7 @@ Namespace Tests
                             RecoveredChunk.PhysicalOffset.Value,
                             "CopyingPhysicalRecord recovery should keep the old physical record location.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -726,7 +726,7 @@ Namespace Tests
                         ChunkedStream.Open(Ms)
 
                     Cs.Write(0, Data)
-                    Cs.Validate()
+                    Cs.Validate().ThrowIfErrors()
 
                     Dim Chunk =
                         GetFirstAllocatedChunk(Cs)
@@ -785,7 +785,7 @@ Namespace Tests
                             RecoveredChunk.PhysicalOffset.Value,
                             "PhysicalRecordCopied recovery should publish the new physical record location.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -811,7 +811,7 @@ Namespace Tests
                         ChunkedStream.Open(Ms)
 
                     Cs.Write(0, Data)
-                    Cs.Validate()
+                    Cs.Validate().ThrowIfErrors()
 
                     Dim Chunk =
                         GetFirstAllocatedChunk(Cs)
@@ -883,7 +883,7 @@ Namespace Tests
                             RecoveredChunk.PhysicalOffset.Value,
                             "PhysicalRecordCopied recovery should fall back to the old record when the copied record is corrupt.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -909,7 +909,7 @@ Namespace Tests
                         ChunkedStream.Open(Ms)
 
                     Cs.Write(0, Data)
-                    Cs.Validate()
+                    Cs.Validate().ThrowIfErrors()
 
                     Dim Chunk =
                         GetFirstAllocatedChunk(Cs)

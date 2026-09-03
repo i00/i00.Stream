@@ -160,6 +160,16 @@ Namespace Streams
             '
             ReclaimUnreferencedPhysicalRecords()
 
+            '
+            ' The cached physical-data end is maintained incrementally and an earlier edit
+            ' can leave it stale-high (it only ratchets down when the record sitting at the
+            ' very end is the one that moves). Every defragment pass trims the backing
+            ' stream to a value derived from this cache, so refresh it from the live records
+            ' now - a stale value would make a later pass fail its "data end beyond the
+            ' backing stream" guard against a stream a previous pass has already shortened.
+            '
+            RecalculatePhysicalDataEnd()
+
             InvalidateChunkCache()
             ClearFreeSpaceMap()
 
@@ -184,9 +194,25 @@ Namespace Streams
                         Throw New ArgumentOutOfRangeException(NameOf(Type))
                 End Select
 
+            Catch
+
+                '
+                ' A defragment that fails partway has already rotated on-disk headers
+                ' through its intermediate metadata publishes and its in-memory indexes
+                ' may be half-updated. Fault the stream so DisposeCore does not publish
+                ' that state over the last good generation - the caller can dispose and
+                ' reopen the file exactly as it stood before this call.
+                '
+                _Faulted = True
+                Throw
+
             Finally
 
-                BuildFreeSpaceMapCore()
+                '
+                ' Skip the rebuild on the fault path: the map would be built from
+                ' inconsistent state and could throw, masking the original failure.
+                '
+                If _Faulted = False Then BuildFreeSpaceMapCore()
 
             End Try
 
@@ -630,7 +656,7 @@ Namespace Streams
 
                 If CancellationToken.Cancel Then Return
 
-                CommitDefragCheckpoint(GetDataEndFromIndex())
+                CommitDefragCheckpoint()
 
                 If MovedInPass = False Then Exit Do
 
@@ -644,13 +670,24 @@ Namespace Streams
 
         End Sub
 
-        Private Sub CommitDefragCheckpoint(DataEnd As Long)
+        Private Sub CommitDefragCheckpoint()
 
-            TrimAndCommitDefragMetadata(DataEnd)
+            TrimAndCommitDefragMetadata()
 
         End Sub
 
-        Private Sub TrimAndCommitDefragMetadata(DataEnd As Long)
+        Private Sub TrimAndCommitDefragMetadata()
+
+            '
+            ' Refresh the cached physical-data end from the live records before trusting it.
+            ' A previous pass has already trimmed the backing stream, and an incrementally
+            ' maintained cache can sit stale-high; recomputing here means the guard below
+            ' only fires on genuine corruption - a live record that really does claim space
+            ' past the end of the backing stream.
+            '
+            RecalculatePhysicalDataEnd()
+
+            Dim DataEnd = GetDataEndFromIndex()
 
             If DataEnd < DataStartOffset Then
                 Throw New InvalidDataException("Invalid defrag data end.")
@@ -866,7 +903,7 @@ Namespace Streams
 
             If CancellationToken.Cancel Then Return
 
-            CommitDefragCheckpoint(GetDataEndFromIndex())
+            CommitDefragCheckpoint()
 
         End Sub
 

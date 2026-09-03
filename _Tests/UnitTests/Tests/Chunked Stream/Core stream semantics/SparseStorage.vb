@@ -48,7 +48,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Sparse chunk data did not read back correctly.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -88,7 +88,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Physically stored sparse chunks did not read back correctly.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -146,7 +146,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Allocated chunk did not read back correctly.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -200,7 +200,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Sparse conversion changed logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -275,7 +275,7 @@ Namespace Tests
                             Struct.Chunks.Any(Function(chunk) Not chunk.IsAllocated),
                             "Expected sparse chunks.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -315,7 +315,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Extended sparse region did not read back as zeroes.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -365,7 +365,7 @@ Namespace Tests
                             After.Chunks.Any(Function(chunk) chunk.IsAllocated = False),
                             "Expected sparse chunks after Clear.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -412,7 +412,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Cloned sparse region did not read back correctly.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -490,7 +490,7 @@ Namespace Tests
                             Struct.Chunks.Any(Function(chunk) Not chunk.IsAllocated),
                             "Expected sparse chunks.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -536,7 +536,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Sparseness migration changed logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 

@@ -54,7 +54,7 @@ Namespace Tests
                                 Cs.ToArray(),
                                 $"Encrypted in-memory round-trip failed. Length={Length}")
 
-                            Cs.Validate()
+                            Cs.Validate().ThrowIfErrors()
 
                             Dim Struct =
                                 Cs.GetStructure()
@@ -101,7 +101,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Encrypted data did not survive reopen with the correct key.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -280,7 +280,7 @@ Namespace Tests
                             Struct.UnencryptedChunkCount > 0,
                             "Expected at least one unencrypted chunk after enabling encryption.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -318,7 +318,7 @@ Namespace Tests
                             Cs.ToArray(),
                             "Disabling encryption configuration corrupted logical data.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -329,7 +329,7 @@ Namespace Tests
                             Reopened.ToArray(),
                             "Publicly wrapped encrypted data was not readable after reopen.")
 
-                        Reopened.Validate()
+                        Reopened.Validate().ThrowIfErrors()
 
                     End Using
 
@@ -379,7 +379,7 @@ Namespace Tests
                             Struct.CompressedChunkCount > 0,
                             "Expected compressed chunks.")
 
-                        Cs.Validate()
+                        Cs.Validate().ThrowIfErrors()
 
                     End Using
 
