@@ -135,6 +135,101 @@ Namespace Tests
             End Sub
 
             <UnitTester.SimpleTest()>
+            Public Shared Sub PendingOnCloseLeavesAnAbandonedWriteRecoverable()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+                        Using Efs As New EmbeddedFileSystem(Cs)
+
+                            Dim FileId = Efs.CreateFile(Efs.RootAnchorId, "upload.bin")
+
+                            ' A write that never reaches the success path: the flag is left set and
+                            ' the stream is disposed while unwinding, exactly as in an aborted copy.
+                            Using Stream = Efs.OpenFile(FileId, PendingOnClose:=True)
+                                Stream.Write(GenerateRandomData(9000, 4501), 0, 9000)
+                            End Using
+
+                            AssertEqual(EmbeddedFileSystem.EntryTypes.PendingFile,
+                                        Efs.FindEntry(Efs.RootAnchorId, "upload.bin").EntryType,
+                                        "An abandoned PendingOnClose write should stay PendingFile.")
+                            AssertEqual(0L,
+                                        Efs.FindEntry(Efs.RootAnchorId, "upload.bin").LengthOfDataAtEntry,
+                                        "The unflushed buffer should have been dropped, not committed.")
+
+                            Dim Removed = Efs.RecoverPendingFiles(EmbeddedFileSystem.PendingFileRecoveryActions.Remove)
+                            AssertEqual(1, Removed.Count, "RecoverPendingFiles(Remove) should reclaim the abandoned entry.")
+                            AssertTrue(Efs.GetRootEntries().All(Function(entry) entry.Name <> "upload.bin"), "The abandoned entry should be gone.")
+
+                            Cs.Validate().ThrowIfErrors()
+
+                        End Using
+                    End Using
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ClearingPendingOnCloseCommitsTheFile()
+
+                Dim Payload = GenerateRandomData(70000, 4502)
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+                        Using Efs As New EmbeddedFileSystem(Cs)
+
+                            Dim FileId = Efs.CreateFile(Efs.RootAnchorId, "committed.bin")
+
+                            Using Stream = Efs.OpenFile(FileId, PendingOnClose:=True)
+                                Stream.Write(Payload, 0, Payload.Length)
+                                Stream.Flush()
+                                Stream.PendingOnClose = False
+                            End Using
+
+                            Dim Entry = Efs.FindEntry(Efs.RootAnchorId, "committed.bin")
+                            AssertEqual(EmbeddedFileSystem.EntryTypes.File, Entry.EntryType, "Clearing PendingOnClose should finalise the entry.")
+                            AssertEqual(CLng(Payload.Length), Entry.LengthOfDataAtEntry, "Committed length is wrong.")
+                            AssertBytesEqual(Payload, Basics.ReadWholeFile(Efs, Entry.ChildAnchorId), "Committed content is wrong.")
+
+                            Cs.Validate().ThrowIfErrors()
+
+                        End Using
+                    End Using
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ToArrayReturnsTheWholeFileRegardlessOfPosition()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+                        Using Efs As New EmbeddedFileSystem(Cs)
+
+                            Using Stream = Efs.OpenFile(Efs.CreateFile(Efs.RootAnchorId, "empty.bin"))
+                                AssertEqual(0, Stream.ToArray().Length, "ToArray on an empty file should be empty.")
+                            End Using
+
+                            Dim Payload = GenerateRandomData(50000, 4503)
+                            Dim FileId = Efs.CreateFile(Efs.RootAnchorId, "blob.bin")
+
+                            Using Stream = Efs.OpenFile(FileId)
+                                Stream.Write(Payload, 0, Payload.Length)
+                                Stream.Seek(12345, SeekOrigin.Begin)
+
+                                ' Includes buffered appends and ignores the current position.
+                                AssertBytesEqual(Payload, Stream.ToArray(), "ToArray did not return the whole file.")
+                                AssertEqual(12345L, Stream.Position, "ToArray should not move the position.")
+                            End Using
+
+                            Cs.Validate().ThrowIfErrors()
+
+                        End Using
+                    End Using
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
             Public Shared Sub ManyFilesInterleavedRoundTripAndSurviveReopen()
 
                 Using Ms As New MemoryStream()

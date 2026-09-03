@@ -237,8 +237,15 @@ Namespace Streams
         End Function
 
         ''' <summary>Opens a file as a standard seekable .NET stream.</summary>
-        ''' <remarks>The parent entry is PendingFile until the returned stream is disposed.</remarks>
-        Public Function OpenFile(FileAnchorId As Long) As Stream
+        ''' <remarks>
+        ''' The parent entry is <see cref="EntryTypes.PendingFile" /> while the stream is open. On
+        ''' dispose it is finalised back to <see cref="EntryTypes.File" /> unless
+        ''' <see cref="FileStreamView.PendingOnClose" /> is set - pass <paramref name="PendingOnClose" />
+        ''' (or set the property before the failure) to keep a partially written file pending for
+        ''' <see cref="RecoverPendingFiles" /> when a write is abandoned part way through. Clear it on
+        ''' the success path so the last statement before the stream closes commits the file.
+        ''' </remarks>
+        Public Function OpenFile(FileAnchorId As Long, Optional PendingOnClose As Boolean = False) As FileStreamView
             SyncLock _SyncRoot
                 ThrowIfDisposed()
                 Dim FileAnchor = GetAnchor(FileAnchorId)
@@ -250,7 +257,7 @@ Namespace Streams
                         Throw New InvalidDataException($"Anchor {FileAnchorId} is not referenced as a file.")
                     End If
                     SetEntryType(Location, EntryTypes.PendingFile)
-                    Return New FileStreamView(Me, FileAnchor)
+                    Return New FileStreamView(Me, FileAnchor) With {.PendingOnClose = PendingOnClose}
                 Catch
                     _OpenFileIds.Remove(FileAnchorId)
                     Throw
@@ -772,9 +779,10 @@ Namespace Streams
             End SyncLock
         End Sub
 
-        Private Sub CloseFile(FileAnchorId As Long)
+        Private Sub CloseFile(FileAnchorId As Long, LeavePending As Boolean)
             SyncLock _SyncRoot
                 If _Disposed OrElse _OpenFileIds.Remove(FileAnchorId) = False Then Return
+                If LeavePending Then Return
                 SetEntryType(GetFileLocation(GetAnchor(FileAnchorId)), EntryTypes.File)
             End SyncLock
         End Sub
@@ -825,7 +833,12 @@ Namespace Streams
             End SyncLock
         End Sub
 
-        Private NotInheritable Class FileStreamView
+        ''' <summary>
+        ''' The seekable <see cref="Stream" /> returned by <see cref="OpenFile" />. Only
+        ''' <see cref="OpenFile" /> creates one; the parent entry stays
+        ''' <see cref="EntryTypes.PendingFile" /> for the stream's lifetime.
+        ''' </summary>
+        Public NotInheritable Class FileStreamView
             Inherits Stream
 
             Private Const WriteBufferFlushThreshold As Integer = 4 * 1024 * 1024
@@ -836,10 +849,20 @@ Namespace Streams
             Private _Position As Long
             Private _Disposed As Boolean
 
-            Public Sub New(Owner As EmbeddedFileSystem, Anchor As ChunkedStream.Anchor)
+            Friend Sub New(Owner As EmbeddedFileSystem, Anchor As ChunkedStream.Anchor)
                 _Owner = Owner
                 _Anchor = Anchor
             End Sub
+
+            ''' <summary>
+            ''' When set, disposing the stream leaves the parent entry
+            ''' <see cref="EntryTypes.PendingFile" /> instead of finalising it to
+            ''' <see cref="EntryTypes.File" />, and the write buffer is dropped rather than flushed.
+            ''' Set it while a write is in progress and clear it once the write has completed, so an
+            ''' abandoned upload is left for <see cref="RecoverPendingFiles" /> without a catch block.
+            ''' Call <see cref="Flush" /> first if a partial file's buffered tail must still be kept.
+            ''' </summary>
+            Public Property PendingOnClose As Boolean
 
             '
             ' Sequential appends past the current end are buffered and materialised in one
@@ -909,6 +932,31 @@ Namespace Streams
                 Return Result
             End Function
 
+            ''' <summary>
+            ''' Returns the whole file as a new array, independent of the current position. Buffered
+            ''' appends are flushed first. Throws if the file is larger than
+            ''' <see cref="Integer.MaxValue" /> bytes.
+            ''' </summary>
+            Public Function ToArray() As Byte()
+                CheckDisposed()
+                DrainWriteBuffer()
+
+                Dim FileLength = _Owner.GetFileLength(_Anchor)
+                If FileLength = 0 Then Return Array.Empty(Of Byte)()
+                If FileLength > Integer.MaxValue Then
+                    Throw New IOException($"The file is {FileLength:N0} bytes and cannot be returned as a single array.")
+                End If
+
+                Dim Result(CInt(FileLength) - 1) As Byte
+                Dim Total = 0
+                While Total < Result.Length
+                    Dim BytesRead = _Owner.ReadFile(_Anchor, Total, Result, Total, Result.Length - Total)
+                    If BytesRead = 0 Then Throw New EndOfStreamException()
+                    Total += BytesRead
+                End While
+                Return Result
+            End Function
+
             Public Overrides Sub Write(Data As Byte(), Offset As Integer, Count As Integer)
                 CheckDisposed()
 
@@ -950,9 +998,12 @@ Namespace Streams
             Protected Overrides Sub Dispose(Disposing As Boolean)
                 If _Disposed Then Return
                 If Disposing Then
-                    DrainWriteBuffer()
-                    _WriteBuffer.Dispose()
-                    _Owner.CloseFile(_Anchor.AnchorId)
+                    Try
+                        If PendingOnClose = False Then DrainWriteBuffer()
+                    Finally
+                        _WriteBuffer.Dispose()
+                        _Owner.CloseFile(_Anchor.AnchorId, PendingOnClose)
+                    End Try
                 End If
                 _Disposed = True
                 MyBase.Dispose(Disposing)

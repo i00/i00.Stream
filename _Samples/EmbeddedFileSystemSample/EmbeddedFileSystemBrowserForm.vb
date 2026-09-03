@@ -9,6 +9,11 @@ Imports EmbeddedFileSystemSample.VirtualDragCopyFiles
 
 Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
+    Public Event MutatedFileSystem As EventHandler
+    Protected Sub OnMutatedFileSystem()
+        RaiseEvent MutatedFileSystem(Me, EventArgs.Empty)
+    End Sub
+
     <DllImport("uxtheme.dll", CharSet:=CharSet.Unicode)>
     Private Shared Function SetWindowTheme(hWnd As IntPtr, pszSubAppName As String, pszSubIdList As String) As Integer
     End Function
@@ -248,6 +253,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If FileSystem Is Nothing Then Throw New ArgumentNullException(NameOf(FileSystem))
 
         _FileSystem = FileSystem
+        OnMutatedFileSystem()
+
         _CurrentDirectoryAnchorId = _FileSystem.RootAnchorId
 
         InitializeComponent()
@@ -2107,6 +2114,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             "One or more items could not be uploaded.")
 
         RefreshFileSystemView()
+        OnMutatedFileSystem()
     End Sub
 
     ''' <summary>
@@ -2194,27 +2202,23 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             If Replace Then _FileSystem.DeleteEntry(ParentAnchor, Existing.Name)
 
             Dim FileAnchorId = _FileSystem.CreateFile(ParentAnchor, workItem.Name)
-            Try
-                Using SourceStream = New FileStream(workItem.SourcePath, FileMode.Open, FileAccess.Read, FileShare.Read)
-                    Using DestinationStream = _FileSystem.OpenFile(FileAnchorId)
-                        Dim Buffer(1024 * 1024 - 1) As Byte
-                        While True
-                            Dim BytesRead = SourceStream.Read(Buffer, 0, Buffer.Length)
-                            If BytesRead = 0 Then Exit While
-                            DestinationStream.Write(Buffer, 0, BytesRead)
-                            CopiedBytes += BytesRead
-                            ReportUploadProgress(Report, TotalSize, CopiedBytes, CopiedFiles, FileCount, workItem.Name, LastReport, False)
-                        End While
-                        DestinationStream.Flush()
-                    End Using
+            Using SourceStream = New FileStream(workItem.SourcePath, FileMode.Open, FileAccess.Read, FileShare.Read)
+                Using DestinationStream = _FileSystem.OpenFile(FileAnchorId, PendingOnClose:=True)
+                    Dim Buffer(1024 * 1024 - 1) As Byte
+                    While True
+                        Dim BytesRead = SourceStream.Read(Buffer, 0, Buffer.Length)
+                        If BytesRead = 0 Then Exit While
+                        DestinationStream.Write(Buffer, 0, BytesRead)
+                        CopiedBytes += BytesRead
+                        ReportUploadProgress(Report, TotalSize, CopiedBytes, CopiedFiles, FileCount, workItem.Name, LastReport, False)
+                    End While
+                    DestinationStream.Flush()
+
+                    ' Reached only when the copy completed: commit the entry as the stream closes.
+                    ' Any earlier throw leaves it PendingFile for the next run or Check integrity.
+                    DestinationStream.PendingOnClose = False
                 End Using
-            Catch
-                Try
-                    _FileSystem.DeleteEntry(ParentAnchor, workItem.Name)
-                Catch
-                End Try
-                Throw
-            End Try
+            End Using
 
             CopiedFiles += 1
             ReportUploadProgress(Report, TotalSize, CopiedBytes, CopiedFiles, FileCount, workItem.Name, LastReport, True)
@@ -2430,6 +2434,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             "One or more items could not be deleted.")
 
         If _SearchActive Then RerunSearch() Else RefreshFileSystemView()
+        OnMutatedFileSystem()
     End Sub
 
     Private Sub DeleteSelectedFolder(Sender As Object, EventArgs As EventArgs) Handles tsiDeleteFolder.Click
@@ -2695,6 +2700,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             "The moved items could not all be removed from the embedded file system.")
 
         If _SearchActive Then RerunSearch() Else RefreshFileSystemView()
+        OnMutatedFileSystem()
     End Sub
 
     Private Function CreateTemporaryFileExport(Entries As IList(Of EmbeddedFileSystem.ContentListEntry)) As DragExport
@@ -2901,7 +2907,6 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub tsiFragmentation_Paint(sender As Object, e As PaintEventArgs) Handles tsiFragmentation.Paint
-        Dim Struct = FileSystem.ChunkedStream.GetStructure()
         Struct.DrawFragmentation(e.Graphics, tsiFragmentation.ContentRectangle,
                                  New FragmentationDrawOptions() With {
                                     .MaxXBlockCount = 100,
@@ -2919,6 +2924,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub tsiScan_Click(sender As Object, e As EventArgs) Handles tsiScan.Click
+        Dim Mutated = True '< because canceling the thread could mutate the file system
         Using frmProgress As New frmProgress(
                 Sub(Parameter, ProgressReport)
                     ProgressReport.SetText("Validating...")
@@ -2948,61 +2954,62 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                         Dim PendingFiles = Tidied.Where(Function(x) x.PreviousState = EmbeddedFileSystem.EntryTypes.PendingFile).ToArray()
                         Dim PendingFilesText = "None"
                         If PendingFiles.Any Then
-                            PendingFilesText = Environment.NewLine & String.Join(Environment.NewLine, PendingFiles.Select(Function(x) $"    - {x.Path}"))
+                            PendingFilesText = Environment.NewLine & String.Join(Environment.NewLine, PendingFiles.Select(Function(x) $"    • {x.Path.TrimStart("\"c)}"))
                         End If
                         Dim CorruptFiles = Tidied.Where(Function(x) x.PreviousState = EmbeddedFileSystem.EntryTypes.CorruptData).ToArray()
                         Dim CorruptFilesText = "None"
                         If CorruptFiles.Any Then
-                            CorruptFilesText = Environment.NewLine & String.Join(Environment.NewLine, CorruptFiles.Select(Function(x) $"    - {x.Path} ({x.BytesZeroed.FormatFileSizeFromBytes()} not recovered)"))
+                            CorruptFilesText = Environment.NewLine & String.Join(Environment.NewLine, CorruptFiles.Select(Function(x) $"    • {x.Path.TrimStart("\"c)} ({x.BytesZeroed.FormatFileSizeFromBytes()} not recovered)"))
                         End If
                         If PendingFiles.Any = False Then
+                            Mutated = False
                             MsgBox(ProgressReport.frmProgress, "No problems found.", MsgBoxStyle.Information)
                         Else
                             MsgBox(ProgressReport.frmProgress,
                                $"{Environment.NewLine}Half copied files removed: {PendingFilesText}{Environment.NewLine}Corrupt files partly recovered: {CorruptFilesText}",
                                If(CorruptFiles.Any, MsgBoxStyle.Critical, MsgBoxStyle.Exclamation))
                         End If
-                        Return
+                    Else
+                        ' Record which files the problems touch before the repair zero-fills the ranges.
+                        ProgressReport.SetText("Marking affected files...")
+                        Dim Marks = FileSystem.Mark(Report)
+
+                        Dim LossyBytes = Report.Problems.Sum(Function(problem) problem.DataLossBytes)
+                        Dim Summary = String.Join(Environment.NewLine,
+                                                  Report.Problems.Take(12).Select(Function(problem) $"  - {problem.Message}"))
+                        If Report.Problems.Count > 12 Then Summary &= $"{Environment.NewLine}  ... and {Report.Problems.Count - 12} more"
+
+                        Dim ProceedWithLoss = False
+                        If LossyBytes > 0 Then
+                            Dim Affected = String.Join(Environment.NewLine, Marks.Select(Function(mark) $"  - {mark.Path} ({mark.LostBytes.FormatFileSizeFromBytes})"))
+                            ProceedWithLoss = ProgressReport.ShowMessageBox(
+                                $"{Report.Errors.Count} error(s), {Report.Warnings.Count} warning(s) found:{Environment.NewLine}{Summary}{Environment.NewLine}{Environment.NewLine}" &
+                                $"Repairing replaces {LossyBytes.FormatFileSizeFromBytes} of unreadable data with zeros across {Marks.Count} file(s):{Environment.NewLine}{Affected}{Environment.NewLine}{Environment.NewLine}" &
+                                "Repair now (with data loss)?",
+                                MsgBoxStyle.Exclamation Or MsgBoxStyle.YesNo, "Repair") = MsgBoxResult.Yes
+                        End If
+
+                        ProgressReport.SetText("Repairing...")
+                        Dim Outcome = Report.Repair(If(ProceedWithLoss, ChunkedStream.RepairScope.IncludeDataLoss, ChunkedStream.RepairScope.NonLossy))
+
+                        ' Delete files whose data was lost, finalise the ones that were merely left pending.
+                        Dim Recovered = FileSystem.RecoverPendingFiles(
+                            Function(candidate) If(candidate.State = EmbeddedFileSystem.EntryTypes.CorruptData,
+                                                  EmbeddedFileSystem.PendingFileRecoveryActions.Remove,
+                                                  EmbeddedFileSystem.PendingFileRecoveryActions.Finalize))
+
+                        Dim RemovedCount = Recovered.Where(Function(entry) entry.Action = EmbeddedFileSystem.PendingFileRecoveryActions.Remove).Count()
+                        Dim Residual = FileSystem.ChunkedStream.Validate()
+
+                        MsgBox(ProgressReport.frmProgress,
+                               $"Problems found: {Report.Problems.Count}{Environment.NewLine}" &
+                               $"Repaired: {Outcome.Repaired.Count}   Skipped: {Outcome.Skipped.Count}{Environment.NewLine}" &
+                               $"Data zeroed: {Outcome.BytesZeroed.FormatFileSizeFromBytes}{Environment.NewLine}" &
+                               $"Files removed: {RemovedCount}   finalised: {Recovered.Count - RemovedCount}{Environment.NewLine}" &
+                               $"Remaining problems: {Residual.Problems.Count}",
+                               If(Residual.HasErrors, MsgBoxStyle.Exclamation, MsgBoxStyle.Information))
                     End If
 
-                    ' Record which files the problems touch before the repair zero-fills the ranges.
-                    ProgressReport.SetText("Marking affected files...")
-                    Dim Marks = FileSystem.Mark(Report)
-
-                    Dim LossyBytes = Report.Problems.Sum(Function(problem) problem.DataLossBytes)
-                    Dim Summary = String.Join(Environment.NewLine,
-                                              Report.Problems.Take(12).Select(Function(problem) $"  - {problem.Message}"))
-                    If Report.Problems.Count > 12 Then Summary &= $"{Environment.NewLine}  ... and {Report.Problems.Count - 12} more"
-
-                    Dim ProceedWithLoss = False
-                    If LossyBytes > 0 Then
-                        Dim Affected = String.Join(Environment.NewLine, Marks.Select(Function(mark) $"  - {mark.Path} ({mark.LostBytes.FormatFileSizeFromBytes})"))
-                        ProceedWithLoss = ProgressReport.ShowMessageBox(
-                            $"{Report.Errors.Count} error(s), {Report.Warnings.Count} warning(s) found:{Environment.NewLine}{Summary}{Environment.NewLine}{Environment.NewLine}" &
-                            $"Repairing replaces {LossyBytes.FormatFileSizeFromBytes} of unreadable data with zeros across {Marks.Count} file(s):{Environment.NewLine}{Affected}{Environment.NewLine}{Environment.NewLine}" &
-                            "Repair now (with data loss)?",
-                            MsgBoxStyle.Exclamation Or MsgBoxStyle.YesNo, "Repair") = MsgBoxResult.Yes
-                    End If
-
-                    ProgressReport.SetText("Repairing...")
-                    Dim Outcome = Report.Repair(If(ProceedWithLoss, ChunkedStream.RepairScope.IncludeDataLoss, ChunkedStream.RepairScope.NonLossy))
-
-                    ' Delete files whose data was lost, finalise the ones that were merely left pending.
-                    Dim Recovered = FileSystem.RecoverPendingFiles(
-                        Function(candidate) If(candidate.State = EmbeddedFileSystem.EntryTypes.CorruptData,
-                                              EmbeddedFileSystem.PendingFileRecoveryActions.Remove,
-                                              EmbeddedFileSystem.PendingFileRecoveryActions.Finalize))
-
-                    Dim RemovedCount = Recovered.Where(Function(entry) entry.Action = EmbeddedFileSystem.PendingFileRecoveryActions.Remove).Count()
-                    Dim Residual = FileSystem.ChunkedStream.Validate()
-
-                    MsgBox(ProgressReport.frmProgress,
-                           $"Problems found: {Report.Problems.Count}{Environment.NewLine}" &
-                           $"Repaired: {Outcome.Repaired.Count}   Skipped: {Outcome.Skipped.Count}{Environment.NewLine}" &
-                           $"Data zeroed: {Outcome.BytesZeroed.FormatFileSizeFromBytes}{Environment.NewLine}" &
-                           $"Files removed: {RemovedCount}   finalised: {Recovered.Count - RemovedCount}{Environment.NewLine}" &
-                           $"Remaining problems: {Residual.Problems.Count}",
-                           If(Residual.HasErrors, MsgBoxStyle.Exclamation, MsgBoxStyle.Information))
                 End Sub, Nothing)
 
             frmProgress.ShowInTaskbar = True
@@ -3011,6 +3018,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Using
 
         RefreshFileSystemView()
+        If Mutated Then
+            OnMutatedFileSystem()
+        End If
 
     End Sub
 
@@ -3067,13 +3077,15 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Using
 
         RefreshFileSystemView()
+        OnMutatedFileSystem()
     End Sub
 
     Private Sub EmbeddedFileSystemBrowserForm_Load(sender As Object, e As EventArgs) Handles Me.Load
         Dim tsam As New ToolStripAsMenu(tsMain)
     End Sub
 
-    Private Sub tsiSearch_Click(sender As Object, e As EventArgs) Handles tsiSearch.Click
-
+    Dim Struct As ChunkedStreamStructure
+    Private Sub EmbeddedFileSystemBrowserForm_MutatedFileSystem(sender As Object, e As EventArgs) Handles Me.MutatedFileSystem
+        Struct = FileSystem.ChunkedStream.GetStructure()
     End Sub
 End Class
