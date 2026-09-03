@@ -1232,24 +1232,15 @@ Namespace Streams
         Private _CachedExtentIndex As Integer = -1
         Private _CachedChunkPlain As Byte()
 
-        Private ReadOnly _Counter As Byte()
-
         '
-        ' AES-CTR keystream scratch. A whole chunk's worth of successive counter blocks is
-        ' built in _CtrCounterScratch and encrypted in one TransformBlock call into
-        ' _CtrKeyStreamScratch, instead of one 16-byte TransformBlock per block. Both grow
-        ' to the largest payload seen and are reused. Serialised by the state lock.
+        ' The AES-CTR chunk cipher. All of its state (the AES-ECB transform and the
+        ' keystream scratch buffers) lives on the ChunkCipher instance, so bulk operations
+        ' can decrypt or encrypt chunks on several threads at once by taking a ChunkCipher
+        ' each (see CreateChunkCipher). The serialised path reuses this one, rebuilt only
+        ' when the chunk encryption key changes (DeriveFileMasterKeys). Nothing when the
+        ' stream has no file master key.
         '
-        Private _CtrCounterScratch As Byte()
-        Private _CtrKeyStreamScratch As Byte()
-
-        Private ReadOnly _AesProvider As Aes
-
-        '
-        ' Cached AES-ECB encryptor keyed with _ChunkEncryptionKey. Rebuilt only when the
-        ' chunk encryption key changes (DeriveFileMasterKeys), not per CryptPayload call.
-        '
-        Private _ChunkCipherTransform As ICryptoTransform
+        Private _ChunkCipher As ChunkCipher
 
         Private ReadOnly _Rng As RandomNumberGenerator
 
@@ -1460,11 +1451,6 @@ Namespace Streams
             _ChunkSize = Me.Options.ChunkSize
             _ChunkPlain = New Byte(_ChunkSize - 1) {}
             _CachedChunkPlain = New Byte(_ChunkSize - 1) {}
-            _Counter = New Byte(IvSize - 1) {}
-
-            _AesProvider = Aes.Create()
-            _AesProvider.Mode = CipherMode.ECB
-            _AesProvider.Padding = PaddingMode.None
 
             _Rng = RandomNumberGenerator.Create()
 
@@ -2453,6 +2439,12 @@ Namespace Streams
             End If
 
             Dim ToRead = CInt(Math.Min(CLng(EffectiveCount), _Length - LogicalOffset))
+
+            If ShouldReadRangeInParallel(ToRead) Then
+                ReadRangeInParallel(LogicalOffset, Output, OutputOffset, ToRead)
+                Return ToRead
+            End If
+
             Dim Remaining = ToRead
             Dim CurrentLogicalOffset = LogicalOffset
             Dim CurrentOutputOffset = OutputOffset
@@ -2487,6 +2479,122 @@ Namespace Streams
         End Function
 
         '
+        ' A large multi-chunk read authenticates, decrypts and decompresses its chunks on a
+        ' worker pool (Options.MaxCryptoParallelism). Only that per-chunk CPU is threaded:
+        ' the backing-store reads and the copy into the caller's buffer stay serial, and
+        ' each worker takes its own ChunkCipher so nothing crypto-related is shared.
+        '
+        Private Const ParallelReadMinChunks As Integer = 8
+
+        Private Structure ReadSlice
+            Public PhysicalRecordId As Long
+            Public SourceOffset As Integer
+            Public OutputOffset As Integer
+            Public Count As Integer
+        End Structure
+
+        Private Function ShouldReadRangeInParallel(ByteCount As Integer) As Boolean
+
+            Return Options.MaxCryptoParallelism > 1 AndAlso
+                   _ChunkSize > 0 AndAlso
+                   CLng(ByteCount) >= CLng(_ChunkSize) * ParallelReadMinChunks
+
+        End Function
+
+        Private Sub ReadRangeInParallel(LogicalOffset As Long, Output As Byte(), OutputOffset As Integer, Count As Integer)
+
+            Dim Slices As New List(Of ReadSlice)()
+            Dim CurrentLogical = LogicalOffset
+            Dim CurrentOutput = OutputOffset
+            Dim Remaining = Count
+
+            While Remaining > 0
+
+                Dim ExtentIndex = FindExtentIndex(CurrentLogical)
+                If ExtentIndex < 0 Then Throw New InvalidDataException($"No extent found for logical offset {CurrentLogical}.")
+
+                Dim Extent = _Extents(ExtentIndex)
+                Dim OffsetInsideExtent = CInt(CurrentLogical - Extent.LogicalOffset)
+                Dim CopyLength = Math.Min(Remaining, Extent.LogicalLength - OffsetInsideExtent)
+
+                Slices.Add(New ReadSlice With {
+                    .PhysicalRecordId = Extent.PhysicalRecordId,
+                    .SourceOffset = Extent.PhysicalRecordOffset + OffsetInsideExtent,
+                    .OutputOffset = CurrentOutput,
+                    .Count = CopyLength})
+
+                CurrentLogical += CopyLength
+                CurrentOutput += CopyLength
+                Remaining -= CopyLength
+
+            End While
+
+            Dim StoredById As New Dictionary(Of Long, Byte())()
+            Dim PlainById As New Dictionary(Of Long, Byte())()
+
+            For Each Slice In Slices
+
+                If Slice.PhysicalRecordId = SparsePhysicalRecordId Then Continue For
+                If StoredById.ContainsKey(Slice.PhysicalRecordId) Then Continue For
+
+                Dim Record = GetPhysicalRecord(Slice.PhysicalRecordId)
+
+                If Record.PhysicalOffset < DataStartOffset OrElse
+                   Record.PhysicalLength < MinChunkRecordSize OrElse
+                   Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then
+                    Throw New InvalidDataException($"Invalid physical record {Slice.PhysicalRecordId}.")
+                End If
+
+                Dim Stored(Record.PhysicalLength - 1) As Byte
+                ReadAt(Record.PhysicalOffset, Stored, 0, Stored.Length)
+
+                StoredById(Slice.PhysicalRecordId) = Stored
+                PlainById(Slice.PhysicalRecordId) = New Byte(Record.PlainLength - 1) {}
+
+            Next
+
+            If StoredById.Count > 0 Then
+
+                Dim RecordIds As New List(Of Long)(StoredById.Keys)
+                Dim LoopOptions As New Tasks.ParallelOptions With {
+                    .MaxDegreeOfParallelism = Math.Max(1, Options.MaxCryptoParallelism)}
+
+                Try
+                    Tasks.Parallel.ForEach(RecordIds, LoopOptions,
+                        Function() CreateChunkCipher(),
+                        Function(RecordId, LoopState, Cipher)
+                            DecryptPhysicalRecord(RecordId, StoredById(RecordId), PlainById(RecordId), Cipher)
+                            Return Cipher
+                        End Function,
+                        Sub(Cipher)
+                            If Cipher IsNot Nothing Then Cipher.Dispose()
+                        End Sub)
+                Catch ex As AggregateException When ex.InnerExceptions.Count > 0
+                    Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerExceptions(0)).Throw()
+                End Try
+
+            End If
+
+            For Each Slice In Slices
+
+                If Slice.PhysicalRecordId = SparsePhysicalRecordId Then
+                    Array.Clear(Output, Slice.OutputOffset, Slice.Count)
+                    Continue For
+                End If
+
+                Dim Plain = PlainById(Slice.PhysicalRecordId)
+
+                If Slice.SourceOffset < 0 OrElse Slice.SourceOffset + Slice.Count > Plain.Length Then
+                    Throw New InvalidDataException($"Extent references beyond physical record {Slice.PhysicalRecordId}.")
+                End If
+
+                Buffer.BlockCopy(Plain, Slice.SourceOffset, Output, Slice.OutputOffset, Slice.Count)
+
+            Next
+
+        End Sub
+
+        '
         ' Async twin of the range-read ReadCore. Mirrors it exactly; only ReadExtentBytes
         ' becomes awaited. Assumes the state lock is held (like the synchronous Core).
         '
@@ -2517,6 +2625,17 @@ Namespace Streams
             End If
 
             Dim ToRead = CInt(Math.Min(CLng(EffectiveCount), _Length - LogicalOffset))
+
+            If ShouldReadRangeInParallel(ToRead) Then
+                '
+                ' The parallel decrypt is pure CPU but its backing-store reads are
+                ' synchronous, so run the whole thing on the pool rather than blocking the
+                ' awaiting thread. The state lock is still held by this frame throughout.
+                '
+                Await Tasks.Task.Run(Sub() ReadRangeInParallel(LogicalOffset, Output, OutputOffset, ToRead)).ConfigureAwait(False)
+                Return ToRead
+            End If
+
             Dim Remaining = ToRead
             Dim CurrentLogicalOffset = LogicalOffset
             Dim CurrentOutputOffset = OutputOffset
@@ -3869,8 +3988,7 @@ Namespace Streams
 
                 _Disposed = True
 
-                If _ChunkCipherTransform IsNot Nothing Then _ChunkCipherTransform.Dispose()
-                _AesProvider.Dispose()
+                If _ChunkCipher IsNot Nothing Then _ChunkCipher.Dispose()
                 _Rng.Dispose()
 
             End Try

@@ -6,6 +6,33 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ## 2026-09-03
 
+### Re-entrant chunk crypto + parallel bulk read — DONE
+Deferred item 3 from the async plan.
+
+**Re-entrancy.** All AES-CTR state — the AES-ECB transform and the keystream scratch buffers —
+moved off `ChunkedStream` instance fields (`_Counter`, `_CtrCounterScratch`,
+`_CtrKeyStreamScratch`, `_ChunkCipherTransform`, `_AesProvider` all removed) onto a new
+`ChunkCipher` class. `ChunkCipher.Crypt(counter, counterOffset, in, inOff, count, out, outOff)`
+takes the counter per call and holds no shared state, so any number can run at once. The
+serial path keeps one cached `_ChunkCipher` (rebuilt only on a key change); parallel workers
+take their own via `CreateChunkCipher`. `DecryptPhysicalRecord` gained an optional `Cipher`.
+Keystream byte-for-byte unchanged (existing encrypted files still read; the encryption /
+reopen / migration / defrag suite is the proof). The dead `_Counter`-advance after each
+`CryptPayload` was dropped (it was only ever called once per record).
+
+**Parallel bulk read.** A synchronous read spanning ≥ 8 chunks now authenticates, decrypts and
+decompresses its distinct physical records on `Parallel.ForEach` (one `ChunkCipher` per
+partition via `localInit`/`localFinally`), capped at `Options.MaxCryptoParallelism` (default
+`Environment.ProcessorCount`; 1 = fully serial). Only the per-chunk CPU is threaded — the
+backing-store reads and the copy into the caller's buffer stay serial, and the workers touch
+only immutable state (`_ChunkMacKey`, `_ChunkEncryptionKey`) plus their own buffers. A
+`Parallel.ForEach` `AggregateException` is unwrapped (`ExceptionDispatchInfo`) so a corrupt
+chunk still surfaces its `CryptographicException`. The async read path runs the whole parallel
+block on `Task.Run` so the awaiting thread is not blocked. Tests +1 (`Encryption.vb`);
+suite 290 → 291.
+
+**Still open:** parallel per-chunk *write* — see TODO.
+
 ### D6 — cache-coherence invariant + drift producer — DONE
 The `_PhysicalDataEnd` half-fix from the defrag work is now complete.
 

@@ -799,9 +799,10 @@ Namespace Streams
             StoredRecord(ChunkCompressionEvaluatedPercentOffset) =
                 CompressionEvaluatedPercent
 
-            _Rng.GetBytes(_Counter)
+            Dim Iv(IvSize - 1) As Byte
+            _Rng.GetBytes(Iv)
 
-            Buffer.BlockCopy(_Counter,
+            Buffer.BlockCopy(Iv,
                              0,
                              StoredRecord,
                              ChunkRecordIvOffset,
@@ -821,16 +822,18 @@ Namespace Streams
 
                 Case ChunkEncryptionMethods.AesCtrFileMasterKey
 
-                    If _ChunkEncryptionKey Is Nothing Then
+                    If _ChunkEncryptionKey Is Nothing OrElse _ChunkCipher Is Nothing Then
                         Throw New EncryptionMismatchException(
                             "Encryption is enabled but no file master key is available.")
                     End If
 
-                    CryptPayload(Payload,
-                                 0,
-                                 PayloadLength,
-                                 StoredRecord,
-                                 ChunkRecordDataOffset)
+                    _ChunkCipher.Crypt(Iv,
+                                       0,
+                                       Payload,
+                                       0,
+                                       PayloadLength,
+                                       StoredRecord,
+                                       ChunkRecordDataOffset)
 
                 Case Else
 

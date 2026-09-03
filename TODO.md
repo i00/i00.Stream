@@ -166,12 +166,13 @@ not a flat-index location. Rename: `_IndexOffset` → `_MetadataBoundary` (or `_
 
 ### AES-CTR is interop-bound — DONE (see DONE.md)
 ### Compression always runs even when the result is discarded — DONE (`Options.CompressionEvaluation`, see DONE.md)
-
-### Re-entrant chunk crypto → parallelism
-The AES-CTR keystream scratch (`_CtrCounterScratch` / `_CtrKeyStreamScratch` / the cached
-`_ChunkCipherTransform`) and `_Counter` are still per-instance and serialised by the state
-lock. Moving them into per-call / pooled state would unblock both parallel per-chunk
-compress+encrypt for bulk operations and the lock-free parallel-reads item above.
+### Re-entrant chunk crypto → parallelism — DONE (see DONE.md)
+All AES-CTR state moved onto a per-`ChunkCipher` instance; large reads authenticate / decrypt /
+decompress on a worker pool (`Options.MaxCryptoParallelism`). **Still open under this heading:**
+parallel per-chunk *write* (`BuildExtentsFromBuffer` → `WritePhysicalRecordWithPolicy`) — the
+compress+encrypt+MAC is now re-entrant, but `WritePhysicalRecordWithPolicy` still interleaves
+it with allocation / dedup / index updates, so it needs splitting into a pure "build the record
+bytes" phase (parallelisable) and a serial "place it" phase.
 
 ---
 

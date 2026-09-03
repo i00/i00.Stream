@@ -378,6 +378,15 @@ Namespace Streams
             Public Property UseChunkReadCache As Boolean = True
 
             ''' <summary>
+            ''' Maximum worker threads a single large synchronous read may use to authenticate,
+            ''' decrypt and decompress chunks in parallel. Defaults to the processor count; set
+            ''' to 1 to keep chunk cryptography fully serial. Only reads spanning several chunks
+            ''' parallelise, and only the per-chunk CPU work is threaded - the backing-store
+            ''' reads and the copy into the caller's buffer stay serial.
+            ''' </summary>
+            Public Property MaxCryptoParallelism As Integer = Environment.ProcessorCount
+
+            ''' <summary>
             ''' When True, an operation that faults the stream part-way through - leaving its
             ''' in-memory extent, physical-record or anchor state half-applied - triggers an
             ''' automatic reload of the whole in-memory image from the backing stream (the

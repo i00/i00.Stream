@@ -387,6 +387,75 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Verifies that a large read decrypted / decompressed on the worker pool
+            ''' (Options.MaxCryptoParallelism > 1) returns exactly the same bytes as the fully
+            ''' serial path, and that a corrupt chunk still surfaces its CryptographicException
+            ''' rather than an AggregateException.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ParallelChunkCryptoMatchesSerialAndSurfacesCorruption()
+
+                Dim Expected As Byte()
+
+                Using SerialMs As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(2301)),
+                        .MaxCryptoParallelism = 1
+                    }
+
+                    Using Cs = ChunkedStream.Open(SerialMs, Options)
+                        Expected = GeneratePartiallyCompressibleData(0.7R, Cs.Options.ChunkSize, 40, 2302)
+                        Cs.Write(0, Expected)
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Serial read did not round-trip.")
+                    End Using
+                End Using
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(2301)),
+                        .MaxCryptoParallelism = 8
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, Expected)
+
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Parallel read did not match the serial result.")
+
+                        Dim RangeStart = Cs.Options.ChunkSize \ 2
+                        Dim RangeLength = Expected.Length - Cs.Options.ChunkSize
+                        Dim ExpectedRange(RangeLength - 1) As Byte
+                        Array.Copy(Expected, RangeStart, ExpectedRange, 0, RangeLength)
+                        AssertBytesEqual(ExpectedRange, Cs.ToArray(RangeStart, RangeLength), "Parallel ranged read did not match.")
+
+                        Cs.Validate().ThrowIfErrors()
+
+                        ' Corrupt one chunk's MAC and confirm the exception is not wrapped.
+                        Dim Chunk =
+                            Cs.GetStructure().Chunks.
+                               First(Function(item) item.PhysicalOffset.HasValue AndAlso item.LogicalOffset = Cs.Options.ChunkSize * 10)
+
+                        Dim MacOffset = Chunk.PhysicalOffset.Value + Chunk.PhysicalLength.Value - ChunkedStream.MacSize
+                        Ms.Position = MacOffset
+                        Dim OriginalByte = Ms.ReadByte()
+                        Ms.Position = MacOffset
+                        Ms.WriteByte(CByte(OriginalByte Xor &HFF))
+
+                        AssertThrows(Of Security.Cryptography.CryptographicException)(
+                            Sub() Cs.ToArray(),
+                            "A corrupt chunk should surface a CryptographicException from the parallel read.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

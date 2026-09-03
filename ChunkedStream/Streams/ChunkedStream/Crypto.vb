@@ -258,7 +258,7 @@ Namespace Streams
             If _FileMasterKey Is Nothing Then
                 _ChunkEncryptionKey = Nothing
                 _ChunkMacKey = Nothing
-                RebuildChunkCipherTransform()
+                RebuildChunkCipher()
                 Return
             End If
 
@@ -267,28 +267,103 @@ Namespace Streams
             _ChunkEncryptionKey = DeriveKey(_FileMasterKey, FileSalt, KeyPurpose.Enc)
             _ChunkMacKey = DeriveKey(_FileMasterKey, FileSalt, KeyPurpose.Mac)
 
-            RebuildChunkCipherTransform()
+            RebuildChunkCipher()
 
         End Sub
 
         '
-        ' Rebuilds the cached AES-ECB encryptor for the current _ChunkEncryptionKey. Called
-        ' only when the chunk encryption key changes, so CryptPayload never sets Aes.Key or
-        ' allocates a transform per call.
+        ' Rebuilds the shared serial-path ChunkCipher for the current _ChunkEncryptionKey.
+        ' Called only when the chunk encryption key changes.
         '
-        Private Sub RebuildChunkCipherTransform()
+        Private Sub RebuildChunkCipher()
 
-            If _ChunkCipherTransform IsNot Nothing Then
-                _ChunkCipherTransform.Dispose()
-                _ChunkCipherTransform = Nothing
+            If _ChunkCipher IsNot Nothing Then
+                _ChunkCipher.Dispose()
+                _ChunkCipher = Nothing
             End If
 
-            If _ChunkEncryptionKey Is Nothing Then Return
-
-            _AesProvider.Key = _ChunkEncryptionKey
-            _ChunkCipherTransform = _AesProvider.CreateEncryptor()
+            If _ChunkEncryptionKey IsNot Nothing Then
+                _ChunkCipher = New ChunkCipher(_ChunkEncryptionKey)
+            End If
 
         End Sub
+
+        '
+        ' A fresh ChunkCipher for the current chunk encryption key, for one worker thread of
+        ' a parallel bulk operation. Nothing when the stream is not encrypted. The caller
+        ' owns it and must Dispose it.
+        '
+        Private Function CreateChunkCipher() As ChunkCipher
+
+            If _ChunkEncryptionKey Is Nothing Then Return Nothing
+            Return New ChunkCipher(_ChunkEncryptionKey)
+
+        End Function
+
+        '
+        ' AES-CTR chunk cipher: an AES-ECB keystream generator plus the scratch buffers one
+        ' encrypt/decrypt call needs. All state is on the instance and none is shared, so
+        ' bulk operations decrypt or encrypt chunks on several threads at once by taking a
+        ' ChunkCipher each. Not itself thread-safe - one ChunkCipher per thread.
+        '
+        Private NotInheritable Class ChunkCipher
+            Implements IDisposable
+
+            Private ReadOnly _Aes As Aes
+            Private ReadOnly _Ecb As ICryptoTransform
+            Private _CounterBlocks As Byte()
+            Private _KeyStream As Byte()
+
+            Friend Sub New(EncryptionKey As Byte())
+                _Aes = Aes.Create()
+                _Aes.Mode = CipherMode.ECB
+                _Aes.Padding = PaddingMode.None
+                _Aes.Key = EncryptionKey
+                _Ecb = _Aes.CreateEncryptor()
+            End Sub
+
+            '
+            ' XORs the AES-CTR keystream, starting from the 16-byte counter at
+            ' Counter(CounterOffset), into Input and writes Count bytes to Output. The
+            ' counter buffer is not modified. The whole payload's keystream is one
+            ' TransformBlock over successive big-endian counter blocks - byte-for-byte
+            ' identical to a per-block AES-CTR, so records written either way still decrypt.
+            '
+            Friend Sub Crypt(Counter As Byte(), CounterOffset As Integer,
+                             Input As Byte(), InputOffset As Integer, Count As Integer,
+                             Output As Byte(), OutputOffset As Integer)
+
+                If Count <= 0 Then Return
+
+                Dim BlockCount = (Count + IvSize - 1) \ IvSize
+                Dim KeyStreamLength = BlockCount * IvSize
+
+                If _KeyStream Is Nothing OrElse _KeyStream.Length < KeyStreamLength Then
+                    _CounterBlocks = New Byte(KeyStreamLength - 1) {}
+                    _KeyStream = New Byte(KeyStreamLength - 1) {}
+                End If
+
+                Buffer.BlockCopy(Counter, CounterOffset, _CounterBlocks, 0, IvSize)
+
+                For BlockIndex = 1 To BlockCount - 1
+                    Buffer.BlockCopy(_CounterBlocks, (BlockIndex - 1) * IvSize, _CounterBlocks, BlockIndex * IvSize, IvSize)
+                    IncrementCounter(_CounterBlocks, BlockIndex * IvSize)
+                Next
+
+                _Ecb.TransformBlock(_CounterBlocks, 0, KeyStreamLength, _KeyStream, 0)
+
+                For Index = 0 To Count - 1
+                    Output(OutputOffset + Index) = CByte(Input(InputOffset + Index) Xor _KeyStream(Index))
+                Next
+
+            End Sub
+
+            Public Sub Dispose() Implements IDisposable.Dispose
+                _Ecb.Dispose()
+                _Aes.Dispose()
+            End Sub
+
+        End Class
 
         Private Function GetHeaderFileSalt() As Byte()
 
@@ -400,54 +475,6 @@ Namespace Streams
 
         End Function
 
-        '
-        ' AES-CTR over the cached AES-ECB transform. The keystream for the whole payload is
-        ' produced by one TransformBlock over a buffer of successive big-endian counter
-        ' blocks, then XORed into the output. Byte-for-byte identical to the previous
-        ' per-block implementation, so existing encrypted records still decrypt.
-        '
-        Private Sub CryptPayload(Input As Byte(),
-                                 InputOffset As Integer,
-                                 Count As Integer,
-                                 Output As Byte(),
-                                 OutputOffset As Integer)
-
-            If Count <= 0 Then Return
-
-            If _ChunkCipherTransform Is Nothing Then
-                Throw New EncryptionMismatchException("Chunk encryption requested but no file master key is available.")
-            End If
-
-            Dim BlockCount = (Count + IvSize - 1) \ IvSize
-            Dim KeyStreamLength = BlockCount * IvSize
-
-            If _CtrKeyStreamScratch Is Nothing OrElse _CtrKeyStreamScratch.Length < KeyStreamLength Then
-                _CtrCounterScratch = New Byte(KeyStreamLength - 1) {}
-                _CtrKeyStreamScratch = New Byte(KeyStreamLength - 1) {}
-            End If
-
-            ' Block 0 is the current counter; each later block is the previous block + 1.
-            Buffer.BlockCopy(_Counter, 0, _CtrCounterScratch, 0, IvSize)
-
-            For BlockIndex = 1 To BlockCount - 1
-                Buffer.BlockCopy(_CtrCounterScratch, (BlockIndex - 1) * IvSize, _CtrCounterScratch, BlockIndex * IvSize, IvSize)
-                IncrementCounter(_CtrCounterScratch, BlockIndex * IvSize)
-            Next
-
-            _ChunkCipherTransform.TransformBlock(_CtrCounterScratch, 0, KeyStreamLength, _CtrKeyStreamScratch, 0)
-
-            For Index = 0 To Count - 1
-                Output(OutputOffset + Index) =
-                    CByte(Input(InputOffset + Index) Xor _CtrKeyStreamScratch(Index))
-            Next
-
-            ' Leave _Counter advanced by the blocks consumed, as the per-block loop did.
-            For BlockIndex = 0 To BlockCount - 1
-                IncrementCounter(_Counter)
-            Next
-
-        End Sub
-
         Private Function RemoveUnusedFileMasterKeyIfPossible() As Boolean
 
             If _CurrentWriteEncryptionEnabled Then Return False
@@ -462,7 +489,7 @@ Namespace Streams
             _FileMasterKey = Nothing
             _ChunkEncryptionKey = Nothing
             _ChunkMacKey = Nothing
-            RebuildChunkCipherTransform()
+            RebuildChunkCipher()
 
             Array.Clear(_Header, MasterKeyWrapAreaOffset, MasterKeyWrapAreaLength)
 
@@ -504,7 +531,13 @@ Namespace Streams
 
         End Function
 
-        Private Sub DecryptPhysicalRecord(ExpectedRecordId As Long, Record As Byte(), Plain As Byte())
+        '
+        ' Cipher lets a parallel bulk read pass its worker's own ChunkCipher; Nothing uses
+        ' the shared serial-path cipher. Everything else here (MAC check, decrypt, decompress)
+        ' reads only immutable state (_ChunkMacKey, _ChunkEncryptionKey) and is thread-safe.
+        '
+        Private Sub DecryptPhysicalRecord(ExpectedRecordId As Long, Record As Byte(), Plain As Byte(),
+                                          Optional Cipher As ChunkCipher = Nothing)
 
             If Record Is Nothing Then Throw New ArgumentNullException(NameOf(Record))
             If Plain Is Nothing Then Throw New ArgumentNullException(NameOf(Plain))
@@ -595,13 +628,13 @@ Namespace Streams
 
                 Case ChunkEncryptionMethods.AesCtrFileMasterKey
 
-                    If _ChunkEncryptionKey Is Nothing Then
+                    Dim EffectiveCipher = If(Cipher, _ChunkCipher)
+
+                    If _ChunkEncryptionKey Is Nothing OrElse EffectiveCipher Is Nothing Then
                         Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
                     End If
 
-                    Buffer.BlockCopy(Record, ChunkRecordIvOffset, _Counter, 0, IvSize)
-
-                    CryptPayload(Record, ChunkRecordDataOffset, PayloadLength, Payload, 0)
+                    EffectiveCipher.Crypt(Record, ChunkRecordIvOffset, Record, ChunkRecordDataOffset, PayloadLength, Payload, 0)
 
                 Case Else
 
