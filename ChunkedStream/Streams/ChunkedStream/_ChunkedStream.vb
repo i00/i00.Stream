@@ -1217,6 +1217,13 @@ Namespace Streams
         Private ReadOnly _LivePhysicalRecordIdsByOffset As New SortedList(Of Long, Long)
         Private ReadOnly _PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry)
         Private _PhysicalDataEnd As Long = DataStartOffset
+        '
+        ' Set when a record leaves the live set at (or beyond) the cached end - the end may
+        ' have dropped but recomputing it is O(records) and the reclaim is batched, so
+        ' GetDataEndFromIndex recomputes lazily before the value is next read. Growth
+        ' (a record added or resurrected) is applied directly and never sets this.
+        '
+        Private _PhysicalDataEndDirty As Boolean
         Private _NextPhysicalRecordId As Long = 1
         Private ReadOnly _PendingReclaimedPhysicalRecords As New HashSet(Of Long)()
 

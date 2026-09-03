@@ -992,6 +992,8 @@ Namespace Streams
 
         Private Function GetDataEndFromIndex() As Long
 
+            If _PhysicalDataEndDirty Then RecalculatePhysicalDataEnd()
+
             Return _PhysicalDataEnd
 
         End Function

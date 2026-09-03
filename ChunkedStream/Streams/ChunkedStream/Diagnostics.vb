@@ -31,6 +31,8 @@ Namespace Streams
             AnchorIndexMismatch
             ''' <summary>The logical length disagrees with the extent chain. Repaired by recomputing it.</summary>
             LogicalLengthMismatch
+            ''' <summary>An incrementally maintained cache (the physical-data end, the anchor-id allocator, the live physical-record offset index) disagrees with a fresh rebuild. Repaired by rebuilding the affected index.</summary>
+            CacheInconsistency
         End Enum
 
         ''' <summary>A contiguous span of the logical stream.</summary>
@@ -214,6 +216,8 @@ Namespace Streams
             Public LogicalLength As Long
             Public DataEnd As Long
             Public AnchorIndexCount As Integer
+            Public NextAnchorId As Long
+            Public LivePhysicalRecordOffsets As Dictionary(Of Long, Long)
             Public Extents As List(Of ExtentIndexEntry)
             Public PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry)
             Public StoredRecords As Dictionary(Of Long, Byte())
@@ -316,6 +320,8 @@ Namespace Streams
                 .LogicalLength = _Length,
                 .DataEnd = GetDataEndFromIndex(),
                 .AnchorIndexCount = _ExtentIndexesByAnchorId.Count,
+                .NextAnchorId = _NextAnchorId,
+                .LivePhysicalRecordOffsets = _LivePhysicalRecordIdsByOffset.ToDictionary(Function(pair) pair.Key, Function(pair) pair.Value),
                 .Extents = New List(Of ExtentIndexEntry)(_Extents),
                 .PhysicalRecords = New Dictionary(Of Long, PhysicalRecordEntry)(_PhysicalRecords),
                 .StoredRecords = New Dictionary(Of Long, Byte())(),
@@ -369,6 +375,7 @@ Namespace Streams
             CollectExtentProblems(Snapshot, Problems)
             CollectRefCountProblems(Snapshot, Problems)
             CollectAnchorProblems(Snapshot, Problems)
+            CollectCacheProblems(Snapshot, Problems)
             CollectPhysicalRecordProblems(Snapshot, Problems, ProgressCallback, ThreadingCancellationToken)
 
             Return Problems
@@ -477,6 +484,64 @@ Namespace Streams
             End If
 
         End Sub
+
+        '
+        ' Checks the incrementally maintained caches against a fresh rebuild: the
+        ' physical-data end (its drift caused the Defragment(Move) corruption incident), the
+        ' anchor-id allocator, and the live physical-record offset index.
+        '
+        Private Shared Sub CollectCacheProblems(Snapshot As DiagnosticsSnapshot, Problems As List(Of ValidationProblem))
+
+            Dim TrueDataEnd As Long = DataStartOffset
+            Dim HighestAnchorId As Long = 0
+            Dim TrueLiveOffsets As New Dictionary(Of Long, Long)()
+            Dim DuplicateLiveOffset = False
+
+            For Each Record In Snapshot.PhysicalRecords.Values
+                If Record.RefCount <= 0 Then Continue For
+                TrueDataEnd = Math.Max(TrueDataEnd, Record.PhysicalOffset + CLng(Record.PhysicalLength))
+                If TrueLiveOffsets.ContainsKey(Record.PhysicalOffset) Then
+                    DuplicateLiveOffset = True
+                Else
+                    TrueLiveOffsets.Add(Record.PhysicalOffset, Record.RecordId)
+                End If
+            Next
+
+            For Each Extent In Snapshot.Extents
+                If Extent.AnchorId > HighestAnchorId Then HighestAnchorId = Extent.AnchorId
+            Next
+
+            If Snapshot.DataEnd <> TrueDataEnd Then
+                Problems.Add(CacheProblem(
+                    $"The cached physical-data end is {Snapshot.DataEnd}; the live physical records end at {TrueDataEnd}."))
+            End If
+
+            If Snapshot.NextAnchorId <= HighestAnchorId Then
+                Problems.Add(CacheProblem(
+                    $"The next anchor id is {Snapshot.NextAnchorId} but anchor id {HighestAnchorId} is already in use."))
+            End If
+
+            If DuplicateLiveOffset = False AndAlso LiveOffsetIndexDiffers(Snapshot.LivePhysicalRecordOffsets, TrueLiveOffsets) Then
+                Problems.Add(CacheProblem(
+                    $"The live physical-record offset index holds {Snapshot.LivePhysicalRecordOffsets.Count} entries; {TrueLiveOffsets.Count} live records exist."))
+            End If
+
+        End Sub
+
+        Private Shared Function CacheProblem(Message As String) As ValidationProblem
+            Return New ValidationProblem(ValidationSeverity.Warning, ValidationProblemKind.CacheInconsistency,
+                                         Message, Nothing, Nothing, CanRepair:=True, RepairIsLossy:=False)
+        End Function
+
+        Private Shared Function LiveOffsetIndexDiffers(Cached As Dictionary(Of Long, Long),
+                                                       Rebuilt As Dictionary(Of Long, Long)) As Boolean
+            If Cached.Count <> Rebuilt.Count Then Return True
+            For Each Pair In Rebuilt
+                Dim CachedRecordId As Long
+                If Cached.TryGetValue(Pair.Key, CachedRecordId) = False OrElse CachedRecordId <> Pair.Value Then Return True
+            Next
+            Return False
+        End Function
 
         Private Sub CollectPhysicalRecordProblems(Snapshot As DiagnosticsSnapshot,
                                                   Problems As List(Of ValidationProblem),

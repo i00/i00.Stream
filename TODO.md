@@ -91,27 +91,21 @@ real run, and the sample `Defrag()` callback calls `GetStructure()` (~160 ms) ev
 **Fix:** batch K mutually-disjoint moves under one journal + one publish; compute
 `GetFragmentation()` every N moves. Lower priority now the real-file problem is solved.
 
-### D6 — assert the cached `_PhysicalDataEnd`
-Partly done (see DONE 2026-09-02): `_PhysicalDataEnd` now counts only `RefCount > 0` records,
-`DefragmentCore` / `TrimAndCommitDefragMetadata` recompute it before trusting it, and a failed
-defragment / ApplyOptions faults the stream. **Still open:** add a `ValidationProblem` (Warning
-kind, non-lossy repair) for `_PhysicalDataEnd <> RecalculatePhysicalDataEnd()`,
-`_NextAnchorId <= max anchor id` and `_LivePhysicalRecordIdsByOffset` disagreeing with a fresh
-rebuild — `CollectValidationProblems` in `Diagnostics.vb` is the home now, and
-`ExecuteRepairCore` already recomputes all three, so the repair side is a no-op wiring job. The
-drift originates in the conditional-recompute branch of `UpdatePhysicalRecordLocationIndexes`
-(a stale-high value once set is never brought back down by ordinary edits); find and fix that
-producer too.
+### D6 — assert the cached `_PhysicalDataEnd` — DONE (see DONE 2026-09-03)
+`_PhysicalDataEnd` counts `RefCount > 0` records only; defrag recomputes before trusting it;
+a failed defrag / ApplyOptions faults; `Validate()` now reports a `CacheInconsistency` problem
+(non-lossy repair) for `_PhysicalDataEnd`, `_NextAnchorId` and `_LivePhysicalRecordIdsByOffset`
+drift; and the producer (`DecrementPhysicalRecordRefCount` not shrinking the end when a record
+leaves the live set inside a checkpoint) is fixed with a `_PhysicalDataEndDirty` flag +
+lazy recompute in `GetDataEndFromIndex`.
 
 ### Repair — second-phase items
-Follow-ups to the 2026-09-03 corruption/repair work:
+Follow-up to the 2026-09-03 corruption/repair work:
 - Deep salvage when the extent *pages* are lost on both header copies: MAC-scan the data area
   for physical records by id and hand back their raw contents. Logical layout + anchor ids are
   unrecoverable (physical records carry no logical position), so this is a last-resort
   "recover N MB of chunk data" path, not a rebuild. Only build it if a real incident loses
   both roots — the dual-header + append-only design is meant to prevent exactly that.
-- Strengthen the ~7 `Validation.vb` corruption tests to assert the specific `ValidationProblem`
-  kind rather than just that `ThrowIfErrors` throws.
 
 ### S3 — hand-rolled key wrap hygiene
 File master key is wrapped as `FMK XOR HMAC-SHA256(userKey, wrapSalt)` with the *same* value

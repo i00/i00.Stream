@@ -104,6 +104,13 @@ Namespace Streams
                         RecomputeLength = True
                         Repaired.Add(Problem)
 
+                    Case ValidationProblemKind.CacheInconsistency
+                        ' RebuildAnchorIndex bumps _NextAnchorId past every anchor in use;
+                        ' the RebuildPhysicalRecordOrdinals + RecalculatePhysicalDataEnd in
+                        ' the tail fixes the physical-data end and the live-offset index.
+                        RebuildAnchors = True
+                        Repaired.Add(Problem)
+
                     Case Else
                         Skipped.Add(New RepairSkip(Problem, "This kind of problem cannot be repaired automatically."))
 

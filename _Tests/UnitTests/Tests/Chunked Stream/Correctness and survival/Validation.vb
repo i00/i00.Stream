@@ -287,10 +287,14 @@ Namespace Tests
                         Ms.Position = Chunk.PhysicalOffset.Value + 50
                         Ms.WriteByte(CByte(OriginalByte Xor &HFF))
 
-                        AssertThrows(Of Exception)(
-                            Sub()
-                                Cs.Validate().ThrowIfErrors()
-                            End Sub,
+                        Dim Report = Cs.Validate()
+
+                        AssertTrue(
+                            Report.Errors.Any(Function(problem) problem.Kind = ChunkedStream.ValidationProblemKind.PhysicalRecordUnreadable),
+                            "Corrupted chunk data should be reported as an unreadable physical record.")
+
+                        AssertThrows(Of ChunkedStream.ValidationException)(
+                            Sub() Report.ThrowIfErrors(),
                             "Validation should fail for corrupted chunk data.")
 
                     End Using
@@ -330,10 +334,14 @@ Namespace Tests
                         Ms.Position = Chunk.PhysicalOffset.Value
                         Ms.WriteByte(CByte(Original(0) Xor &HFF))
 
+                        Dim Report = Cs.Validate()
+
+                        AssertTrue(
+                            Report.Errors.Any(Function(problem) problem.Kind = ChunkedStream.ValidationProblemKind.PhysicalRecordUnreadable),
+                            "A corrupted stored record id should be reported as an unreadable physical record.")
+
                         AssertThrows(Of ChunkedStream.ValidationException)(
-                            Sub()
-                                Cs.Validate().ThrowIfErrors()
-                            End Sub,
+                            Sub() Report.ThrowIfErrors(),
                             "Validation should fail when the stored physical-record id is corrupted.")
 
                     End Using
@@ -511,10 +519,14 @@ Namespace Tests
                             ChunkedStream.ChunkFlagsOffset,
                             &H7FFFFFFF)
 
+                        Dim Report = Cs.Validate()
+
+                        AssertTrue(
+                            Report.Errors.Any(Function(problem) problem.Kind = ChunkedStream.ValidationProblemKind.PhysicalRecordUnreadable),
+                            "Unsupported chunk flags should be reported as an unreadable physical record.")
+
                         AssertThrows(Of ChunkedStream.ValidationException)(
-                            Sub()
-                                Cs.Validate().ThrowIfErrors()
-                            End Sub,
+                            Sub() Report.ThrowIfErrors(),
                             "Validation should fail when unsupported chunk flags are present.")
 
                     End Using
@@ -559,10 +571,14 @@ Namespace Tests
                             ChunkedStream.ChunkCompressionEvaluatedPercentOffset,
                             255)
 
+                        Dim Report = Cs.Validate()
+
+                        AssertTrue(
+                            Report.Errors.Any(Function(problem) problem.Kind = ChunkedStream.ValidationProblemKind.PhysicalRecordUnreadable),
+                            "An out-of-range compression-evaluated percent should be reported as an unreadable physical record.")
+
                         AssertThrows(Of ChunkedStream.ValidationException)(
-                            Sub()
-                                Cs.Validate().ThrowIfErrors()
-                            End Sub,
+                            Sub() Report.ThrowIfErrors(),
                             "Validation should fail when compression evaluated percent exceeds 100.")
 
                     End Using
@@ -603,10 +619,15 @@ Namespace Tests
 
                         Cs.Debug_CorruptPhysicalRecordMetadataRefCount(SharedRecord.Key.Value, 12345)
 
+                        Dim Report = Cs.Validate()
+
+                        AssertTrue(
+                            Report.Errors.Any(Function(problem) problem.Kind = ChunkedStream.ValidationProblemKind.RefCountMismatch AndAlso
+                                                                problem.PhysicalRecordId.GetValueOrDefault() = SharedRecord.Key.Value),
+                            "The drifted reference count should be reported against its record.")
+
                         AssertThrows(Of ChunkedStream.ValidationException)(
-                            Sub()
-                                Cs.Validate().ThrowIfErrors()
-                            End Sub,
+                            Sub() Report.ThrowIfErrors(),
                             "Validation should fail when stored metadata refcounts do not match extent usage.")
 
                     End Using
@@ -821,6 +842,133 @@ Namespace Tests
 
                         Cs.Validate().ThrowIfErrors()
 
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ' ================================================================================
+            ' Cache-coherence invariants (D6)
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Verifies that a cached physical-data end that has silently drifted (no producer
+            ''' flagged it stale) is reported as a <see cref="ChunkedStream.ValidationProblemKind.CacheInconsistency" />
+            ''' and reconciled by a non-lossy repair.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ValidateReportsAndRepairsADriftedPhysicalDataEndCache()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Expected As Byte()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Expected = GenerateRandomData(Cs.Options.ChunkSize * 6, 4400)
+                        Cs.Write(0, Expected)
+
+                        Cs.Debug_CorruptCachedPhysicalDataEnd(Ms.Length + 4_000_000)
+
+                        Dim Report = Cs.Validate()
+
+                        Dim Problem =
+                            Report.Warnings.Single(Function(item) item.Kind = ChunkedStream.ValidationProblemKind.CacheInconsistency)
+                        AssertTrue(Problem.CanRepair AndAlso Problem.RepairIsLossy = False, "A cache drift is a non-lossy repair.")
+
+                        Dim Outcome = Report.Repair()
+                        AssertEqual(1, Outcome.Repaired.Count, "The cache problem should have been repaired.")
+                        AssertEqual(0L, Outcome.BytesZeroed, "Reconciling a cache discards no data.")
+
+                        Cs.Validate().ThrowIfErrors()
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Repair changed the logical data.")
+
+                    End Using
+
+                    Ms.Position = 0
+                    Using Reopened = ChunkedStream.Open(Ms)
+                        Reopened.Validate().ThrowIfErrors()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that a next-anchor-id allocator that has fallen behind an id already in
+            ''' use is reported and repaired, and that anchor creation is safe afterwards.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ValidateReportsAndRepairsAStaleNextAnchorId()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * 3, 4410))
+                        Dim ExistingAnchor = Cs.CreateAnchor(Cs.Options.ChunkSize).AnchorId
+
+                        Cs.Debug_CorruptNextAnchorId(1)
+
+                        Dim Report = Cs.Validate()
+                        AssertTrue(
+                            Report.Warnings.Any(Function(problem) problem.Kind = ChunkedStream.ValidationProblemKind.CacheInconsistency),
+                            "A stale next-anchor-id should be a cache-inconsistency warning.")
+
+                        Report.Repair()
+
+                        Cs.Validate().ThrowIfErrors()
+
+                        Dim NewAnchor = Cs.CreateAnchor(Cs.Options.ChunkSize * 2).AnchorId
+                        AssertTrue(NewAnchor <> ExistingAnchor, "A repaired allocator must not re-issue an id in use.")
+                        Cs.Validate().ThrowIfErrors()
+
+                    End Using
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies the drift producer is fixed: removing the trailing chunk inside a
+            ''' checkpoint (where the reclaim, and its recompute, are held until commit) flags the
+            ''' cached physical-data end stale rather than leaving it silently wrong, and the next
+            ''' read recomputes it before any consumer sees the stale value.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub RemovingTheTrailingChunkInACheckpointFlagsThePhysicalDataEndStale()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Dim ChunkSize = Cs.Options.ChunkSize
+                        Cs.Write(0, GenerateRandomData(ChunkSize * 8, 4420))
+
+                        Dim EndBefore = Cs.Debug_GetCachedPhysicalDataEnd()
+
+                        Using Checkpoint = Cs.CreateCheckpoint()
+
+                            Cs.Remove(ChunkSize * 7, ChunkSize)
+
+                            AssertTrue(Cs.Debug_PhysicalDataEndIsStale(), "Removing the trailing record should flag the cached end stale.")
+                            AssertEqual(EndBefore, Cs.Debug_GetCachedPhysicalDataEnd(), "The reclaim (and its recompute) is held until commit, so the raw value is unchanged for now.")
+
+                            Dim LiveEnd = Cs.GetStructure().LiveDataEndOffset
+
+                            AssertTrue(Cs.Debug_PhysicalDataEndIsStale() = False, "Reading the end should have recomputed it.")
+                            AssertTrue(Cs.Debug_GetCachedPhysicalDataEnd() < EndBefore, "The recomputed end should be lower.")
+                            AssertEqual(LiveEnd, Cs.Debug_GetCachedPhysicalDataEnd(), "GetStructure and the cache should agree.")
+
+                            Checkpoint.Commit()
+
+                        End Using
+
+                        Cs.Validate().ThrowIfErrors()
+
+                    End Using
+
+                    Ms.Position = 0
+                    Using Reopened = ChunkedStream.Open(Ms)
+                        Reopened.Validate().ThrowIfErrors()
                     End Using
 
                 End Using

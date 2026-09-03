@@ -111,6 +111,10 @@ Namespace Streams
 
             If WasUnreferenced Then
                 AddLivePhysicalRecordOffset(Record)
+                ' A resurrected record re-enters the live set - grow the cached end to
+                ' cover it, mirroring AddPhysicalRecordToIndexes.
+                _PhysicalDataEnd = Math.Max(_PhysicalDataEnd,
+                                            Record.PhysicalOffset + CLng(Record.PhysicalLength))
             End If
 
             MarkPhysicalRecordDirty(RecordId)
@@ -223,6 +227,17 @@ Namespace Streams
             MarkPhysicalRecordDirty(RecordId)
 
             If Record.RefCount <> 0 Then Return
+
+            '
+            ' The record has left the live set. If it was at (or beyond) the cached
+            ' physical-data end that end may now be lower - flag it stale so
+            ' GetDataEndFromIndex recomputes before anything (a metadata publish's root
+            ' offset, a diagnostics snapshot) reads it. Doing the O(records) recompute here,
+            ' per decrement, would undo the batched-reclaim speed-up.
+            '
+            If Record.PhysicalOffset + CLng(Record.PhysicalLength) >= _PhysicalDataEnd Then
+                _PhysicalDataEndDirty = True
+            End If
 
             '
             ' In Scan mode the decision to reclaim is not taken from this counter -
@@ -513,6 +528,7 @@ Namespace Streams
             Next
 
             _PhysicalDataEnd = DataEnd
+            _PhysicalDataEndDirty = False
 
         End Sub
 
@@ -523,6 +539,7 @@ Namespace Streams
             _LivePhysicalRecordIdsByOffset.Clear()
 
             _PhysicalDataEnd = DataStartOffset
+            _PhysicalDataEndDirty = False
 
             '
             ' Ordinal order is ascending record id. Sort the ids (a primitive in-place

@@ -28,6 +28,30 @@
 
         End Sub
 
+        ''' <summary>Reads the raw cached physical-data end without the lazy recompute in GetDataEndFromIndex.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_GetCachedPhysicalDataEnd() As Long
+
+            Return _PhysicalDataEnd
+
+        End Function
+
+        ''' <summary>True when a record has left the live set at the end and the cached data end has not yet been recomputed.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_PhysicalDataEndIsStale() As Boolean
+
+            Return _PhysicalDataEndDirty
+
+        End Function
+
+        ''' <summary>Drives the next-anchor-id allocator backwards, so the next CreateAnchor would collide with an id in use.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Sub Debug_CorruptNextAnchorId(Value As Long)
+
+            _NextAnchorId = Value
+
+        End Sub
+
         ''' <summary>
         ''' Patches every on-disk header copy's index-offset field to <paramref name="NewValue" />
         ''' and refreshes its MAC, leaving a structurally valid header that carries a stale

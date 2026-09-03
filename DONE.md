@@ -6,6 +6,30 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ## 2026-09-03
 
+### D6 — cache-coherence invariant + drift producer — DONE
+The `_PhysicalDataEnd` half-fix from the defrag work is now complete.
+
+**Detection.** `Validate()` reports a `ValidationProblemKind.CacheInconsistency` (Warning,
+non-lossy repair) when any incrementally maintained cache disagrees with a fresh rebuild:
+the physical-data end vs the live records, `_NextAnchorId` vs the highest anchor id in use,
+and `_LivePhysicalRecordIdsByOffset` vs a rebuild. `Repair` fixes it via `RebuildAnchorIndex`
++ the `RebuildPhysicalRecordOrdinals` / `RecalculatePhysicalDataEnd` it already runs.
+`DiagnosticsSnapshot` gained `NextAnchorId` and `LivePhysicalRecordOffsets`.
+
+**Producer.** `DecrementPhysicalRecordRefCount` never lowered `_PhysicalDataEnd` when a
+record left the live set — fine for non-checkpoint edits (the batched reclaim recomputes at
+the end) and for checkpoint commit (it reclaims before the persist), but inside an open
+checkpoint the cache stayed stale-high until commit, so a mid-checkpoint metadata read (or a
+concurrent `GetStructure`) saw a value above the real data. Now: `DecrementPhysicalRecordRefCount`
+sets a `_PhysicalDataEndDirty` flag when a record at (or beyond) the end dies, and
+`GetDataEndFromIndex` does the O(records) `RecalculatePhysicalDataEnd` lazily before the value
+is next read (doing it per-decrement would undo the batched-reclaim speed-up).
+`IncrementPhysicalRecordRefCount` grows the end directly for a resurrected record.
+
+New seams `Debug_GetCachedPhysicalDataEnd`, `Debug_PhysicalDataEndIsStale`,
+`Debug_CorruptNextAnchorId`. Tests +3 (`Validation.vb`); the 5 remaining `Validation.vb`
+corruption tests now assert the specific `ValidationProblem.Kind`. Suite 287 → 290.
+
 ### Corruption tolerance + `chkdsk`-style repair — DONE
 Built out from the `Defragment(Move)` corruption incident. Five layers:
 
