@@ -547,6 +547,7 @@ Partial Class EmbeddedFileSystemBrowserForm
         'tsiSearch
         '
         Me.tsiSearch.Alignment = System.Windows.Forms.ToolStripItemAlignment.Right
+        Me.tsiSearch.Font = New System.Drawing.Font("Segoe UI", 9.0!)
         Me.tsiSearch.Name = "tsiSearch"
         Me.tsiSearch.Size = New System.Drawing.Size(100, 25)
         '

@@ -163,13 +163,6 @@ Namespace Streams
             ''' <summary>The <see cref="ValidationSeverity.Warning" />-severity problems.</summary>
             Public ReadOnly Property Warnings As IReadOnlyList(Of ValidationProblem)
 
-            ''' <summary>True when no problems were found.</summary>
-            Public ReadOnly Property IsValid As Boolean
-                Get
-                    Return Problems.Count = 0
-                End Get
-            End Property
-
             ''' <summary>True when at least one <see cref="ValidationSeverity.[Error]" />-severity problem was found.</summary>
             Public ReadOnly Property HasErrors As Boolean
                 Get

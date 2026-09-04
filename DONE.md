@@ -6,6 +6,65 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ## 2026-09-04
 
+### `EmbeddedFileSystem.Mark` crashed when a problem range hit a directory's own content list — DONE
+`MarkCorrupt` called `ReadEntries` on every directory with no guard. When a validation problem
+range (or an EFS-level structural break) landed inside a directory's *own* content-list record,
+`ReadEntries` threw (`CryptographicException` / `InvalidDataException` / `EndOfStreamException`)
+mid-walk: `Mark` aborted, the `DeferPublish` rolled back every mark made so far, and the
+`Validate → Mark → Repair` path then zero-filled the directory record with nothing recorded.
+
+Fix (`EmbeddedFileSystem.vb`):
+- New `EntryTypes.CorruptDirectory` (= 5) — a directory whose content list intersects, or is
+  unreadable because of, a validation problem. Distinct from `CorruptData` (a file whose *data*
+  is unreadable but whose metadata is intact). `CorruptEntryMark` gained `IsDirectory`.
+- `MarkCorrupt` split into `MarkCorruptChildDirectory` / `MarkCorruptChildFile`. Before
+  descending into a child directory it checks the child record's extent
+  (`LengthOfDataAtEntry`, floored at the header size) against the problem ranges; on overlap it
+  flags the entry `CorruptDirectory`, records a mark and does **not** descend. The descent
+  itself is also wrapped, so an EFS-structural parse failure the chunk-stream validator never
+  saw still degrades instead of aborting. An unreadable **root** content list is reported as a
+  `"\"` mark (nothing to re-type). `Mark` still throws only for faults a repair cannot address
+  (e.g. a missing file master key — `EncryptionMismatchException` is deliberately not caught).
+- `RecoverPendingFiles` / `CollectPendingCandidates` sweep `CorruptDirectory` too: `Remove`
+  (via a new `DeleteCore` branch — drop the entry, reclaim the directory record's own span) and
+  `List`; `Finalize` is a skip (nothing to promote). `PendingFileRecoveryCandidate` carries
+  `ParentDirectoryAnchorId` so a corrupt directory is re-located through its parent's content
+  list, not its own (possibly unreadable) header.
+- Tests +2 (`EmbeddedFileSystemRecovery.vb`): `CorruptDirectoryIndexIsFlaggedNotThrownAndCanBeRemoved`,
+  `RecoverPendingFilesRemovesACorruptDirectory`. Suite 293 → 295.
+
+### `RecoverPendingFiles` recovers records the tree can no longer reach — DONE
+Follow-on to the above: removing a `CorruptDirectory` left its whole subtree as records with valid
+anchors but no entry referencing them - invisible to `ChunkedStream.Validate`, never reclaimed by
+`Defragment`. `RecoverPendingFiles` now has a second phase.
+
+- New `<Flags> RecoveryConditions` (`Pending`, `CorruptData`, `Orphaned`, `Unreachable`) on
+  `PendingFileRecoveryCandidate` / `...Result` (plus `IsDirectory`, and `RecoveredPath` on the
+  result). `EntryTypes` on disk is unchanged - `Orphaned` / `Unreachable` are computed, never
+  persisted, and `Pending` is never inferred for an unreferenced record (it lived in the lost entry).
+- Phase 1 (unchanged): the root walk yields the reachable-anchor set and the pending / corrupt /
+  corrupt-dir entry candidates. Phase 2: `CollectOrphanCandidates` = `GetAnchors()` − reachable,
+  each classified by a single-hop parent check (`Orphaned` = own parent link won't resolve to a
+  readable directory; else `Unreachable`), ordered parent-before-child by a BFS over record-header
+  `ParentAnchorId`s (no content-list reads for ordering). Record spans come from the gap to the
+  next anchor (EFS records are logically contiguous), so an orphan file's length is exact.
+- Each phase-2 candidate is re-classified at its turn (an earlier `Remove` in the same loop
+  orphans its children; an earlier `Finalize` makes a whole subtree reachable and it drops out).
+  `Remove` = drop the record's span. `Finalize` = re-home under `\_Recovered` (created on demand,
+  `DirectoryN` / `FileN` names continuing past whatever's there) by adding one entry and rewriting
+  the record's parent pointer - a readable directory's subtree follows with its real names; a bare
+  file lands as `File` (or `CorruptData`). A directory whose own list is unreadable carries
+  `CorruptData`, its children are classified as orphan roots (not descendants), and `Finalize` is
+  a skip for it - `Remove` it and its children flatten into `\_Recovered` individually.
+- Sample "Scan" selector: `CorruptData ⇒ Remove`, else `Finalize` (pending → promote, unreachable
+  → re-home).
+- Tests +3 (`EmbeddedFileSystemRecovery.vb`): `UnreferencedRecordsAreRecoveredToTheRecoveredFolder`,
+  `RemovingACorruptDirectoryCascadesThroughItsWholeSubtree`,
+  `AnUnreadableUnreferencedDirectoryFlattensItsChildrenIntoRecovered`. Suite 295 → 298.
+- **Not done:** salvaging a `CorruptDirectory`'s child *names* before Repair zero-fills its list
+  (would need `Mark` to stash `{childAnchorId → name}`); until then the parent-died level of an
+  orphaned subtree gets a generated `DirectoryN` / `FileN` name.
+
 ### `Defragment(Move)` truncated live data when the compacted metadata overflowed the gap — DONE
 The sample (`Test("C:\Windows\System32\mrt.exe", False)` — a ~229 MB purely sequential LZ4 +
 encrypted BestFit write, reopened and `Defragment(Move)`d) threw

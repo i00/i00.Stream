@@ -11,6 +11,7 @@
 Imports System.Collections.ObjectModel
 Imports System.IO
 Imports System.Linq
+Imports System.Security.Cryptography
 Imports System.Text
 Imports i00.Streams
 
@@ -32,91 +33,166 @@ Namespace Streams
             ''' <summary>A file whose write stream has not been closed, or was abandoned by a crash.</summary>
             PendingFile = 3
             ''' <summary>A file that <see cref="Mark" /> flagged as backed by data a chunked-stream validation could not read.</summary>
-            CorruptData = 4
+            CorruptFile = 4
+            ''' <summary>
+            ''' A directory whose own content list <see cref="Mark" /> flagged as intersecting - or
+            ''' being unreadable because of - a chunked-stream validation problem. Its children
+            ''' cannot be enumerated; remove it with <see cref="DeleteEntry" /> or
+            ''' <see cref="RecoverPendingFiles" />.
+            ''' </summary>
+            CorruptDirectory = 5
         End Enum
 
-        ''' <summary>What <see cref="RecoverPendingFiles" /> does with a pending or corrupt entry.</summary>
+        ''' <summary>What <see cref="RecoverPendingFiles" /> does with a pending, corrupt or unreferenced entry.</summary>
         Public Enum PendingFileRecoveryActions
             ''' <summary>Take no action and omit the entry from the result.</summary>
             None = 0
             ''' <summary>Take no action, but include the entry in the result for inspection.</summary>
             List = 1
-            ''' <summary>Promote the entry to a normal file, keeping whatever data it currently holds.</summary>
+            ''' <summary>
+            ''' Promote a pending entry to a normal file, or re-home an unreferenced record under
+            ''' <c>\_Recovered</c>, keeping whatever data it currently holds.
+            ''' </summary>
             Finalize = 2
-            ''' <summary>Delete the entry and its data.</summary>
+            ''' <summary>Delete the entry / record and its data.</summary>
             Remove = 3
         End Enum
 
         ''' <summary>
-        ''' A <see cref="EntryTypes.PendingFile" /> or <see cref="EntryTypes.CorruptData" /> entry
-        ''' offered to the selector passed to <see cref="RecoverPendingFiles" />.
+        ''' Everything <see cref="RecoverPendingFiles" /> found notable about a candidate. A
+        ''' reachable candidate carries the on-disk condition (<see cref="Pending" /> /
+        ''' <see cref="CorruptData" />); an unreferenced record carries what the scan could infer -
+        ''' <see cref="Orphaned" /> and/or <see cref="Unreachable" />, and <see cref="CorruptData" />
+        ''' only when its bytes are provably damaged. <see cref="Pending" /> is never inferred for an
+        ''' unreferenced record - the flag lived in the lost directory entry.
+        ''' </summary>
+        <Flags>
+        Public Enum RecoveryConditions
+            None = 0
+            ''' <summary>The entry's write stream was never closed, or a crash abandoned it.</summary>
+            Pending = 1 << 0
+            ''' <summary>The record's bytes intersect a <see cref="ChunkedStream" /> validation problem (zero-filled by a repair).</summary>
+            CorruptData = 1 << 1
+            ''' <summary>The record's own direct parent link could not be resolved to a readable directory.</summary>
+            Orphaned = 1 << 2
+            ''' <summary>No path leads from the record back to the root.</summary>
+            Unreachable = 1 << 3
+        End Enum
+
+        ''' <summary>
+        ''' A pending, corrupt or unreferenced record offered to the selector passed to
+        ''' <see cref="RecoverPendingFiles" />.
         ''' </summary>
         Public NotInheritable Class PendingFileRecoveryCandidate
-            Friend Sub New(Path As String, AnchorId As Long, State As EntryTypes, DataLength As Long, BytesZeroed As Long)
+            Friend Sub New(Path As String, AnchorId As Long, ParentDirectoryAnchorId As Long, State As EntryTypes,
+                           IsDirectory As Boolean, Conditions As RecoveryConditions, DataLength As Long, BytesZeroed As Long)
                 Me.Path = Path
                 Me.AnchorId = AnchorId
+                Me.ParentDirectoryAnchorId = ParentDirectoryAnchorId
                 Me.State = State
+                Me.IsDirectory = IsDirectory
+                Me.Conditions = Conditions
                 Me.DataLength = DataLength
                 Me.BytesZeroed = BytesZeroed
             End Sub
-            ''' <summary>Full path of the entry, e.g. <c>\dir\sub\file.txt</c>.</summary>
+            ''' <summary>
+            ''' Full path of the entry, e.g. <c>\dir\sub\file.txt</c>. For an unreferenced record
+            ''' this is a best-effort reconstruction rooted at <c>\?</c>.
+            ''' </summary>
             Public ReadOnly Property Path As String
-            ''' <summary>The entry's stable anchor id.</summary>
+            ''' <summary>The record's stable anchor id.</summary>
             Public ReadOnly Property AnchorId As Long
-            ''' <summary><see cref="EntryTypes.PendingFile" /> or <see cref="EntryTypes.CorruptData" />.</summary>
+            ''' <summary>Anchor id of the directory that directly contains this entry, or the record's claimed parent for an unreferenced record.</summary>
+            Friend ReadOnly Property ParentDirectoryAnchorId As Long
+            ''' <summary>
+            ''' <see cref="EntryTypes.PendingFile" />, <see cref="EntryTypes.CorruptFile" /> or
+            ''' <see cref="EntryTypes.CorruptDirectory" /> for a reachable entry;
+            ''' <see cref="EntryTypes.File" /> or <see cref="EntryTypes.Directory" /> for an
+            ''' unreferenced record (see <see cref="Conditions" />).
+            ''' </summary>
             Public ReadOnly Property State As EntryTypes
-            ''' <summary>The entry's data length.</summary>
+            ''' <summary><see langword="True" /> when the record is a directory.</summary>
+            Public ReadOnly Property IsDirectory As Boolean
+            ''' <summary>Everything notable about this candidate.</summary>
+            Public ReadOnly Property Conditions As RecoveryConditions
+            ''' <summary>The entry's data length, or the directory record length for a directory.</summary>
             Public ReadOnly Property DataLength As Long
             ''' <summary>
-            ''' Zero-filled (sparse) bytes currently in the file's data. For a
-            ''' <see cref="EntryTypes.CorruptData" /> entry this is what a preceding
+            ''' Zero-filled (sparse) bytes currently in the record's data - what a preceding
             ''' <see cref="ChunkedStream.ValidationReport.Repair" /> replaced with zeros.
             ''' </summary>
             Public ReadOnly Property BytesZeroed As Long
         End Class
 
-        ''' <summary>Describes one entry acted on by <see cref="RecoverPendingFiles" />.</summary>
+        ''' <summary>Describes one record acted on by <see cref="RecoverPendingFiles" />.</summary>
         Public NotInheritable Class PendingFileRecoveryResult
-            Friend Sub New(Path As String, AnchorId As Long, PreviousState As EntryTypes,
-                           Action As PendingFileRecoveryActions, DataLength As Long, BytesZeroed As Long)
+            Friend Sub New(Path As String, AnchorId As Long, PreviousState As EntryTypes, Conditions As RecoveryConditions,
+                           IsDirectory As Boolean, Action As PendingFileRecoveryActions, DataLength As Long,
+                           BytesZeroed As Long, RecoveredPath As String)
                 Me.Path = Path
                 Me.AnchorId = AnchorId
                 Me.PreviousState = PreviousState
+                Me.Conditions = Conditions
+                Me.IsDirectory = IsDirectory
                 Me.Action = Action
                 Me.DataLength = DataLength
                 Me.BytesZeroed = BytesZeroed
+                Me.RecoveredPath = RecoveredPath
             End Sub
-            ''' <summary>Full path of the entry within the file system, e.g. <c>\dir\sub\file.txt</c>.</summary>
+            ''' <summary>Path of the record before recovery, e.g. <c>\dir\sub\file.txt</c> or a <c>\?</c>-rooted reconstruction.</summary>
             Public ReadOnly Property Path As String
-            ''' <summary>The entry's stable anchor id.</summary>
+            ''' <summary>The record's stable anchor id.</summary>
             Public ReadOnly Property AnchorId As Long
-            ''' <summary>The entry state before recovery - <see cref="EntryTypes.PendingFile" /> or <see cref="EntryTypes.CorruptData" />.</summary>
+            ''' <summary>
+            ''' The entry state before recovery - <see cref="EntryTypes.PendingFile" />,
+            ''' <see cref="EntryTypes.CorruptFile" />, <see cref="EntryTypes.CorruptDirectory" />,
+            ''' or <see cref="EntryTypes.File" /> / <see cref="EntryTypes.Directory" /> for an
+            ''' unreferenced record.
+            ''' </summary>
             Public ReadOnly Property PreviousState As EntryTypes
-            ''' <summary>What was done to the entry (<see cref="PendingFileRecoveryActions.List" /> = reported only).</summary>
+            ''' <summary>What the scan found notable about the record.</summary>
+            Public ReadOnly Property Conditions As RecoveryConditions
+            ''' <summary><see langword="True" /> when the record is a directory.</summary>
+            Public ReadOnly Property IsDirectory As Boolean
+            ''' <summary>What was done to the record (<see cref="PendingFileRecoveryActions.List" /> = reported only).</summary>
             Public ReadOnly Property Action As PendingFileRecoveryActions
-            ''' <summary>The entry's data length at the time of recovery.</summary>
+            ''' <summary>The record's data length at the time of recovery.</summary>
             Public ReadOnly Property DataLength As Long
             ''' <summary>
-            ''' Zero-filled (sparse) bytes in the file's data at the time of recovery - for a
-            ''' <see cref="EntryTypes.CorruptData" /> entry, what a preceding
-            ''' <see cref="ChunkedStream.ValidationReport.Repair" /> replaced with zeros.
+            ''' Zero-filled (sparse) bytes in the record's data at the time of recovery - what a
+            ''' preceding <see cref="ChunkedStream.ValidationReport.Repair" /> replaced with zeros.
             ''' </summary>
             Public ReadOnly Property BytesZeroed As Long
+            ''' <summary>
+            ''' Where a <see cref="PendingFileRecoveryActions.Finalize" />d unreferenced record was
+            ''' re-homed, e.g. <c>\_Recovered\Directory1</c>; <see langword="Nothing" /> otherwise.
+            ''' </summary>
+            Public ReadOnly Property RecoveredPath As String
         End Class
 
         ''' <summary>Describes one entry marked by <see cref="Mark" />.</summary>
         Public NotInheritable Class CorruptEntryMark
-            Friend Sub New(Path As String, AnchorId As Long, LostBytes As Long)
+            Friend Sub New(Path As String, AnchorId As Long, LostBytes As Long, IsDirectory As Boolean)
                 Me.Path = Path
                 Me.AnchorId = AnchorId
                 Me.LostBytes = LostBytes
+                Me.IsDirectory = IsDirectory
             End Sub
-            ''' <summary>Full path of the marked file.</summary>
+            ''' <summary>Full path of the marked entry.</summary>
             Public ReadOnly Property Path As String
-            ''' <summary>The marked file's stable anchor id.</summary>
+            ''' <summary>The marked entry's stable anchor id.</summary>
             Public ReadOnly Property AnchorId As Long
-            ''' <summary>Logical bytes of this file that fall inside a reported problem range.</summary>
+            ''' <summary>
+            ''' Logical bytes of this entry that fall inside a reported problem range. Zero when a
+            ''' directory was flagged only because its content list could not be parsed.
+            ''' </summary>
             Public ReadOnly Property LostBytes As Long
+            ''' <summary>
+            ''' <see langword="True" /> for a directory flagged <see cref="EntryTypes.CorruptDirectory" />
+            ''' (its children could not be enumerated); <see langword="False" /> for a file flagged
+            ''' <see cref="EntryTypes.CorruptFile" />.
+            ''' </summary>
+            Public ReadOnly Property IsDirectory As Boolean
         End Class
 
         ''' <summary>Describes one child entry stored in a directory.</summary>
@@ -152,11 +228,13 @@ Namespace Streams
         Private Const NameCharacterCapacity As Integer = 256
         Private Const NameByteCapacity As Integer = 512
         Private Const EntrySize As Integer = 536
+        Private Const RecoveredFolderName As String = "_Recovered"
 
         Public ReadOnly ChunkedStream As ChunkedStream
         Private ReadOnly _SyncRoot As New Object()
         Private ReadOnly _OpenFileIds As New HashSet(Of Long)()
         Private _Root As ChunkedStream.Anchor
+        Private _RecoveredAnchorId As Long
         Private _Disposed As Boolean
 
         ''' <summary>Opens or creates an embedded file system.</summary>
@@ -306,26 +384,39 @@ Namespace Streams
         End Sub
 
         ''' <summary>
-        ''' Applies <paramref name="Action" /> to every entry left in the
-        ''' <see cref="EntryTypes.PendingFile" /> or <see cref="EntryTypes.CorruptData" /> state,
-        ''' returning a description of every entry acted on. Pass
-        ''' <see cref="PendingFileRecoveryActions.List" /> to enumerate them without changing
-        ''' anything.
+        ''' Applies <paramref name="Action" /> to every pending or corrupt entry, and to every
+        ''' record the root can no longer reach, returning a description of every record acted on.
+        ''' Pass <see cref="PendingFileRecoveryActions.List" /> to enumerate them without changing
+        ''' anything. A <see cref="EntryTypes.CorruptDirectory" /> entry - and an unreferenced
+        ''' directory whose own content list is unreadable - is only acted on by
+        ''' <see cref="PendingFileRecoveryActions.Remove" /> or
+        ''' <see cref="PendingFileRecoveryActions.List" />, so the default
+        ''' <see cref="PendingFileRecoveryActions.Finalize" /> leaves it untouched.
         ''' </summary>
-        ''' <remarks>This maintenance operation intentionally traverses the directory tree.</remarks>
+        ''' <remarks>This maintenance operation traverses the directory tree and scans every anchor.</remarks>
         Public Function RecoverPendingFiles(Optional Action As PendingFileRecoveryActions = PendingFileRecoveryActions.Finalize) As IReadOnlyList(Of PendingFileRecoveryResult)
             Return RecoverPendingFiles(Function(candidate) Action)
         End Function
 
         ''' <summary>
-        ''' Recovers each <see cref="EntryTypes.PendingFile" /> / <see cref="EntryTypes.CorruptData" />
-        ''' entry with the action <paramref name="Selector" /> returns for it, so the decision is
-        ''' per entry, e.g.
-        ''' <c>RecoverPendingFiles(Function(c) If(c.State = EntryTypes.CorruptData, PendingFileRecoveryActions.Remove, PendingFileRecoveryActions.Finalize))</c>.
-        ''' <see cref="PendingFileRecoveryActions.None" /> skips an entry entirely;
+        ''' Recovers each pending, corrupt or unreferenced record with the action
+        ''' <paramref name="Selector" /> returns for it, so the decision is per record, e.g.
+        ''' <c>RecoverPendingFiles(Function(c) If(c.Conditions.HasFlag(RecoveryConditions.Pending), PendingFileRecoveryActions.Finalize, PendingFileRecoveryActions.Remove))</c>.
+        ''' <see cref="PendingFileRecoveryActions.None" /> skips a record entirely;
         ''' <see cref="PendingFileRecoveryActions.List" /> includes it in the result without
-        ''' changing it. Returns a description of every entry that was not skipped.
+        ''' changing it. Returns a description of every record that was not skipped.
         ''' </summary>
+        ''' <remarks>
+        ''' Records are offered in two groups: reachable pending / corrupt entries first (walked
+        ''' from the root), then every anchor the tree does not reach - ordered parent-before-child.
+        ''' A <see cref="RecoveryConditions.Orphaned" /> / <see cref="RecoveryConditions.Unreachable" />
+        ''' record is <see cref="PendingFileRecoveryActions.Remove" />d (its record dropped; its
+        ''' children fall through and are offered in turn) or
+        ''' <see cref="PendingFileRecoveryActions.Finalize" />d (re-homed under <c>\_Recovered</c>,
+        ''' its readable subtree following with real names). A
+        ''' <see cref="EntryTypes.CorruptDirectory" /> entry cannot be finalised, so
+        ''' <see cref="PendingFileRecoveryActions.Finalize" /> is a skip for one.
+        ''' </remarks>
         Public Function RecoverPendingFiles(Selector As Func(Of PendingFileRecoveryCandidate, PendingFileRecoveryActions)) As IReadOnlyList(Of PendingFileRecoveryResult)
             If Selector Is Nothing Then Throw New ArgumentNullException(NameOf(Selector))
 
@@ -339,33 +430,44 @@ Namespace Streams
                     ' re-locating them via their stable anchor id - a Remove shifts the logical
                     ' offsets every later lookup and the sparse map depend on.
                     '
-                    Dim Candidates As New List(Of PendingFileRecoveryCandidate)()
-                    CollectPendingCandidates(_Root, "", New SparseByteMap(Me), New HashSet(Of Long)(), Candidates)
+                    Dim Sparse As New SparseByteMap(Me)
+                    Dim Reachable As New HashSet(Of Long)()
+                    Dim EntryCandidates As New List(Of PendingFileRecoveryCandidate)()
+                    CollectPendingCandidates(_Root, "", Sparse, New HashSet(Of Long)(), Reachable, EntryCandidates)
+
+                    Dim OrphanCandidates As New List(Of PendingFileRecoveryCandidate)()
+                    CollectOrphanCandidates(Reachable, Sparse, OrphanCandidates)
 
                     Dim Results As New List(Of PendingFileRecoveryResult)()
 
-                    For Each Candidate In Candidates
+                    For Each Candidate In EntryCandidates
 
-                        Dim Action = Selector(Candidate)
-
+                        Dim Action = ValidateSelectorAction(Selector, Candidate)
                         If Action = PendingFileRecoveryActions.None Then Continue For
-                        If Action <> PendingFileRecoveryActions.List AndAlso
-                           Action <> PendingFileRecoveryActions.Finalize AndAlso
-                           Action <> PendingFileRecoveryActions.Remove Then
-                            Throw New ArgumentOutOfRangeException(NameOf(Selector),
-                                $"The selector returned an unsupported action ({Action}) for '{Candidate.Path}'.")
-                        End If
 
                         If _OpenFileIds.Contains(Candidate.AnchorId) Then Continue For
                         If ChunkedStream.ContainsAnchor(Candidate.AnchorId) = False Then Continue For
 
-                        Dim Location = GetParentEntry(GetAnchor(Candidate.AnchorId))
+                        Dim Location As EntryLocation
+                        If Candidate.State = EntryTypes.CorruptDirectory Then
+                            ' Re-locate through the parent's content list - the directory record's
+                            ' own header may be part of what is unreadable.
+                            Location = FindByChildId(GetDirectory(Candidate.ParentDirectoryAnchorId), Candidate.AnchorId)
+                        Else
+                            Location = GetParentEntry(GetAnchor(Candidate.AnchorId))
+                        End If
+
                         If Location.Entry.EntryType <> EntryTypes.PendingFile AndAlso
-                           Location.Entry.EntryType <> EntryTypes.CorruptData Then Continue For
+                           Location.Entry.EntryType <> EntryTypes.CorruptFile AndAlso
+                           Location.Entry.EntryType <> EntryTypes.CorruptDirectory Then Continue For
+
+                        ' A corrupt directory has nothing to promote to a file, so Finalize is a skip.
+                        If Location.Entry.EntryType = EntryTypes.CorruptDirectory AndAlso
+                           Action <> PendingFileRecoveryActions.Remove AndAlso Action <> PendingFileRecoveryActions.List Then Continue For
 
                         Results.Add(New PendingFileRecoveryResult(Candidate.Path, Candidate.AnchorId,
-                                                                  Location.Entry.EntryType, Action,
-                                                                  Location.Entry.LengthOfDataAtEntry, Candidate.BytesZeroed))
+                                                                  Location.Entry.EntryType, Candidate.Conditions, Candidate.IsDirectory,
+                                                                  Action, Location.Entry.LengthOfDataAtEntry, Candidate.BytesZeroed, Nothing))
 
                         Select Case Action
                             Case PendingFileRecoveryActions.Finalize
@@ -376,11 +478,66 @@ Namespace Streams
 
                     Next
 
+                    ProcessUnreferencedRecords(OrphanCandidates, Selector, Results)
+
                     Scope.Publish()
                     Return New ReadOnlyCollection(Of PendingFileRecoveryResult)(Results)
                 End Using
             End SyncLock
         End Function
+
+        Private Shared Function ValidateSelectorAction(Selector As Func(Of PendingFileRecoveryCandidate, PendingFileRecoveryActions),
+                                                       Candidate As PendingFileRecoveryCandidate) As PendingFileRecoveryActions
+            Dim Action = Selector(Candidate)
+            If Action <> PendingFileRecoveryActions.None AndAlso
+               Action <> PendingFileRecoveryActions.List AndAlso
+               Action <> PendingFileRecoveryActions.Finalize AndAlso
+               Action <> PendingFileRecoveryActions.Remove Then
+                Throw New ArgumentOutOfRangeException(NameOf(Selector),
+                    $"The selector returned an unsupported action ({Action}) for '{Candidate.Path}'.")
+            End If
+            Return Action
+        End Function
+
+        '
+        ' Second recovery phase: every anchor the root walk did not reach, offered parent-first.
+        ' Each candidate's condition is re-derived at its turn because an earlier Remove or Finalize
+        ' in this same loop may have changed its parent.
+        '
+        Private Sub ProcessUnreferencedRecords(Candidates As List(Of PendingFileRecoveryCandidate),
+                                               Selector As Func(Of PendingFileRecoveryCandidate, PendingFileRecoveryActions),
+                                               Results As List(Of PendingFileRecoveryResult))
+            For Each Candidate In Candidates
+
+                If ChunkedStream.ContainsAnchor(Candidate.AnchorId) = False Then Continue For
+                If _OpenFileIds.Contains(Candidate.AnchorId) Then Continue For
+                If IsReachableFromRoot(Candidate.AnchorId) Then Continue For
+
+                Dim Current As New PendingFileRecoveryCandidate(Candidate.Path, Candidate.AnchorId, Candidate.ParentDirectoryAnchorId,
+                                                                Candidate.State, Candidate.IsDirectory,
+                                                                ReclassifyUnreferenced(Candidate), Candidate.DataLength, Candidate.BytesZeroed)
+
+                Dim Action = ValidateSelectorAction(Selector, Current)
+                If Action = PendingFileRecoveryActions.None Then Continue For
+
+                ' A directory whose own content list is unreadable cannot be re-homed - its children
+                ' would look reachable but could never be enumerated. Remove it (its children were
+                ' classified as orphan roots and are offered in turn) or list it.
+                If Action = PendingFileRecoveryActions.Finalize AndAlso Current.IsDirectory AndAlso
+                   Current.Conditions.HasFlag(RecoveryConditions.CorruptData) Then Continue For
+
+                Dim RecoveredPath As String = Nothing
+                Select Case Action
+                    Case PendingFileRecoveryActions.Finalize
+                        RecoveredPath = RehomeUnreferencedRecord(Current)
+                    Case PendingFileRecoveryActions.Remove
+                        RemoveUnreferencedRecord(Current)
+                End Select
+
+                Results.Add(New PendingFileRecoveryResult(Current.Path, Current.AnchorId, Current.State, Current.Conditions,
+                                                          Current.IsDirectory, Action, Current.DataLength, Current.BytesZeroed, RecoveredPath))
+            Next
+        End Sub
 
         '
         ' Lazily builds a list of the stream's sparse (zero-filled) logical ranges from one
@@ -415,11 +572,19 @@ Namespace Streams
 
         ''' <summary>
         ''' Flags every file whose logical range intersects a problem reported by
-        ''' <see cref="ChunkedStream.Validate" /> with <see cref="EntryTypes.CorruptData" />, so
-        ''' the damage is recorded before the chunked stream is repaired (which zero-fills the
-        ''' ranges and clears the problem). Returns a description of every file marked. Call this
-        ''' before <see cref="ChunkedStream.ValidationReport.Repair" />.
+        ''' <see cref="ChunkedStream.Validate" /> with <see cref="EntryTypes.CorruptFile" />, and
+        ''' every directory whose own content list intersects one - or cannot be parsed - with
+        ''' <see cref="EntryTypes.CorruptDirectory" />, so the damage is recorded before the chunked
+        ''' stream is repaired (which zero-fills the ranges and clears the problem). A flagged
+        ''' directory is not descended into, so the rest of the tree is still walked and marked.
+        ''' Returns a description of every entry marked; <see cref="CorruptEntryMark.IsDirectory" />
+        ''' distinguishes the two. Call this before <see cref="ChunkedStream.ValidationReport.Repair" />.
         ''' </summary>
+        ''' <remarks>
+        ''' Still throws when the stream cannot be read at all for a reason a repair cannot address,
+        ''' such as a missing file master key. A <see cref="EntryTypes.CorruptDirectory" /> entry is
+        ''' removed by <see cref="DeleteEntry" /> or <see cref="RecoverPendingFiles" />.
+        ''' </remarks>
         Public Function Mark(Report As ChunkedStream.ValidationReport) As IReadOnlyList(Of CorruptEntryMark)
             If Report Is Nothing Then Throw New ArgumentNullException(NameOf(Report))
             SyncLock _SyncRoot
@@ -434,7 +599,18 @@ Namespace Streams
 
                 Using Scope = ChunkedStream.DeferPublish()
                     Dim Marks As New List(Of CorruptEntryMark)()
-                    MarkCorrupt(_Root, "", Ranges, New HashSet(Of Long)(), Marks)
+                    Try
+                        MarkCorrupt(_Root, "", Ranges, New HashSet(Of Long)(), Marks)
+                    Catch ex As Exception When IsCorruptionFault(ex)
+                        '
+                        ' The root's own content list is unreadable, so there is no parent entry to
+                        ' re-type and nothing else can be walked. Report it anyway so the caller
+                        ' still gets a result and can proceed to Repair rather than an abort.
+                        '
+                        Dim RootRecordLength As Long
+                        If TryReadDirectoryRecordLength(_Root, RootRecordLength) = False Then RootRecordLength = DirectoryHeaderSize
+                        Marks.Add(New CorruptEntryMark("\", _Root.AnchorId, RangeOverlap(Ranges, _Root.Offset, RootRecordLength), IsDirectory:=True))
+                    End Try
                     Scope.Publish()
                     Return New ReadOnlyCollection(Of CorruptEntryMark)(Marks)
                 End Using
@@ -528,6 +704,23 @@ Namespace Streams
             If Location.Entry.ChildAnchorId = _Root.AnchorId Then Throw New InvalidOperationException("The root cannot be removed.")
             If _OpenFileIds.Contains(Location.Entry.ChildAnchorId) Then Throw New IOException("The file is open.")
             Using Scope = ChunkedStream.DeferPublish()
+
+                If Location.Entry.EntryType = EntryTypes.CorruptDirectory Then
+                    '
+                    ' The content list is unreadable, so the children cannot be enumerated to be
+                    ' removed one by one. Drop the entry and reclaim the directory record's own
+                    ' span - run Repair first so the span reads back as zeros. The now-unreferenced
+                    ' descendant records are picked up by RecoverPendingFiles (which scans every
+                    ' anchor) and removed or re-homed under \_Recovered.
+                    '
+                    Dim CorruptChild = GetAnchor(Location.Entry.ChildAnchorId)
+                    Dim ClaimedLength = Math.Max(Location.Entry.LengthOfDataAtEntry, CLng(DirectoryHeaderSize))
+                    RemoveEntry(Location)
+                    ChunkedStream.Remove(CorruptChild.Offset, Math.Min(ClaimedLength, ChunkedStream.Length - CorruptChild.Offset))
+                    Scope.Publish()
+                    Return
+                End If
+
                 Dim Child = GetAnchor(Location.Entry.ChildAnchorId)
                 Dim ChildType = ReadType(Child)
                 If ChildType = DataType.Directory Then
@@ -569,59 +762,375 @@ Namespace Streams
 
         Private Sub CollectPendingCandidates(DirectoryAnchor As ChunkedStream.Anchor, PathPrefix As String,
                                              Sparse As SparseByteMap, Visited As HashSet(Of Long),
-                                             Candidates As List(Of PendingFileRecoveryCandidate))
+                                             Reachable As HashSet(Of Long), Candidates As List(Of PendingFileRecoveryCandidate))
             If Visited.Add(DirectoryAnchor.AnchorId) = False Then Throw New InvalidDataException("Directory cycle detected.")
+            Reachable.Add(DirectoryAnchor.AnchorId)
             For Each Entry In ReadEntries(DirectoryAnchor)
                 Dim EntryPath = PathPrefix & "\" & Entry.Name
+                Reachable.Add(Entry.ChildAnchorId)
                 If Entry.EntryType = EntryTypes.Directory Then
-                    CollectPendingCandidates(GetDirectory(Entry.ChildAnchorId), EntryPath, Sparse, Visited, Candidates)
-                ElseIf (Entry.EntryType = EntryTypes.PendingFile OrElse Entry.EntryType = EntryTypes.CorruptData) AndAlso
+                    CollectPendingCandidates(GetDirectory(Entry.ChildAnchorId), EntryPath, Sparse, Visited, Reachable, Candidates)
+                ElseIf Entry.EntryType = EntryTypes.CorruptDirectory Then
+                    ' The content list is unreadable, so the subtree cannot be walked. Offer the
+                    ' directory itself for removal but do not descend into it.
+                    Dim RecordOffset = GetAnchor(Entry.ChildAnchorId).Offset
+                    Dim RecordLength = Math.Max(Entry.LengthOfDataAtEntry, CLng(DirectoryHeaderSize))
+                    Candidates.Add(New PendingFileRecoveryCandidate(
+                        EntryPath, Entry.ChildAnchorId, DirectoryAnchor.AnchorId, Entry.EntryType, IsDirectory:=True,
+                        Conditions:=RecoveryConditions.CorruptData, DataLength:=RecordLength,
+                        BytesZeroed:=Sparse.BytesIn(RecordOffset, RecordLength)))
+                ElseIf (Entry.EntryType = EntryTypes.PendingFile OrElse Entry.EntryType = EntryTypes.CorruptFile) AndAlso
                        _OpenFileIds.Contains(Entry.ChildAnchorId) = False Then
                     Dim DataOffset = GetAnchor(Entry.ChildAnchorId).Offset + FileHeaderSize
+                    Dim Conditions = If(Entry.EntryType = EntryTypes.CorruptFile, RecoveryConditions.CorruptData, RecoveryConditions.Pending)
                     Candidates.Add(New PendingFileRecoveryCandidate(
-                        EntryPath, Entry.ChildAnchorId, Entry.EntryType, Entry.LengthOfDataAtEntry,
-                        Sparse.BytesIn(DataOffset, Entry.LengthOfDataAtEntry)))
+                        EntryPath, Entry.ChildAnchorId, DirectoryAnchor.AnchorId, Entry.EntryType, IsDirectory:=False,
+                        Conditions:=Conditions, DataLength:=Entry.LengthOfDataAtEntry,
+                        BytesZeroed:=Sparse.BytesIn(DataOffset, Entry.LengthOfDataAtEntry)))
                 End If
             Next
             Visited.Remove(DirectoryAnchor.AnchorId)
         End Sub
+
+        '
+        ' Every anchor the root walk did not reach, built into candidates ordered parent-before-child
+        ' (so a Remove/Finalize of a parent is visible when its children come up). Spans, and the
+        ' zeroed-byte counts, are read here against the un-mutated stream.
+        '
+        Private Sub CollectOrphanCandidates(Reachable As HashSet(Of Long), Sparse As SparseByteMap,
+                                            Candidates As List(Of PendingFileRecoveryCandidate))
+
+            Dim Anchors = ChunkedStream.GetAnchors()
+            If Anchors.All(Function(anchor) Reachable.Contains(anchor.AnchorId)) Then Return
+            Dim Unreachable = Anchors.Where(Function(anchor) Reachable.Contains(anchor.AnchorId) = False).ToList()
+
+            ' EFS records are contiguous in logical order, so a record spans the gap to the next anchor.
+            Dim ByOffset = Anchors.OrderBy(Function(anchor) anchor.Offset).ToList()
+            Dim SpanById As New Dictionary(Of Long, Long)()
+            For Index = 0 To ByOffset.Count - 1
+                Dim EndOffset = If(Index + 1 < ByOffset.Count, ByOffset(Index + 1).Offset, ChunkedStream.Length)
+                SpanById(ByOffset(Index).AnchorId) = EndOffset - ByOffset(Index).Offset
+            Next
+
+            Dim UnreachableIds As New HashSet(Of Long)(Unreachable.Select(Function(anchor) anchor.AnchorId))
+            Dim ParentOf As New Dictionary(Of Long, Long)()
+            Dim IsDir As New Dictionary(Of Long, Boolean)()
+            Dim HeaderOk As New Dictionary(Of Long, Boolean)()
+            Dim ListReadable As New Dictionary(Of Long, Boolean)()
+            For Each Anchor In Unreachable
+                Dim DataTypeValue As Long, ParentId As Long
+                Dim Ok = TryReadRecordHeader(Anchor, DataTypeValue, ParentId)
+                HeaderOk(Anchor.AnchorId) = Ok
+                ParentOf(Anchor.AnchorId) = ParentId
+                IsDir(Anchor.AnchorId) = (DataTypeValue = CLng(DataType.Directory))
+                ListReadable(Anchor.AnchorId) = Ok AndAlso IsDir(Anchor.AnchorId) AndAlso IsReadableDirectory(Anchor.AnchorId)
+            Next
+
+            ' A descendant is an unreachable record whose parent is an unreachable directory whose
+            ' own content list can still be read; every other unreachable record is an orphan root -
+            ' its own parent link is the break.
+            Dim IsDescendant As Func(Of Long, Boolean) =
+                Function(node) UnreachableIds.Contains(ParentOf(node)) AndAlso ListReadable(ParentOf(node))
+
+            Dim ChildrenByParent = UnreachableIds.Where(Function(node) IsDescendant(node)).
+                                                 GroupBy(Function(node) ParentOf(node)).
+                                                 ToDictionary(Function(g) g.Key, Function(g) g.OrderBy(Function(child) child).ToList())
+
+            Dim OrderedIds As New List(Of Long)()
+            Dim Seen As New HashSet(Of Long)()
+            Dim Queue As New Queue(Of Long)()
+            For Each Id In UnreachableIds.OrderBy(Function(node) node).Where(Function(node) IsDescendant(node) = False)
+                Queue.Enqueue(Id)
+                Seen.Add(Id)
+            Next
+            While Queue.Count > 0
+                Dim Id = Queue.Dequeue()
+                OrderedIds.Add(Id)
+                Dim Kids As List(Of Long) = Nothing
+                If ChildrenByParent.TryGetValue(Id, Kids) Then
+                    For Each ChildId In Kids
+                        If Seen.Add(ChildId) Then Queue.Enqueue(ChildId)
+                    Next
+                End If
+            End While
+            ' Anything left is in a parent cycle - treat each as its own root.
+            For Each Id In UnreachableIds.OrderBy(Function(node) node)
+                If Seen.Add(Id) Then OrderedIds.Add(Id)
+            Next
+
+            Dim PathById As New Dictionary(Of Long, String)()
+            For Each Id In OrderedIds
+                Dim Anchor = GetAnchor(Id)
+                Dim ParentId = ParentOf(Id)
+                Dim Directory = IsDir(Id)
+                Dim HeaderSize = If(Directory, CLng(DirectoryHeaderSize), CLng(FileHeaderSize))
+                Dim DataLength = If(Directory, SpanById(Id), Math.Max(0L, SpanById(Id) - HeaderSize))
+                Dim BytesZeroed = Sparse.BytesIn(Anchor.Offset + HeaderSize, DataLength)
+
+                Dim Conditions = RecoveryConditions.Unreachable
+                If IsDescendant(Id) = False Then Conditions = Conditions Or RecoveryConditions.Orphaned
+                If BytesZeroed > 0 OrElse HeaderOk(Id) = False OrElse (Directory AndAlso ListReadable(Id) = False) Then
+                    Conditions = Conditions Or RecoveryConditions.CorruptData
+                End If
+
+                Dim ParentPath As String = Nothing
+                Dim NodePath = $"\?{Id}"
+                If PathById.TryGetValue(ParentId, ParentPath) Then
+                    Dim Name = TryReadChildName(ParentId, Id)
+                    NodePath = ParentPath & "\" & If(Name, $"?{Id}")
+                End If
+                PathById(Id) = NodePath
+
+                Candidates.Add(New PendingFileRecoveryCandidate(
+                    NodePath, Id, ParentId, If(Directory, EntryTypes.Directory, EntryTypes.File),
+                    Directory, Conditions, DataLength, BytesZeroed))
+            Next
+        End Sub
+
+        Private Function TryReadRecordHeader(Anchor As ChunkedStream.Anchor, ByRef DataTypeValue As Long, ByRef ParentId As Long) As Boolean
+            Try
+                DataTypeValue = ReadInt64(Anchor.Offset)
+                ParentId = ReadInt64(Anchor.Offset + ParentOffset)
+                Return True
+            Catch ex As Exception When IsCorruptionFault(ex)
+                DataTypeValue = 0
+                ParentId = 0
+                Return False
+            End Try
+        End Function
+
+        Private Function TryReadChildName(ParentAnchorId As Long, ChildAnchorId As Long) As String
+            Try
+                Return ReadEntries(GetAnchor(ParentAnchorId)).
+                       Where(Function(entry) entry.ChildAnchorId = ChildAnchorId).
+                       Select(Function(entry) entry.Name).
+                       FirstOrDefault()
+            Catch ex As Exception When IsCorruptionFault(ex) OrElse TypeOf ex Is KeyNotFoundException
+                Return Nothing
+            End Try
+        End Function
+
+        Private Function ResolvesToDirectory(AnchorId As Long) As Boolean
+            If AnchorId <= 0 OrElse ChunkedStream.ContainsAnchor(AnchorId) = False Then Return False
+            Try
+                Return ReadType(GetAnchor(AnchorId)) = DataType.Directory
+            Catch ex As Exception When IsCorruptionFault(ex) OrElse TypeOf ex Is KeyNotFoundException
+                Return False
+            End Try
+        End Function
+
+        Private Function IsReadableDirectory(AnchorId As Long) As Boolean
+            Try
+                ReadEntries(GetAnchor(AnchorId))
+                Return True
+            Catch ex As Exception When IsCorruptionFault(ex) OrElse TypeOf ex Is KeyNotFoundException
+                Return False
+            End Try
+        End Function
+
+        Private Function ReadParentIdOrZero(AnchorId As Long) As Long
+            Try
+                Return ReadInt64(GetAnchor(AnchorId).Offset + ParentOffset)
+            Catch ex As Exception When IsCorruptionFault(ex) OrElse TypeOf ex Is KeyNotFoundException
+                Return 0
+            End Try
+        End Function
+
+        Private Function IsReachableFromRoot(AnchorId As Long) As Boolean
+            Dim Current = AnchorId
+            Dim Guard As New HashSet(Of Long)()
+            While Current > 0 AndAlso Guard.Add(Current)
+                If Current = _Root.AnchorId Then Return True
+                If ChunkedStream.ContainsAnchor(Current) = False Then Return False
+                Current = ReadParentIdOrZero(Current)
+            End While
+            Return False
+        End Function
+
+        Private Function ReclassifyUnreferenced(Candidate As PendingFileRecoveryCandidate) As RecoveryConditions
+            Dim Conditions = RecoveryConditions.Unreachable
+            If ResolvesToDirectory(ReadParentIdOrZero(Candidate.AnchorId)) = False Then Conditions = Conditions Or RecoveryConditions.Orphaned
+            If Candidate.Conditions.HasFlag(RecoveryConditions.CorruptData) Then Conditions = Conditions Or RecoveryConditions.CorruptData
+            Return Conditions
+        End Function
+
+        Private Sub RemoveUnreferencedRecord(Candidate As PendingFileRecoveryCandidate)
+            Dim Anchor = GetAnchor(Candidate.AnchorId)
+            Dim HeaderSize = If(Candidate.IsDirectory, CLng(DirectoryHeaderSize), CLng(FileHeaderSize))
+            Dim Span = If(Candidate.IsDirectory, Candidate.DataLength, HeaderSize + Candidate.DataLength)
+            ChunkedStream.Remove(Anchor.Offset, Math.Min(Span, ChunkedStream.Length - Anchor.Offset))
+        End Sub
+
+        '
+        ' Re-homes an unreferenced record under \_Recovered by adding one entry there and rewriting
+        ' the record's own parent pointer. A readable directory's subtree follows untouched, its
+        ' descendants becoming reachable and dropping out of the recovery loop.
+        '
+        Private Function RehomeUnreferencedRecord(Candidate As PendingFileRecoveryCandidate) As String
+            Dim RecoveredAnchorId = EnsureRecoveredFolder()
+            Dim Name = AllocateRecoveredName(RecoveredAnchorId, Candidate.IsDirectory)
+
+            ' A directory only reaches here with a readable content list (see ProcessUnreferencedRecords).
+            Dim EntryState As EntryTypes
+            If Candidate.IsDirectory Then
+                EntryState = EntryTypes.Directory
+            ElseIf Candidate.Conditions.HasFlag(RecoveryConditions.CorruptData) Then
+                EntryState = EntryTypes.CorruptFile
+            Else
+                EntryState = EntryTypes.File
+            End If
+
+            AppendEntry(GetAnchor(RecoveredAnchorId), New ContentListEntry(EntryState, Candidate.AnchorId, Candidate.DataLength, Name))
+            WriteInt64(GetAnchor(Candidate.AnchorId).Offset + ParentOffset, RecoveredAnchorId)
+            Return "\" & RecoveredFolderName & "\" & Name
+        End Function
+
+        Private Function EnsureRecoveredFolder() As Long
+            If _RecoveredAnchorId > 0 AndAlso ChunkedStream.ContainsAnchor(_RecoveredAnchorId) Then Return _RecoveredAnchorId
+            Try
+                _RecoveredAnchorId = FindByName(_Root, RecoveredFolderName).Entry.ChildAnchorId
+            Catch ex As FileNotFoundException
+                Dim Data = BuildDirectory(_Root.AnchorId)
+                Dim Child = ChunkedStream.CreateAnchor(Data)
+                AppendEntry(_Root, New ContentListEntry(EntryTypes.Directory, Child.AnchorId, Data.LongLength, RecoveredFolderName))
+                _RecoveredAnchorId = Child.AnchorId
+            End Try
+            Return _RecoveredAnchorId
+        End Function
+
+        Private Function AllocateRecoveredName(RecoveredAnchorId As Long, IsDirectory As Boolean) As String
+            Dim Prefix = If(IsDirectory, "Directory", "File")
+            Dim Highest = 0
+            For Each Entry In ReadEntries(GetAnchor(RecoveredAnchorId))
+                If Entry.Name.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase) Then
+                    Dim Suffix = 0
+                    If Integer.TryParse(Entry.Name.Substring(Prefix.Length), Suffix) AndAlso Suffix > Highest Then Highest = Suffix
+                End If
+            Next
+            Return Prefix & (Highest + 1)
+        End Function
 
         Private Sub MarkCorrupt(DirectoryAnchor As ChunkedStream.Anchor, PathPrefix As String,
                                 Ranges As List(Of ChunkedStream.LogicalRange), Visited As HashSet(Of Long),
                                 Marks As List(Of CorruptEntryMark))
             If Visited.Add(DirectoryAnchor.AnchorId) = False Then Throw New InvalidDataException("Directory cycle detected.")
-            For Each Entry In ReadEntries(DirectoryAnchor)
-                Dim EntryPath = PathPrefix & "\" & Entry.Name
-                If Entry.EntryType = EntryTypes.Directory Then
-                    MarkCorrupt(GetDirectory(Entry.ChildAnchorId), EntryPath, Ranges, Visited, Marks)
-                    Continue For
-                End If
-
-                Dim Child = GetAnchor(Entry.ChildAnchorId)
-                Dim DataOffset = Child.Offset + FileHeaderSize
-                Dim DataLength = Entry.LengthOfDataAtEntry
-                Dim RecordOffset = Child.Offset
-                Dim RecordLength = FileHeaderSize + DataLength
-
-                Dim LostBytes As Long = 0
-                For Each Range In Ranges
-                    If Range.Offset < RecordOffset + RecordLength AndAlso RecordOffset < Range.Offset + Range.Length Then
-                        Dim OverlapStart = Math.Max(Range.Offset, DataOffset)
-                        Dim OverlapEnd = Math.Min(Range.Offset + Range.Length, DataOffset + DataLength)
-                        If OverlapEnd > OverlapStart Then LostBytes += OverlapEnd - OverlapStart
+            Try
+                For Each Entry In ReadEntries(DirectoryAnchor)
+                    Dim EntryPath = PathPrefix & "\" & Entry.Name
+                    If Entry.EntryType = EntryTypes.Directory OrElse Entry.EntryType = EntryTypes.CorruptDirectory Then
+                        MarkCorruptChildDirectory(DirectoryAnchor, Entry, EntryPath, Ranges, Visited, Marks)
+                    Else
+                        MarkCorruptChildFile(DirectoryAnchor, Entry, EntryPath, Ranges, Marks)
                     End If
                 Next
-
-                If LostBytes > 0 OrElse Ranges.Any(Function(range) range.Offset < RecordOffset + RecordLength AndAlso RecordOffset < range.Offset + range.Length) Then
-                    Dim Location = FindByChildId(DirectoryAnchor, Entry.ChildAnchorId)
-                    If Location.Entry.EntryType = EntryTypes.File OrElse Location.Entry.EntryType = EntryTypes.PendingFile Then
-                        SetEntryType(Location, EntryTypes.CorruptData)
-                    End If
-                    Marks.Add(New CorruptEntryMark(EntryPath, Entry.ChildAnchorId, LostBytes))
-                End If
-            Next
-            Visited.Remove(DirectoryAnchor.AnchorId)
+            Finally
+                Visited.Remove(DirectoryAnchor.AnchorId)
+            End Try
         End Sub
+
+        '
+        ' Walks a child directory. When its own content list intersects a problem range, cannot be
+        ' resolved or cannot be parsed, the entry is flagged CorruptDirectory and the walk stops
+        ' descending - the rest of the tree is still marked. An already-flagged entry is re-reported
+        ' without being changed.
+        '
+        Private Sub MarkCorruptChildDirectory(ParentAnchor As ChunkedStream.Anchor, Entry As ContentListEntry,
+                                              EntryPath As String, Ranges As List(Of ChunkedStream.LogicalRange),
+                                              Visited As HashSet(Of Long), Marks As List(Of CorruptEntryMark))
+
+            ' A directory entry keeps the whole record length in LengthOfDataAtEntry; floor it at the
+            ' header size in case that cached length is itself stale.
+            Dim RecordLength = Math.Max(Entry.LengthOfDataAtEntry, CLng(DirectoryHeaderSize))
+
+            Dim RecordOffset As Long
+            Try
+                RecordOffset = GetAnchor(Entry.ChildAnchorId).Offset
+            Catch ex As Exception When IsCorruptionFault(ex) OrElse TypeOf ex Is KeyNotFoundException
+                FlagDirectoryCorrupt(ParentAnchor, Entry, EntryPath, 0, Marks)
+                Return
+            End Try
+
+            Dim LostBytes = RangeOverlap(Ranges, RecordOffset, RecordLength)
+
+            If Entry.EntryType = EntryTypes.CorruptDirectory Then
+                Marks.Add(New CorruptEntryMark(EntryPath, Entry.ChildAnchorId, LostBytes, IsDirectory:=True))
+                Return
+            End If
+
+            If LostBytes > 0 Then
+                FlagDirectoryCorrupt(ParentAnchor, Entry, EntryPath, LostBytes, Marks)
+                Return
+            End If
+
+            '
+            ' The index looks intact. Descend, but treat a read failure inside the subtree's own
+            ' content list as damage to this directory rather than letting it abort the whole walk.
+            '
+            Try
+                MarkCorrupt(GetDirectory(Entry.ChildAnchorId), EntryPath, Ranges, Visited, Marks)
+            Catch ex As Exception When IsCorruptionFault(ex) OrElse TypeOf ex Is KeyNotFoundException
+                FlagDirectoryCorrupt(ParentAnchor, Entry, EntryPath, LostBytes, Marks)
+            End Try
+        End Sub
+
+        Private Sub MarkCorruptChildFile(ParentAnchor As ChunkedStream.Anchor, Entry As ContentListEntry,
+                                         EntryPath As String, Ranges As List(Of ChunkedStream.LogicalRange),
+                                         Marks As List(Of CorruptEntryMark))
+            Dim Child = GetAnchor(Entry.ChildAnchorId)
+            Dim DataOffset = Child.Offset + FileHeaderSize
+            Dim DataLength = Entry.LengthOfDataAtEntry
+            Dim RecordOffset = Child.Offset
+            Dim RecordLength = FileHeaderSize + DataLength
+
+            Dim RecordTouched = Ranges.Any(Function(range) range.Offset < RecordOffset + RecordLength AndAlso RecordOffset < range.Offset + range.Length)
+            If RecordTouched = False Then Return
+
+            Dim Location = FindByChildId(ParentAnchor, Entry.ChildAnchorId)
+            If Location.Entry.EntryType = EntryTypes.File OrElse Location.Entry.EntryType = EntryTypes.PendingFile Then
+                SetEntryType(Location, EntryTypes.CorruptFile)
+            End If
+            Marks.Add(New CorruptEntryMark(EntryPath, Entry.ChildAnchorId, RangeOverlap(Ranges, DataOffset, DataLength), IsDirectory:=False))
+        End Sub
+
+        Private Sub FlagDirectoryCorrupt(ParentAnchor As ChunkedStream.Anchor, Entry As ContentListEntry,
+                                         EntryPath As String, LostBytes As Long, Marks As List(Of CorruptEntryMark))
+            Dim Location = FindByChildId(ParentAnchor, Entry.ChildAnchorId)
+            If Location.Entry.EntryType = EntryTypes.Directory Then SetEntryType(Location, EntryTypes.CorruptDirectory)
+            Marks.Add(New CorruptEntryMark(EntryPath, Entry.ChildAnchorId, LostBytes, IsDirectory:=True))
+        End Sub
+
+        '
+        ' Total bytes of the logical span [Offset, Offset + Length) that fall inside any problem range.
+        '
+        Private Shared Function RangeOverlap(Ranges As List(Of ChunkedStream.LogicalRange), Offset As Long, Length As Long) As Long
+            Dim Total As Long = 0
+            For Each Range In Ranges
+                Dim OverlapStart = Math.Max(Range.Offset, Offset)
+                Dim OverlapEnd = Math.Min(Range.Offset + Range.Length, Offset + Length)
+                If OverlapEnd > OverlapStart Then Total += OverlapEnd - OverlapStart
+            Next
+            Return Total
+        End Function
+
+        '
+        ' Whether a fault raised while reading a record's own bytes means the backing data is
+        ' corrupt, as opposed to a defect or an environmental failure (such as a missing key) that
+        ' a repair cannot address.
+        '
+        Private Shared Function IsCorruptionFault(Fault As Exception) As Boolean
+            Return TypeOf Fault Is InvalidDataException OrElse
+                   TypeOf Fault Is EndOfStreamException OrElse
+                   TypeOf Fault Is CryptographicException
+        End Function
+
+        Private Function TryReadDirectoryRecordLength(Anchor As ChunkedStream.Anchor, ByRef Length As Long) As Boolean
+            Try
+                Length = ReadInt64(Anchor.Offset + DirectoryLengthOffset)
+            Catch ex As Exception When IsCorruptionFault(ex)
+                Return False
+            End Try
+            Return Length >= DirectoryHeaderSize
+        End Function
 
         Private Sub EnsureNameAvailable(Parent As ChunkedStream.Anchor, Name As String)
             If ReadEntries(Parent).Any(Function(entry) String.Equals(entry.Name, Name, StringComparison.OrdinalIgnoreCase)) Then
@@ -686,7 +1195,8 @@ Namespace Streams
         Private Shared Function DecodeEntry(Data As Byte()) As ContentListEntry
             Dim EntryType = CType(BitConverter.ToInt64(Data, 0), EntryTypes)
             If EntryType <> EntryTypes.Directory AndAlso EntryType <> EntryTypes.File AndAlso
-               EntryType <> EntryTypes.PendingFile AndAlso EntryType <> EntryTypes.CorruptData Then
+               EntryType <> EntryTypes.PendingFile AndAlso EntryType <> EntryTypes.CorruptFile AndAlso
+               EntryType <> EntryTypes.CorruptDirectory Then
                 Throw New InvalidDataException("Unsupported entry type.")
             End If
             Dim ChildId = BitConverter.ToInt64(Data, 8)
