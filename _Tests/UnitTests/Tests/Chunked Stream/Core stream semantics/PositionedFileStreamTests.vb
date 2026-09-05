@@ -92,7 +92,9 @@ Namespace Tests
 
             ''' <summary>
             ''' A full ChunkedStream round trip through a real file, including reopening via a
-            ''' fresh PositionedFileStream instance on the same path.
+            ''' fresh PositionedFileStream instance on the same path. No FlushDurableAction is
+            ''' passed - PositionedFileStream implements IDurableFlush, so Cs.Flush() already
+            ''' gets a genuine durable flush automatically.
             ''' </summary>
             <UnitTester.SimpleTest()>
             Public Shared Sub ChunkedStreamRoundTripsThroughARealFile()
@@ -105,7 +107,7 @@ Namespace Tests
                         Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                             .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(7802))
                         }
-                        Using Cs = ChunkedStream.Open(Pfs, Options, FlushDurableAction:=Sub(s) s.FlushDurable())
+                        Using Cs = ChunkedStream.Open(Pfs, Options)
                             Cs.Write(0, Expected)
                             Cs.Flush()
                             Cs.Validate().ThrowIfErrors()
@@ -152,7 +154,7 @@ Namespace Tests
                             .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(7902))
                         }
 
-                        Using Cs = ChunkedStream.Open(Pfs, Options, FlushDurableAction:=Sub(s) s.FlushDurable())
+                        Using Cs = ChunkedStream.Open(Pfs, Options)
 
                             Dim Written = Cs.WriteAsync(0, Expected).GetAwaiter().GetResult()
                             AssertEqual(Expected.Length, Written, "Async batched write reported the wrong count.")
@@ -169,6 +171,61 @@ Namespace Tests
                 End Try
 
             End Sub
+
+            ''' <summary>
+            ''' A backing store that implements IDurableFlush (PositionedFileStream is the real
+            ''' example, but the mechanism itself is general - see IDurableFlush's own remarks)
+            ''' gets a genuine durable flush automatically from ChunkedStream.Open, with no
+            ''' FlushDurableAction parameter needed. Uses a minimal MemoryStream-backed mock
+            ''' instead of a real PositionedFileStream so this tests exactly the fallback logic
+            ''' in ChunkedStream's FlushDurable/FlushDurableAsync, independent of P/Invoke.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DurableFlushIsUsedAutomaticallyWithoutFlushDurableAction()
+
+                Using Backing As New DurableFlushCountingStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(8001))
+                    }
+
+                    ' Deliberately no FlushDurableAction argument here. Open() itself already
+                    ' durably publishes the initial empty structure, so the baseline is taken
+                    ' after Open() rather than assumed to be zero.
+                    Using Cs = ChunkedStream.Open(Backing, Options)
+
+                        Dim CountAfterOpen = Backing.DurableFlushCalls
+                        AssertTrue(CountAfterOpen > 0, "Open() should already have used the backing store's IDurableFlush for its initial publish.")
+
+                        ' A plain Write() durably publishes on its own (every mutating call is
+                        ' its own durable publish unless a DeferPublish scope holds it back) -
+                        ' so to get a clean "held back, then released" signal, hold the publish
+                        ' back with a scope and compare the count across its own Publish() call.
+                        Using Scope = Cs.DeferPublish()
+                            Cs.Write(0, GenerateRandomData(5000, 8002))
+                            AssertEqual(CountAfterOpen, Backing.DurableFlushCalls, "Durable flush should not happen while a DeferPublish scope holds the publish back.")
+                            Scope.Publish()
+                        End Using
+
+                        AssertTrue(Backing.DurableFlushCalls > CountAfterOpen, "ChunkedStream did not use the backing store's IDurableFlush automatically for the deferred publish.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            Private NotInheritable Class DurableFlushCountingStream
+                Inherits MemoryStream
+                Implements IDurableFlush
+
+                Public Property DurableFlushCalls As Integer
+
+                Public Sub FlushDurable() Implements IDurableFlush.FlushDurable
+                    DurableFlushCalls += 1
+                End Sub
+
+            End Class
 
             Private Shared Sub TryDelete(Path As String)
                 Try

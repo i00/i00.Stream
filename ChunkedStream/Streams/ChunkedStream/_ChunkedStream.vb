@@ -4781,6 +4781,19 @@ Namespace Streams
                 Return
             End If
 
+            '
+            ' A wrapper stream (not itself a FileStream, e.g. PositionedFileStream) that
+            ' declares its own durable-flush behaviour gets it automatically - the same
+            ' auto-detection IPositionedStream capabilities already get - rather than
+            ' silently degrading to a non-durable Flush() whenever a caller forgets to pass
+            ' FlushDurableAction explicitly.
+            '
+            Dim TargetDurableFlush = TryCast(Target, IDurableFlush)
+            If TargetDurableFlush IsNot Nothing Then
+                TargetDurableFlush.FlushDurable()
+                Return
+            End If
+
             Target.Flush()
 
         End Sub
@@ -4807,6 +4820,12 @@ Namespace Streams
             Dim TargetFileStream = TryCast(Target, FileStream)
             If TargetFileStream IsNot Nothing Then
                 Await Task.Run(Sub() TargetFileStream.Flush(True)).ConfigureAwait(False)
+                Return
+            End If
+
+            Dim TargetDurableFlush = TryCast(Target, IDurableFlush)
+            If TargetDurableFlush IsNot Nothing Then
+                Await Task.Run(Sub() TargetDurableFlush.FlushDurable()).ConfigureAwait(False)
                 Return
             End If
 

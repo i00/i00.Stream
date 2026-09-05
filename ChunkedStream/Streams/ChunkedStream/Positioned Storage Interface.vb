@@ -117,4 +117,29 @@ Namespace Streams
 
     End Interface
 
+    ''' <summary>
+    ''' Optional contract implemented by a backing <see cref="Stream" /> that is not itself a
+    ''' <see cref="FileStream" /> but can still perform a genuine durable flush (an fsync /
+    ''' <c>FlushFileBuffers</c> - all previously written bytes provably on stable storage, not
+    ''' merely handed to the OS). ChunkedStream's own <see cref="FileStream" /> fallback for
+    ''' durable flush (<c>FileStream.Flush(True)</c>) only recognises an actual
+    ''' <see cref="FileStream" /> instance; a wrapper stream that is not one - such as
+    ''' <see cref="PositionedFileStream" /> - would otherwise silently fall through to a plain,
+    ''' non-durable <see cref="Stream.Flush" />, with nothing but a missed
+    ''' <c>FlushDurableAction</c> parameter standing between "durable" and "not" - a real
+    ''' footgun for a design built entirely around durable header rotation. Implementing this
+    ''' interface makes the durable flush automatic, the same way <see cref="IPositionedStream" />
+    ''' capabilities are auto-detected, instead of relying on every caller remembering to pass
+    ''' <c>FlushDurableAction</c> explicitly.
+    ''' </summary>
+    Public Interface IDurableFlush
+
+        ''' <summary>
+        ''' Durably flushes every byte written so far - the wrapper's equivalent of
+        ''' <c>FileStream.Flush(flushToDisk:=True)</c>.
+        ''' </summary>
+        Sub FlushDurable()
+
+    End Interface
+
 End Namespace

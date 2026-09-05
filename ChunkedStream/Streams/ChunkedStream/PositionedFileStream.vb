@@ -54,11 +54,15 @@ Namespace Streams
     ''' <see cref="IPositionedStreamAsync" /> with genuine concurrent positioned I/O to a
     ''' single file handle, via Win32 ReadFile/WriteFile and an explicit-offset OVERLAPPED
     ''' structure rather than the file's shared position. Declares
-    ''' <see cref="PositionedIoCapabilities.Full" />.
+    ''' <see cref="PositionedIoCapabilities.Full" />, and implements <see cref="IDurableFlush" />
+    ''' so <c>ChunkedStream.Open</c> picks up a genuine durable (fsync) flush automatically,
+    ''' without needing an explicit <c>FlushDurableAction</c> - this class is not itself a
+    ''' <see cref="FileStream" />, so ChunkedStream's built-in FileStream fallback for durable
+    ''' flush would otherwise never find it.
     ''' </summary>
     Public NotInheritable Class PositionedFileStream
         Inherits Stream
-        Implements IPositionedStreamAsync
+        Implements IPositionedStreamAsync, IDurableFlush
 
         <StructLayout(LayoutKind.Sequential)>
         Private Structure NATIVE_OVERLAPPED
@@ -105,12 +109,12 @@ Namespace Streams
 
         ''' <summary>
         ''' Durably flushes the file (<see cref="FileStream.Flush(Boolean)" /> with
-        ''' <c>flushToDisk:=True</c>) - pass <c>AddressOf this method</c> (or
-        ''' <c>Sub() stream.FlushDurable()</c>) as <c>ChunkedStream.Open</c>'s
-        ''' <c>FlushDurableAction</c>, since this class is not itself a <see cref="FileStream"/>
-        ''' so ChunkedStream's own FileStream fallback for durable flush does not apply.
+        ''' <c>flushToDisk:=True</c>). Implements <see cref="IDurableFlush" />, so
+        ''' <c>ChunkedStream.Open</c> picks this up automatically - passing
+        ''' <c>FlushDurableAction</c> explicitly is no longer necessary (though still
+        ''' honoured, and still takes priority, if supplied).
         ''' </summary>
-        Public Sub FlushDurable()
+        Public Sub FlushDurable() Implements IDurableFlush.FlushDurable
             _Inner.Flush(True)
         End Sub
 
