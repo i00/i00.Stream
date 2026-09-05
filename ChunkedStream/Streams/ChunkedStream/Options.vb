@@ -426,7 +426,10 @@ Namespace Streams
             ''' on the backing store's own queue depth - an SSD/NVMe device or a pooled-handle
             ''' wrapper typically wants several in flight, a single spinning disk wants close to
             ''' one. Defaults conservatively; raise it only for a backing store you know
-            ''' benefits.
+            ''' benefits - a same-hardware A/B (DOP 4 vs 8, 512 MB-1 GB through
+            ''' <see cref="PooledPositionedFileStream"/>) showed no measurable gain from
+            ''' raising this default, so it stays at 4 rather than matching
+            ''' <see cref="PooledPositionedFileStream.DefaultPoolSize"/> on an unproven guess.
             ''' </summary>
             Public Property MaxPhysicalWriteParallelism As Integer = 4
 
