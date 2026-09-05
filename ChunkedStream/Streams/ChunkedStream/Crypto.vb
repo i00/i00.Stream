@@ -200,6 +200,49 @@ Namespace Streams
 
         End Class
 
+        ''' <summary>
+        ''' Determines whether a chunked stream file requires <see cref="EncryptionInfo" /> to
+        ''' be opened, without attempting to open the stream.
+        ''' </summary>
+        ''' <param name="BaseStream">Backing storage stream. Its Position is restored before returning.</param>
+        ''' <returns>
+        ''' True if the file's master key is wrapped using user-supplied encryption information,
+        ''' meaning <see cref="EncryptionInfo" /> must be supplied to <see cref="Open" />. False
+        ''' if the backing stream has no header yet, has no file master key, or has a publicly
+        ''' wrapped file master key that Open does not require EncryptionInfo to unwrap.
+        ''' </returns>
+        ''' <remarks>
+        ''' The header copies are authenticated using the same public integrity key regardless
+        ''' of encryption state, so the wrap mode can be read and verified here without knowing
+        ''' any passphrase.
+        ''' </remarks>
+        Public Shared Function IsEncrypted(BaseStream As Stream) As Boolean
+
+            If BaseStream Is Nothing Then Throw New ArgumentNullException(NameOf(BaseStream))
+
+            If BaseStream.CanRead = False OrElse BaseStream.CanSeek = False Then
+                Throw New NotSupportedException($"Provided {NameOf(BaseStream)} must support {NameOf(BaseStream.CanRead)} and {NameOf(BaseStream.CanSeek)}.")
+            End If
+
+            If BaseStream.Length < DataStartOffset Then Return False
+
+            Dim OriginalPosition = BaseStream.Position
+
+            Try
+                Dim Candidates = ReadHeaderCandidates(BaseStream)
+
+                If Candidates.Count = 0 Then Throw New InvalidDataException("No valid chunked stream header was found.")
+
+                Dim WrapMode = CType(BitConverter.ToInt32(Candidates(0).Header, MasterKeyWrapModeOffset), MasterKeyWrapModes)
+
+                Return WrapMode = MasterKeyWrapModes.UserWrap
+
+            Finally
+                BaseStream.Position = OriginalPosition
+            End Try
+
+        End Function
+
         Private Sub InitialiseEncryptionForNewStream(EncryptionInfo As EncryptionInfo)
 
             If EncryptionInfo Is Nothing Then

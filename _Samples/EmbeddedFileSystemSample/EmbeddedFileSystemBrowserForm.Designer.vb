@@ -109,7 +109,7 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.tsiScan = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiDefrag = New System.Windows.Forms.ToolStripMenuItem()
         Me.MenuTextSeparator1 = New EmbeddedFileSystemSample.Controls.MenuTextSeparator()
-        Me.EncryptToolStripMenuItem1 = New System.Windows.Forms.ToolStripMenuItem()
+        Me.tsiEncrypt = New System.Windows.Forms.ToolStripMenuItem()
         Me.ToolStripMenuItem1 = New System.Windows.Forms.ToolStripSeparator()
         Me.tsiExit = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiBack = New System.Windows.Forms.ToolStripButton()
@@ -472,7 +472,7 @@ Partial Class EmbeddedFileSystemBrowserForm
         'ToolStripDropDownButton1
         '
         Me.ToolStripDropDownButton1.AutoToolTip = False
-        Me.ToolStripDropDownButton1.DropDownItems.AddRange(New System.Windows.Forms.ToolStripItem() {Me.MenuTextSeparator2, Me.tsiScan, Me.tsiDefrag, Me.MenuTextSeparator1, Me.EncryptToolStripMenuItem1, Me.ToolStripMenuItem1, Me.tsiExit})
+        Me.ToolStripDropDownButton1.DropDownItems.AddRange(New System.Windows.Forms.ToolStripItem() {Me.MenuTextSeparator2, Me.tsiScan, Me.tsiDefrag, Me.MenuTextSeparator1, Me.tsiEncrypt, Me.ToolStripMenuItem1, Me.tsiExit})
         Me.ToolStripDropDownButton1.ImageTransparentColor = System.Drawing.Color.Magenta
         Me.ToolStripDropDownButton1.Name = "ToolStripDropDownButton1"
         Me.ToolStripDropDownButton1.ShowDropDownArrow = False
@@ -485,19 +485,19 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.MenuTextSeparator2.BackColor = System.Drawing.SystemColors.Control
         Me.MenuTextSeparator2.ForeColor = System.Drawing.SystemColors.ControlText
         Me.MenuTextSeparator2.Name = "MenuTextSeparator2"
-        Me.MenuTextSeparator2.Size = New System.Drawing.Size(3840, 18)
+        Me.MenuTextSeparator2.Size = New System.Drawing.Size(1680, 18)
         Me.MenuTextSeparator2.Text = "Tools"
         '
         'tsiScan
         '
         Me.tsiScan.Name = "tsiScan"
-        Me.tsiScan.Size = New System.Drawing.Size(116, 22)
+        Me.tsiScan.Size = New System.Drawing.Size(180, 22)
         Me.tsiScan.Text = "&Scan"
         '
         'tsiDefrag
         '
         Me.tsiDefrag.Name = "tsiDefrag"
-        Me.tsiDefrag.Size = New System.Drawing.Size(116, 22)
+        Me.tsiDefrag.Size = New System.Drawing.Size(180, 22)
         Me.tsiDefrag.Text = "&Defrag"
         '
         'MenuTextSeparator1
@@ -506,24 +506,24 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.MenuTextSeparator1.BackColor = System.Drawing.SystemColors.Control
         Me.MenuTextSeparator1.ForeColor = System.Drawing.SystemColors.ControlText
         Me.MenuTextSeparator1.Name = "MenuTextSeparator1"
-        Me.MenuTextSeparator1.Size = New System.Drawing.Size(3840, 18)
+        Me.MenuTextSeparator1.Size = New System.Drawing.Size(1680, 18)
         Me.MenuTextSeparator1.Text = "Options"
         '
-        'EncryptToolStripMenuItem1
+        'tsiEncrypt
         '
-        Me.EncryptToolStripMenuItem1.Name = "EncryptToolStripMenuItem1"
-        Me.EncryptToolStripMenuItem1.Size = New System.Drawing.Size(116, 22)
-        Me.EncryptToolStripMenuItem1.Text = "&Encrypt"
+        Me.tsiEncrypt.Name = "tsiEncrypt"
+        Me.tsiEncrypt.Size = New System.Drawing.Size(180, 22)
+        Me.tsiEncrypt.Text = "&Encrypt"
         '
         'ToolStripMenuItem1
         '
         Me.ToolStripMenuItem1.Name = "ToolStripMenuItem1"
-        Me.ToolStripMenuItem1.Size = New System.Drawing.Size(113, 6)
+        Me.ToolStripMenuItem1.Size = New System.Drawing.Size(177, 6)
         '
         'tsiExit
         '
         Me.tsiExit.Name = "tsiExit"
-        Me.tsiExit.Size = New System.Drawing.Size(116, 22)
+        Me.tsiExit.Size = New System.Drawing.Size(180, 22)
         Me.tsiExit.Text = "E&xit"
         '
         'tsiBack
@@ -592,7 +592,7 @@ Partial Class EmbeddedFileSystemBrowserForm
     Friend WithEvents tsiScan As ToolStripMenuItem
     Friend WithEvents tsiDefrag As ToolStripMenuItem
     Friend WithEvents MenuTextSeparator1 As Controls.MenuTextSeparator
-    Friend WithEvents EncryptToolStripMenuItem1 As ToolStripMenuItem
+    Friend WithEvents tsiEncrypt As ToolStripMenuItem
     Friend WithEvents ToolStripMenuItem1 As ToolStripSeparator
     Friend WithEvents tsiExit As ToolStripMenuItem
     Friend WithEvents tsiBack As ToolStripButton

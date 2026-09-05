@@ -2899,55 +2899,164 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Using
     End Sub
 
-    Private Shared Function PromptForText(Title As String, Prompt As String) As String
-        Using Dialog As New Form()
-            Dialog.Text = Title
-            Dialog.FormBorderStyle = FormBorderStyle.FixedDialog
-            Dialog.StartPosition = FormStartPosition.CenterParent
-            Dialog.MinimizeBox = False
-            Dialog.MaximizeBox = False
-            Dialog.ShowInTaskbar = False
-            Dialog.ClientSize = New Size(430, 118)
+    Private Const PromptDialogFieldWidth As Integer = 320
+    Private Const PromptDialogWrapWidth As Integer = 360
 
-            Dim PromptLabel = New Label With {
-                .AutoSize = True,
-                .Left = 12,
-                .Top = 14,
-                .Text = Prompt
-            }
+    ''' <summary>
+    ''' Creates the small fixed-dialog shell (padding, font, AutoSize, an empty single-column
+    ''' content layout, and an unattached OK/Cancel button row) shared by the prompt dialogs
+    ''' below. The caller adds its own rows to Layout, in order, then adds ButtonRow last.
+    ''' OkButton's DialogResult is left None so a caller that needs to validate input before
+    ''' closing can handle its Click itself; a caller with nothing to validate can just set
+    ''' OkButton.DialogResult = DialogResult.OK.
+    ''' </summary>
+    Private Shared Sub CreatePromptDialogShell(Title As String,
+                                               ByRef Dialog As Form,
+                                               ByRef Layout As TableLayoutPanel,
+                                               ByRef OkButton As Button,
+                                               ByRef CancelButton As Button,
+                                               ByRef ButtonRow As Control)
+
+        Dialog = New Form With {
+            .Text = Title,
+            .FormBorderStyle = FormBorderStyle.FixedDialog,
+            .StartPosition = FormStartPosition.CenterParent,
+            .MinimizeBox = False,
+            .MaximizeBox = False,
+            .ShowInTaskbar = False,
+            .AutoSize = True,
+            .AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            .Padding = New Padding(12),
+            .Font = SystemFonts.MessageBoxFont
+        }
+
+        OkButton = New Button With {
+            .Text = "OK",
+            .AutoSize = True,
+            .Margin = New Padding(0, 0, 6, 0)
+        }
+
+        CancelButton = New Button With {
+            .Text = "Cancel",
+            .DialogResult = DialogResult.Cancel,
+            .AutoSize = True
+        }
+
+        Dim Row = New FlowLayoutPanel With {
+            .FlowDirection = FlowDirection.RightToLeft,
+            .AutoSize = True,
+            .Dock = DockStyle.Top,
+            .Margin = New Padding(0, 4, 0, 0)
+        }
+        Row.Controls.Add(CancelButton)
+        Row.Controls.Add(OkButton)
+        ButtonRow = Row
+
+        Layout = New TableLayoutPanel With {
+            .AutoSize = True,
+            .AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            .ColumnCount = 1,
+            .Dock = DockStyle.Fill
+        }
+
+        Dialog.Controls.Add(Layout)
+        Dialog.AcceptButton = OkButton
+        Dialog.CancelButton = CancelButton
+
+    End Sub
+
+    Private Shared Function CreatePromptLabel(Text As String) As Label
+        Return New Label With {
+            .AutoSize = True,
+            .MaximumSize = New Size(PromptDialogWrapWidth, 0),
+            .Text = Text,
+            .Margin = New Padding(0, 0, 0, 10)
+        }
+    End Function
+
+    Public Shared Function PromptForText(Owner As IWin32Window, Title As String, Prompt As String, PasswordBox As Boolean) As String
+
+        Dim Dialog As Form = Nothing
+        Dim Layout As TableLayoutPanel = Nothing
+        Dim OkButton As Button = Nothing
+        Dim CancelButton As Button = Nothing
+        Dim ButtonRow As Control = Nothing
+        CreatePromptDialogShell(Title, Dialog, Layout, OkButton, CancelButton, ButtonRow)
+
+        Using Dialog
+
             Dim InputTextBox = New TextBox With {
-                .Left = 12,
-                .Top = 38,
-                .Width = 406,
-                .MaxLength = 256
-            }
-            Dim OkButton = New Button With {
-                .Text = "OK",
-                .DialogResult = DialogResult.OK,
-                .Left = 262,
-                .Top = 76,
-                .Width = 75
-            }
-            Dim CancelButton = New Button With {
-                .Text = "Cancel",
-                .DialogResult = DialogResult.Cancel,
-                .Left = 343,
-                .Top = 76,
-                .Width = 75
+                .Width = PromptDialogFieldWidth,
+                .MaxLength = 256,
+                .UseSystemPasswordChar = PasswordBox,
+                .Margin = New Padding(0, 0, 0, 10)
             }
 
-            Dialog.Controls.Add(PromptLabel)
-            Dialog.Controls.Add(InputTextBox)
-            Dialog.Controls.Add(OkButton)
-            Dialog.Controls.Add(CancelButton)
-            Dialog.AcceptButton = OkButton
-            Dialog.CancelButton = CancelButton
+            Layout.Controls.Add(CreatePromptLabel(Prompt))
+            Layout.Controls.Add(InputTextBox)
+            Layout.Controls.Add(ButtonRow)
+
+            OkButton.DialogResult = DialogResult.OK
+
+            If Owner Is Nothing Then
+                Dialog.StartPosition = FormStartPosition.CenterScreen
+                Dialog.ShowInTaskbar = True
+            Else
+                Dialog.StartPosition = FormStartPosition.CenterParent
+            End If
+            If Dialog.ShowDialog(Owner) <> DialogResult.OK Then Return Nothing
+            Return InputTextBox.Text.Trim()
+
+        End Using
+
+    End Function
+
+    ''' <summary>
+    ''' Prompts for a new password with a confirmation box. The existing password, if any, is
+    ''' not requested or validated - the caller is assumed to already have decrypted access.
+    ''' </summary>
+    ''' <returns>
+    ''' Nothing if the user cancels. An empty string if both boxes are left blank, meaning
+    ''' password protection should be removed. Otherwise, the confirmed new password.
+    ''' </returns>
+    Public Shared Function PromptForNewPassword(Title As String, Prompt As String) As String
+
+        Dim Dialog As Form = Nothing
+        Dim Layout As TableLayoutPanel = Nothing
+        Dim OkButton As Button = Nothing
+        Dim CancelButton As Button = Nothing
+        Dim ButtonRow As Control = Nothing
+        CreatePromptDialogShell(Title, Dialog, Layout, OkButton, CancelButton, ButtonRow)
+
+        Using Dialog
+
+            Dim NewPasswordBox = New TextBox With {.Width = PromptDialogFieldWidth, .MaxLength = 256, .UseSystemPasswordChar = True, .Margin = New Padding(0, 0, 0, 8)}
+            Dim ConfirmPasswordBox = New TextBox With {.Width = PromptDialogFieldWidth, .MaxLength = 256, .UseSystemPasswordChar = True, .Margin = New Padding(0, 0, 0, 10)}
+
+            Layout.Controls.Add(CreatePromptLabel(Prompt))
+            Layout.Controls.Add(New Label With {.AutoSize = True, .Text = "New password:", .Margin = New Padding(0, 0, 0, 2)})
+            Layout.Controls.Add(NewPasswordBox)
+            Layout.Controls.Add(New Label With {.AutoSize = True, .Text = "Confirm password:", .Margin = New Padding(0, 0, 0, 2)})
+            Layout.Controls.Add(ConfirmPasswordBox)
+            Layout.Controls.Add(ButtonRow)
+
+            AddHandler OkButton.Click,
+                Sub()
+                    If NewPasswordBox.Text <> ConfirmPasswordBox.Text Then
+                        MsgBox(Dialog, "The passwords do not match.", MsgBoxStyle.Exclamation)
+                        ConfirmPasswordBox.Clear()
+                        ConfirmPasswordBox.Focus()
+                        Return
+                    End If
+
+                    Dialog.DialogResult = DialogResult.OK
+                End Sub
 
             If Dialog.ShowDialog() <> DialogResult.OK Then Return Nothing
-            Dim Result = InputTextBox.Text.Trim()
-            If Result.Length = 0 Then Return Nothing
-            Return Result
+            Return NewPasswordBox.Text
+
         End Using
+
     End Function
 
     Protected Overrides Sub Dispose(Disposing As Boolean)
@@ -2987,6 +3096,10 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
     Private Sub tsiDefrag_Click(sender As Object, e As EventArgs) Handles tsiDefrag.Click
         Defrag()
+    End Sub
+
+    Private Sub tsiEncrypt_Click(sender As Object, e As EventArgs) Handles tsiEncrypt.Click
+        SetPassword()
     End Sub
 
     Private Sub tsiScan_Click(sender As Object, e As EventArgs) Handles tsiScan.Click
@@ -3095,6 +3208,35 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
     Private Sub tsiFragmentation_Click(sender As Object, e As EventArgs) Handles tsiFragmentation.Click
         Defrag()
+    End Sub
+
+    ''' <summary>
+    ''' Sets, changes, or clears the file's password. The existing password, if any, is not
+    ''' requested - the file is already open and decrypted, so no prior authorisation check is
+    ''' needed here.
+    ''' </summary>
+    Private Sub SetPassword()
+        Dim NewPassword = PromptForNewPassword(
+            "Set Password",
+            "Enter a new password to protect this file, or leave both boxes blank to remove password protection.")
+
+        If NewPassword Is Nothing Then Return
+
+        Dim NewEncryptionInfo As ChunkedStream.EncryptionInfo = Nothing
+        If NewPassword <> "" Then
+            NewEncryptionInfo = New ChunkedStream.EncryptionInfo(NewPassword, System.Text.Encoding.UTF8.GetBytes(NewPassword))
+        End If
+
+        ExecuteLongBlockingActionOnThread(
+            Sub()
+                FileSystem.ChunkedStream.Options.EncryptionInfo = NewEncryptionInfo
+                FileSystem.ChunkedStream.ApplyOptions(ChunkedStream.ApplyOptionTypes.Encryption)
+            End Sub,
+            "The password could not be changed.")
+
+        OnMutatedFileSystem()
+
+        MsgBox(Me, If(NewEncryptionInfo Is Nothing, "Password protection removed.", "Password updated."), MsgBoxStyle.Information)
     End Sub
 
     Private Sub Defrag()
