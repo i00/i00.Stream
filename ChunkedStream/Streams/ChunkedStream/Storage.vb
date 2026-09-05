@@ -6,25 +6,103 @@ Namespace Streams
 
         Private NotInheritable Class FreeSpaceAllocator
 
-            Private ReadOnly _SpacesByOffset As New SortedDictionary(Of Long, Long)()
+            '
+            ' Free spans used to live in one SortedDictionary(Of Long, Long) keyed by offset,
+            ' with every lookup (BestFit's "smallest sufficient hole", and Add's "what touches
+            ' this span") scanning every entry. Both are hot paths - Add runs on every physical
+            ' record reclaim, TryAllocate on every BestFit write - and both degrade linearly
+            ' with the number of free spans, which grows with archive churn, not archive size.
+            '
+            ' An earlier version of this fix used SortedSet(Of Long).GetViewBetween for both
+            ' queries - which turned out to be a regression, not a win: .NET's TreeSubSet (the
+            ' view GetViewBetween returns) computes Count - and Min/Max, which check Count - by
+            ' walking the view, not via the O(log n) navigation a real SortedSet gives. So a
+            ' view is O(view size) per call, same complexity class as the original scan with
+            ' extra overhead on top. Measured: it made the benchmark below ~2x *slower*.
+            '
+            ' What actually ships is classic boundary-tag coalescing (the K&R malloc/free
+            ' technique) plus a plain-SortedSet ascending scan bounded by *distinct lengths*
+            ' rather than free-span count:
+            '   _OffsetIndex     - every free offset, sorted; only used for the linear-scan
+            '                      fallback paths (FirstFit; MinOffset/MaxWaste-restricted
+            '                      BestFit) and CloneSpaces/Snapshot enumeration order.
+            '   _LengthByOffset  - O(1) length lookup for a known start offset. Doubles as the
+            '                      "does a free span start exactly here" check Add's right-side
+            '                      merge needs.
+            '   _StartByEnd      - end offset -> start offset, so Add's left-side merge is an
+            '                      O(1) "does a free span end exactly at my start" lookup
+            '                      instead of a predecessor search.
+            '   _OffsetsByLength - offsets sharing a length, so BestFit's original offset-order
+            '                      tie-break (smallest offset among equal-length holes) still
+            '                      holds.
+            '   _DistinctLengths - just the lengths present. Chunk sizes cluster around a
+            '                      handful of values, so an ascending scan for "smallest length
+            '                      >= Required" costs O(distinct lengths), not O(free spans) -
+            '                      order-of-magnitude fewer in practice, and immune to the
+            '                      TreeSubSet trap above because it enumerates the real set.
+            ' CloneSpaces/RestoreSpaces/Snapshot keep their original shape so checkpoint state
+            ' capture/restore and hole-directory persistence need no changes.
+            '
+            Private ReadOnly _OffsetIndex As New SortedSet(Of Long)()
+            Private ReadOnly _LengthByOffset As New Dictionary(Of Long, Long)()
+            Private ReadOnly _StartByEnd As New Dictionary(Of Long, Long)()
+            Private ReadOnly _OffsetsByLength As New Dictionary(Of Long, SortedSet(Of Long))()
+            Private ReadOnly _DistinctLengths As New SortedSet(Of Long)()
+
+            Private Sub Insert(Offset As Long, Length As Long)
+
+                _OffsetIndex.Add(Offset)
+                _LengthByOffset(Offset) = Length
+                _StartByEnd(Offset + Length) = Offset
+
+                Dim Bucket As SortedSet(Of Long) = Nothing
+                If _OffsetsByLength.TryGetValue(Length, Bucket) = False Then
+                    Bucket = New SortedSet(Of Long)()
+                    _OffsetsByLength(Length) = Bucket
+                    _DistinctLengths.Add(Length)
+                End If
+                Bucket.Add(Offset)
+
+            End Sub
+
+            Private Sub RemoveSpan(Offset As Long)
+
+                Dim Length = _LengthByOffset(Offset)
+                _OffsetIndex.Remove(Offset)
+                _LengthByOffset.Remove(Offset)
+                _StartByEnd.Remove(Offset + Length)
+
+                Dim Bucket = _OffsetsByLength(Length)
+                Bucket.Remove(Offset)
+                If Bucket.Count = 0 Then
+                    _OffsetsByLength.Remove(Length)
+                    _DistinctLengths.Remove(Length)
+                End If
+
+            End Sub
 
             Public Function CloneSpaces() As SortedDictionary(Of Long, Long)
 
-                Return New SortedDictionary(Of Long, Long)(_SpacesByOffset)
+                Dim Result As New SortedDictionary(Of Long, Long)()
+                For Each Offset In _OffsetIndex
+                    Result(Offset) = _LengthByOffset(Offset)
+                Next
+                Return Result
 
             End Function
 
             Public Sub RestoreSpaces(Spaces As SortedDictionary(Of Long, Long))
 
-                If Spaces Is Nothing Then
-                    _SpacesByOffset.Clear()
-                    Return
-                End If
+                _OffsetIndex.Clear()
+                _LengthByOffset.Clear()
+                _StartByEnd.Clear()
+                _OffsetsByLength.Clear()
+                _DistinctLengths.Clear()
 
-                _SpacesByOffset.Clear()
+                If Spaces Is Nothing Then Return
 
                 For Each pair In Spaces
-                    _SpacesByOffset(pair.Key) = pair.Value
+                    Insert(pair.Key, pair.Value)
                 Next
 
             End Sub
@@ -37,27 +115,29 @@ Namespace Streams
 
                 Dim MergedStart = Offset
                 Dim MergedEnd = Offset + Length
-                Dim OffsetsToRemove As New List(Of Long)()
 
-                For Each pair In _SpacesByOffset
+                '
+                ' Boundary-tag coalescing: a free span can only ever touch the new one at an
+                ' EXACT address (spans never overlap by construction), so "is there a left
+                ' neighbour" is "does a free span end exactly at MergedStart" (_StartByEnd) and
+                ' "is there a right neighbour" is "does a free span start exactly at MergedEnd"
+                ' (_LengthByOffset) - both O(1) dictionary lookups, no tree/scan involved. The
+                ' While loops chase a run of several touching spans (e.g. three tiny adjacent
+                ' holes becoming one) exactly as the original scan did.
+                '
+                Dim LeftOffset As Long
+                While _StartByEnd.TryGetValue(MergedStart, LeftOffset)
+                    MergedStart = LeftOffset
+                    RemoveSpan(LeftOffset)
+                End While
 
-                    Dim ExistingStart = pair.Key
-                    Dim ExistingEnd = ExistingStart + pair.Value
+                Dim RightLength As Long
+                While _LengthByOffset.TryGetValue(MergedEnd, RightLength)
+                    RemoveSpan(MergedEnd)
+                    MergedEnd += RightLength
+                End While
 
-                    If ExistingEnd < MergedStart Then Continue For
-                    If ExistingStart > MergedEnd Then Exit For
-
-                    MergedStart = Math.Min(MergedStart, ExistingStart)
-                    MergedEnd = Math.Max(MergedEnd, ExistingEnd)
-                    OffsetsToRemove.Add(ExistingStart)
-
-                Next
-
-                For Each existingOffset In OffsetsToRemove
-                    _SpacesByOffset.Remove(existingOffset)
-                Next
-
-                _SpacesByOffset(MergedStart) = MergedEnd - MergedStart
+                Insert(MergedStart, MergedEnd - MergedStart)
 
             End Sub
 
@@ -91,31 +171,63 @@ Namespace Streams
                 Dim SelectedOffset As Long = -1
                 Dim SelectedLength As Long = Long.MaxValue
 
-                For Each pair In _SpacesByOffset
+                '
+                ' BestFit with no offset/waste restriction - every chunk and index-page write
+                ' outside an in-checkpoint metadata scratch region - is the bulk hot path.
+                ' Chunk sizes cluster around a handful of values in practice, so scanning the
+                ' *distinct lengths* ascending (a plain SortedSet, not a GetViewBetween view -
+                ' see the class comment on why a view is the wrong tool here) for the first one
+                ' >= RequiredLength costs O(distinct lengths), not O(free spans). FirstFit
+                ' (offset order matters, not length) and the narrow-scope restricted callers
+                ' (in-checkpoint metadata, the snug metadata-root hole) keep the original
+                ' linear scan, unchanged.
+                '
+                If FromStart = False AndAlso MinOffset = 0 AndAlso MaxWaste = Long.MaxValue Then
 
-                    If pair.Key < MinOffset Then Continue For
-                    If pair.Value < RequiredLength Then Continue For
-                    If pair.Value - RequiredLength > MaxWaste Then Continue For
+                    For Each CandidateLength In _DistinctLengths
+                        If CandidateLength >= RequiredLength Then
+                            SelectedLength = CandidateLength
+                            Exit For
+                        End If
+                    Next
 
-                    If FromStart Then
-                        SelectedOffset = pair.Key
-                        SelectedLength = pair.Value
-                        Exit For
+                    If SelectedLength = Long.MaxValue Then
+                        Offset = -1
+                        Return False
                     End If
 
-                    If pair.Value < SelectedLength Then
-                        SelectedOffset = pair.Key
-                        SelectedLength = pair.Value
+                    SelectedOffset = _OffsetsByLength(SelectedLength).Min
+
+                Else
+
+                    For Each ExistingOffset In _OffsetIndex
+
+                        If ExistingOffset < MinOffset Then Continue For
+                        Dim ExistingLength = _LengthByOffset(ExistingOffset)
+                        If ExistingLength < RequiredLength Then Continue For
+                        If ExistingLength - RequiredLength > MaxWaste Then Continue For
+
+                        If FromStart Then
+                            SelectedOffset = ExistingOffset
+                            SelectedLength = ExistingLength
+                            Exit For
+                        End If
+
+                        If ExistingLength < SelectedLength Then
+                            SelectedOffset = ExistingOffset
+                            SelectedLength = ExistingLength
+                        End If
+
+                    Next
+
+                    If SelectedOffset < 0 Then
+                        Offset = -1
+                        Return False
                     End If
 
-                Next
-
-                If SelectedOffset < 0 Then
-                    Offset = -1
-                    Return False
                 End If
 
-                _SpacesByOffset.Remove(SelectedOffset)
+                RemoveSpan(SelectedOffset)
                 Offset = SelectedOffset
 
                 Dim RemainingLength = SelectedLength - RequiredLength
@@ -130,18 +242,22 @@ Namespace Streams
 
             Public Function Snapshot() As List(Of HoleDirectoryRecord)
 
-                Return _SpacesByOffset.
-                       Select(Function(pair) New HoleDirectoryRecord With {
+                Return _OffsetIndex.
+                       Select(Function(offset) New HoleDirectoryRecord With {
                            .SpaceType = HoleSpaceTypes.FreeSpace,
-                           .Offset = pair.Key,
-                           .Length = pair.Value
+                           .Offset = offset,
+                           .Length = _LengthByOffset(offset)
                        }).
                        ToList()
 
             End Function
 
             Public Sub Clear()
-                _SpacesByOffset.Clear()
+                _OffsetIndex.Clear()
+                _LengthByOffset.Clear()
+                _StartByEnd.Clear()
+                _OffsetsByLength.Clear()
+                _DistinctLengths.Clear()
             End Sub
 
         End Class
