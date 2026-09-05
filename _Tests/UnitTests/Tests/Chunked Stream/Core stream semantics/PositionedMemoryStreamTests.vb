@@ -168,6 +168,60 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Regression test for a real bug in EnsureCapacity's growth strategy: its
+            ''' Int32-overflow guard used to clamp a too-large doubling request down to exactly
+            ''' the required size, rather than to the largest still-safe allocation. That
+            ''' silently killed the amortised-growth property right at the point it matters
+            ''' most in the real ~2GB-array-limited class (~1 GB, where RequiredLength * 2 first
+            ''' threatens to exceed Int32.MaxValue): every subsequent write needing more
+            ''' capacity then paid its own full reallocation + copy of the whole buffer so far -
+            ''' O(n) per call, O(n^2) overall - made drastically worse in practice by GC
+            ''' pressure from repeatedly abandoning gigabyte-sized arrays. Measured before the
+            ''' fix: 40+ seconds for a single 64 MB write once the stream passed ~1 GB.
+            '''
+            ''' Reproduced here at a tiny, safe scale via Debug_MaxArrayLengthOverride instead
+            ''' of actually growing a multi-gigabyte buffer (which OOM'd inside the shared test
+            ''' process - a 64MB block plus a transient ~3GB peak during the reallocation itself
+            ''' is a lot to ask of a process that has already run 300+ other tests). Reallocation
+            ''' count (the backing array's reference changing) stands in for timing: amortised
+            ''' doubling growth needs O(log n) reallocations, not one per write.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub GrowthNearTheCapacityLimitStaysAmortised()
+
+                Using Pms As New PositionedMemoryStream()
+                    Pms.Debug_MaxArrayLengthOverride = 10000 ' tiny stand-in for the real ~2GB cap
+
+                    Dim ReallocationCount = 0
+                    Dim LastArray As Byte() = Nothing
+
+                    Dim WriteBlock(99) As Byte
+                    Dim Written = 0
+                    While Written < 9500 ' comfortably past where doubling first exceeds the override
+
+                        Pms.WriteAt(Written, WriteBlock, 0, WriteBlock.Length)
+
+                        Dim CurrentArray = Pms.Debug_GetBufferArray()
+                        If Not ReferenceEquals(CurrentArray, LastArray) Then
+                            ReallocationCount += 1
+                            LastArray = CurrentArray
+                        End If
+
+                        Written += WriteBlock.Length
+
+                    End While
+
+                    ' log2(9500 / 256) ~ 5-6 reallocations for genuine amortised doubling: the
+                    ' old bug degraded to one reallocation per write (95 of them) once doubling
+                    ' first exceeded the (here tiny) cap.
+                    AssertTrue(ReallocationCount < 20,
+                               $"Expected O(log n) reallocations, got {ReallocationCount} - growth is no longer amortised near the capacity limit.")
+
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

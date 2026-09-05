@@ -97,13 +97,53 @@ Namespace Streams
         End Sub
 
         ' Called only while holding the write lock.
+        ''' <summary>
+        ''' A conservative safe maximum for a single-dimension <c>Byte()</c> array. Some CLR
+        ''' builds refuse an allocation request of exactly <see cref="Integer.MaxValue" />
+        ''' bytes (a handful of bytes of per-array overhead push the true object size over an
+        ''' internal limit), so this backs off slightly rather than finding out the hard way.
+        ''' </summary>
+        Private Const MaxArrayLength As Integer = Integer.MaxValue - 56
+
+        ''' <summary>
+        ''' Doubles capacity like a typical growable buffer (amortised O(1) per byte written)
+        ''' - critically, clamping an over-sized doubling request to <see cref="MaxArrayLength"/>
+        ''' (the largest safe allocation) rather than down to just <paramref name="RequiredLength"/>.
+        ''' Clamping to the exact requirement instead of the safe maximum was a real bug: once
+        ''' RequiredLength * 2 first exceeded Int32 range, every subsequent call needing more
+        ''' capacity stopped over-allocating at all, so every write from that point on paid its
+        ''' own full reallocation + copy of the whole buffer-so-far - O(n) per call instead of
+        ''' amortised O(1), i.e. O(n^2) overall - made far worse in practice by the GC pressure
+        ''' of repeatedly abandoning gigabyte-sized arrays. Measured: a stream growing past
+        ''' ~1 GB in 64 MB increments went from tens of milliseconds a step to 40+ seconds a
+        ''' step under the old logic.
+        ''' </summary>
+        ''' <summary>
+        ''' Test-only override for <see cref="MaxArrayLength" />, letting the growth-strategy
+        ''' bug this class once had be reproduced (and asserted fixed) at a tiny, fast, cheap
+        ''' scale instead of by actually growing a multi-gigabyte buffer.
+        ''' </summary>
+        Friend Property Debug_MaxArrayLengthOverride As Integer?
+
+        ''' <summary>Test-only: the current backing array, to detect reallocation by reference.</summary>
+        Friend Function Debug_GetBufferArray() As Byte()
+            Return _Buffer
+        End Function
+
+        Private ReadOnly Property EffectiveMaxArrayLength As Integer
+            Get
+                Return If(Debug_MaxArrayLengthOverride.HasValue, Debug_MaxArrayLengthOverride.Value, MaxArrayLength)
+            End Get
+        End Property
+
         Private Sub EnsureCapacity(RequiredLength As Long)
             If RequiredLength <= _Buffer.LongLength Then Return
-            If RequiredLength > Integer.MaxValue Then
-                Throw New IOException("PositionedMemoryStream cannot grow beyond 2 GB.")
+            Dim EffectiveMax = CLng(EffectiveMaxArrayLength)
+            If RequiredLength > EffectiveMax Then
+                Throw New IOException($"PositionedMemoryStream cannot grow beyond {EffectiveMax:N0} bytes (~2 GB).")
             End If
-            Dim NewCapacity = Math.Max(RequiredLength, Math.Max(256L, _Buffer.LongLength * 2L))
-            If NewCapacity > Integer.MaxValue Then NewCapacity = RequiredLength
+            Dim DoubledCapacity = Math.Max(RequiredLength, Math.Max(256L, _Buffer.LongLength * 2L))
+            Dim NewCapacity = Math.Min(DoubledCapacity, EffectiveMax)
             Dim NewBuffer(CInt(NewCapacity) - 1) As Byte
             If _Length > 0 Then System.Buffer.BlockCopy(_Buffer, 0, NewBuffer, 0, CInt(_Length))
             _Buffer = NewBuffer
