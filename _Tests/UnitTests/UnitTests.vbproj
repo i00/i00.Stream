@@ -97,6 +97,8 @@
     <Compile Include="Tests\Chunked Stream\Core stream semantics\Foundation.vb" />
     <Compile Include="Tests\Chunked Stream\Core stream semantics\PositionedStream.vb" />
     <Compile Include="Tests\Chunked Stream\Core stream semantics\PositionedFileStreamTests.vb" />
+    <Compile Include="Tests\Chunked Stream\Core stream semantics\PositionedMemoryStreamTests.vb" />
+    <Compile Include="Tests\Chunked Stream\Core stream semantics\PooledPositionedFileStreamTests.vb" />
     <Compile Include="Tests\Chunked Stream\Core stream semantics\SparseStorage.vb" />
     <Compile Include="Tests\Chunked Stream\Correctness and survival\CrashSafety.vb" />
     <Compile Include="Tests\Chunked Stream\Correctness and survival\DeferredPublish.vb" />
