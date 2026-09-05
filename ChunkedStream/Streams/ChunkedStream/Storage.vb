@@ -1270,6 +1270,133 @@ Namespace Streams
         End Function
 
         '
+        ' Async twin of ReadPhysicalRecordPlainRange. Only the backing-store reads differ
+        ' (ReadAtAsync in place of ReadAt); the guards, length-table walk and per-sub-block
+        ' MAC/decrypt/decompress are pure CPU and identical to the synchronous path.
+        '
+        Private Async Function ReadPhysicalRecordPlainRangeAsync(Record As PhysicalRecordEntry,
+                                                                 RangeOffset As Integer,
+                                                                 RangeLength As Integer,
+                                                                 CancellationToken As Threading.CancellationToken,
+                                                                 Optional Cipher As ChunkCipher = Nothing) As Task(Of Byte())
+
+            If RangeLength <= 0 Then Return Array.Empty(Of Byte)()
+
+            If Record.RecordId <= SparsePhysicalRecordId Then Throw New InvalidDataException("Invalid physical record id.")
+            If Record.PhysicalOffset < DataStartOffset Then Throw New InvalidDataException($"Invalid physical record offset for record {Record.RecordId}.")
+            If Record.PhysicalLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
+            If Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
+
+            Dim Header(ChunkRecordHeaderSize - 1) As Byte
+            Await ReadAtAsync(Record.PhysicalOffset, Header, 0, Header.Length, CancellationToken).ConfigureAwait(False)
+
+            Dim StoredRecordId = BitConverter.ToInt64(Header, 0)
+            If StoredRecordId <> Record.RecordId Then
+                Throw New InvalidDataException($"Physical record id mismatch. Expected {Record.RecordId}, found {StoredRecordId}.")
+            End If
+
+            Dim SubBlockCount = BitConverter.ToInt32(Header, ChunkSubBlockCountOffset)
+            If SubBlockCount <= 0 Then Throw New InvalidDataException($"Invalid physical record sub-block count for record {Record.RecordId}.")
+
+            If SubBlockCount = 1 OrElse RangeLength >= Record.PlainLength Then
+                Dim Whole = Await ReadPhysicalRecordPlainAsync(Record, CancellationToken, Cipher).ConfigureAwait(False)
+                If RangeOffset < 0 OrElse RangeOffset + RangeLength > Whole.Length Then
+                    Throw New InvalidDataException($"Invalid range for physical record {Record.RecordId}.")
+                End If
+                Dim WholeResult(RangeLength - 1) As Byte
+                Buffer.BlockCopy(Whole, RangeOffset, WholeResult, 0, RangeLength)
+                Return WholeResult
+            End If
+
+            Dim CompressionMethod = CType(BitConverter.ToInt32(Header, ChunkCompressionMethodOffset), ChunkedStreamOptions.CompressionMethods)
+            Dim EncryptionMethod = CType(BitConverter.ToInt32(Header, ChunkEncryptionMethodOffset), ChunkEncryptionMethods)
+            Dim PlainLength = BitConverter.ToInt32(Header, ChunkPlainLengthOffset)
+
+            If RangeOffset < 0 OrElse RangeOffset + RangeLength > PlainLength Then
+                Throw New InvalidDataException($"Invalid range for physical record {Record.RecordId}.")
+            End If
+
+            Dim RecordMacKey =
+                If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey, _ChunkMacKey, PublicIntegrityKey)
+
+            If RecordMacKey Is Nothing Then
+                Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
+            End If
+
+            Dim EffectiveCipher = If(Cipher, _ChunkCipher)
+            If EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey AndAlso
+               (_ChunkEncryptionKey Is Nothing OrElse EffectiveCipher Is Nothing) Then
+                Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
+            End If
+
+            Dim SubBlockLengthTableSize = SubBlockCount * 4
+            Dim SubBlockMacCoveredPrefixSize = ChunkRecordHeaderSize + SubBlockLengthTableSize
+            Dim LengthTable(SubBlockLengthTableSize - 1) As Byte
+            Await ReadAtAsync(Record.PhysicalOffset + ChunkRecordHeaderSize, LengthTable, 0, SubBlockLengthTableSize, CancellationToken).ConfigureAwait(False)
+
+            Dim EffectiveSubBlockSize = CInt((CLng(PlainLength) + SubBlockCount - 1) \ SubBlockCount)
+            Dim FirstSubBlock = RangeOffset \ EffectiveSubBlockSize
+            Dim LastSubBlock = Math.Min(SubBlockCount - 1, (RangeOffset + RangeLength - 1) \ EffectiveSubBlockSize)
+
+            Dim SubBlockOnDiskOffset = Record.PhysicalOffset + SubBlockMacCoveredPrefixSize
+            Dim SubBlockStoredLength(SubBlockCount - 1) As Integer
+            For i = 0 To SubBlockCount - 1
+                SubBlockStoredLength(i) = BitConverter.ToInt32(LengthTable, i * 4)
+                If i < FirstSubBlock Then SubBlockOnDiskOffset += CLng(IvSize) + SubBlockStoredLength(i) + MacSize
+            Next
+
+            Dim Result(RangeLength - 1) As Byte
+            Dim ResultOffset = 0
+            Dim CurrentOnDiskOffset = SubBlockOnDiskOffset
+
+            For SubBlockIndex = FirstSubBlock To LastSubBlock
+
+                Dim StoredLength = SubBlockStoredLength(SubBlockIndex)
+                Dim SpanLength = IvSize + StoredLength + MacSize
+
+                Dim SpanBytes(SpanLength - 1) As Byte
+                Await ReadAtAsync(CurrentOnDiskOffset, SpanBytes, 0, SpanLength, CancellationToken).ConfigureAwait(False)
+
+                Using Hmac As New HMACSHA256(RecordMacKey)
+                    Hmac.TransformBlock(Header, 0, Header.Length, Nothing, 0)
+                    Hmac.TransformBlock(LengthTable, 0, LengthTable.Length, Nothing, 0)
+                    Dim ExpectedMac = Hmac.ComputeHash(SpanBytes, 0, IvSize + StoredLength)
+                    If FixedTimeEquals(ExpectedMac, 0, SpanBytes, IvSize + StoredLength, MacSize) = False Then
+                        Throw New CryptographicException("Physical record MAC invalid.")
+                    End If
+                End Using
+
+                Dim ThisPlainOffset = SubBlockIndex * EffectiveSubBlockSize
+                Dim ThisPlainLength = Math.Min(EffectiveSubBlockSize, PlainLength - ThisPlainOffset)
+
+                Dim SubPayload = If(StoredLength = 0, Array.Empty(Of Byte)(), New Byte(StoredLength - 1) {})
+
+                If EncryptionMethod = ChunkEncryptionMethods.None Then
+                    If StoredLength > 0 Then Buffer.BlockCopy(SpanBytes, IvSize, SubPayload, 0, StoredLength)
+                Else
+                    EffectiveCipher.Crypt(SpanBytes, 0, SpanBytes, IvSize, StoredLength, SubPayload, 0)
+                End If
+
+                Dim SubPlain = DecompressPayload(CompressionMethod, SubPayload, ThisPlainLength)
+                If SubPlain.Length <> ThisPlainLength Then
+                    Throw New InvalidDataException("Physical record decompressed/plain length mismatch.")
+                End If
+
+                Dim CopyStart = Math.Max(0, RangeOffset - ThisPlainOffset)
+                Dim CopyEnd = Math.Min(ThisPlainLength, RangeOffset + RangeLength - ThisPlainOffset)
+                Dim CopyLength = Math.Max(0, CopyEnd - CopyStart)
+                If CopyLength > 0 Then Buffer.BlockCopy(SubPlain, CopyStart, Result, ResultOffset, CopyLength)
+                ResultOffset += CopyLength
+
+                CurrentOnDiskOffset += SpanLength
+
+            Next
+
+            Return Result
+
+        End Function
+
+        '
         ' Async twin of ReadPhysicalRecordPlain. Only the backing-store read differs; the
         ' guards and DecryptPhysicalRecord (MAC check, decrypt, decompress) are pure CPU
         ' and shared with the synchronous path.
@@ -1346,14 +1473,14 @@ Namespace Streams
             End If
 
             Dim Record = GetPhysicalRecord(Extent.PhysicalRecordId)
-            Dim Plain = Await ReadPhysicalRecordPlainAsync(Record, CancellationToken, Cipher).ConfigureAwait(False)
             Dim SourceOffset = Extent.PhysicalRecordOffset + OffsetInsideExtent
 
-            If SourceOffset < 0 OrElse SourceOffset + Count > Plain.Length Then
+            If SourceOffset < 0 OrElse SourceOffset + Count > Record.PlainLength Then
                 Throw New InvalidDataException($"Extent references beyond physical record {Extent.PhysicalRecordId}.")
             End If
 
-            Buffer.BlockCopy(Plain, SourceOffset, Output, OutputOffset, Count)
+            Dim Plain = Await ReadPhysicalRecordPlainRangeAsync(Record, SourceOffset, Count, CancellationToken, Cipher).ConfigureAwait(False)
+            Buffer.BlockCopy(Plain, 0, Output, OutputOffset, Count)
 
         End Function
 

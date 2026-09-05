@@ -149,6 +149,63 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' ReadPhysicalRecordPlainRangeAsync is a separate implementation from the
+            ''' synchronous ReadPhysicalRecordPlainRange (only the backing-store reads differ),
+            ''' so it needs its own coverage rather than relying on the synchronous partial-read
+            ''' test above. Exercises the same partial-read shapes (inside one sub-block,
+            ''' spanning a boundary, inside a short final sub-block) through
+            ''' <see cref="ChunkedStream.ReadAsync"/>.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub SubBlockSplitSupportsAsyncPartialReads()
+
+                Const ChunkSize As Integer = 256 * 1024
+                Const SubBlockSize As Integer = 64 * 1024 ' 4 sub-blocks per full chunk
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = ChunkSize,
+                        .SubBlockSize = SubBlockSize,
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(9301))
+                    }
+
+                    Dim Expected = GenerateRandomData(ChunkSize * 2 + 12345, 9302)
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, Expected)
+                        Cs.Validate().ThrowIfErrors()
+
+                        Dim MidStart = SubBlockSize * 2 + 100
+                        Dim MidBuffer(499) As Byte
+                        Dim MidRead = Cs.ReadAsync(MidStart, MidBuffer, 0, MidBuffer.Length).GetAwaiter().GetResult()
+                        AssertEqual(MidBuffer.Length, MidRead, "Async partial read inside a middle sub-block returned the wrong count.")
+                        AssertBytesEqual(Slice(Expected, MidStart, MidBuffer.Length), MidBuffer, "Async partial read inside a middle sub-block returned the wrong bytes.")
+
+                        Dim SpanStart = SubBlockSize - 100
+                        Dim SpanBuffer(199) As Byte
+                        Dim SpanRead = Cs.ReadAsync(SpanStart, SpanBuffer, 0, SpanBuffer.Length).GetAwaiter().GetResult()
+                        AssertEqual(SpanBuffer.Length, SpanRead, "Async partial read spanning two sub-blocks returned the wrong count.")
+                        AssertBytesEqual(Slice(Expected, SpanStart, SpanBuffer.Length), SpanBuffer, "Async partial read spanning two sub-blocks returned the wrong bytes.")
+
+                        Dim TailStart = Expected.Length - 50
+                        Dim TailBuffer(29) As Byte
+                        Dim TailRead = Cs.ReadAsync(TailStart, TailBuffer, 0, TailBuffer.Length).GetAwaiter().GetResult()
+                        AssertEqual(TailBuffer.Length, TailRead, "Async partial read inside the final short sub-block returned the wrong count.")
+                        AssertBytesEqual(Slice(Expected, TailStart, TailBuffer.Length), TailBuffer, "Async partial read inside the final short sub-block returned the wrong bytes.")
+
+                        Dim AsyncAll = Cs.ToArrayAsync().GetAwaiter().GetResult()
+                        AssertBytesEqual(Expected, AsyncAll, "Async full read of a sub-block-split stream lost data.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
         End Class
 
     End Class
