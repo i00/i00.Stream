@@ -322,10 +322,15 @@ Namespace Streams
         ''' (or set the property before the failure) to keep a partially written file pending for
         ''' <see cref="RecoverPendingFiles" /> when a write is abandoned part way through. Clear it on
         ''' the success path so the last statement before the stream closes commits the file.
+        ''' <paramref name="WriteBufferFlushThreshold" /> sizes the buffer a sequential append fills
+        ''' before it is materialised and durably published - raise it for a large sequential upload
+        ''' to cut the number of fsyncs (see the comment on <c>FileStreamView.BufferedEndPosition</c>).
         ''' </remarks>
-        Public Function OpenFile(FileAnchorId As Long, Optional PendingOnClose As Boolean = False) As FileStreamView
+        Public Function OpenFile(FileAnchorId As Long, Optional PendingOnClose As Boolean = False,
+                                 Optional WriteBufferFlushThreshold As Integer = FileStreamView.DefaultWriteBufferFlushThreshold) As FileStreamView
             SyncLock _SyncRoot
                 ThrowIfDisposed()
+                If WriteBufferFlushThreshold <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(WriteBufferFlushThreshold))
                 Dim FileAnchor = GetAnchor(FileAnchorId)
                 EnsureType(FileAnchor, DataType.File)
                 If _OpenFileIds.Add(FileAnchorId) = False Then Throw New IOException($"File anchor {FileAnchorId} is already open.")
@@ -335,7 +340,7 @@ Namespace Streams
                         Throw New InvalidDataException($"Anchor {FileAnchorId} is not referenced as a file.")
                     End If
                     SetEntryType(Location, EntryTypes.PendingFile)
-                    Return New FileStreamView(Me, FileAnchor) With {.PendingOnClose = PendingOnClose}
+                    Return New FileStreamView(Me, FileAnchor, WriteBufferFlushThreshold) With {.PendingOnClose = PendingOnClose}
                 Catch
                     _OpenFileIds.Remove(FileAnchorId)
                     Throw
@@ -1351,17 +1356,23 @@ Namespace Streams
         Public NotInheritable Class FileStreamView
             Inherits Stream
 
-            Private Const WriteBufferFlushThreshold As Integer = 4 * 1024 * 1024
+            ''' <summary>
+            ''' Default for <see cref="OpenFile" />'s <c>WriteBufferFlushThreshold</c> parameter.
+            ''' </summary>
+            Public Const DefaultWriteBufferFlushThreshold As Integer = 4 * 1024 * 1024
 
             Private ReadOnly _Owner As EmbeddedFileSystem
             Private ReadOnly _Anchor As ChunkedStream.Anchor
             Private ReadOnly _WriteBuffer As New MemoryStream()
+            Private ReadOnly _WriteBufferFlushThreshold As Integer
             Private _Position As Long
             Private _Disposed As Boolean
 
-            Friend Sub New(Owner As EmbeddedFileSystem, Anchor As ChunkedStream.Anchor)
+            Friend Sub New(Owner As EmbeddedFileSystem, Anchor As ChunkedStream.Anchor,
+                          WriteBufferFlushThreshold As Integer)
                 _Owner = Owner
                 _Anchor = Anchor
+                _WriteBufferFlushThreshold = WriteBufferFlushThreshold
             End Sub
 
             ''' <summary>
@@ -1376,11 +1387,18 @@ Namespace Streams
 
             '
             ' Sequential appends past the current end are buffered and materialised in one
-            ' Insert per few MB, so each Insert lands full chunk records instead of growing
-            ' the file's tail chunk one small write at a time (the latter frees an
-            ' intermediate record for every write and is the main source of EFS bloat).
-            ' Each drain is published by WriteFile as one durable step. Anything else - a
-            ' random-access write, a read, a seek, a length query - drains the buffer first.
+            ' Insert per _WriteBufferFlushThreshold bytes, so each Insert lands full chunk
+            ' records instead of growing the file's tail chunk one small write at a time
+            ' (the latter frees an intermediate record for every write and is the main
+            ' source of EFS bloat). Each drain is published by WriteFile as one durable
+            ' step - a FileStream.Flush(True), i.e. an fsync - so the threshold also sets
+            ' how often an upload pays that cost. A large sequential upload (GB-TB scale)
+            ' wants this raised via OpenFile's WriteBufferFlushThreshold parameter: a
+            ' bigger threshold means far fewer fsyncs, at the cost of a larger in-memory
+            ' buffer and a bigger crash-recovery replay window (RecoverPendingFiles still
+            ' finalises correctly either way - only how far an abandoned upload rewinds
+            ' changes). Anything else - a random-access write, a read, a seek, a length
+            ' query - drains the buffer first.
             '
             Private ReadOnly Property BufferedEndPosition As Long
                 Get
@@ -1473,7 +1491,7 @@ Namespace Streams
                 If _Position = BufferedEndPosition Then
                     _WriteBuffer.Write(Data, Offset, Count)
                     _Position += Count
-                    If _WriteBuffer.Length >= WriteBufferFlushThreshold Then DrainWriteBuffer()
+                    If _WriteBuffer.Length >= _WriteBufferFlushThreshold Then DrainWriteBuffer()
                     Return
                 End If
 

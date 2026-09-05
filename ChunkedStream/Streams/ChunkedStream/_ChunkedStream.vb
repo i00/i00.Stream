@@ -432,7 +432,7 @@ Namespace Streams
         ''' <summary>
         ''' Default logical chunk size, in bytes, used when no chunk size is configured.
         ''' </summary>
-        Public Const DefaultChunkSize As Integer = 64 * 1024
+        Public Const DefaultChunkSize As Integer = 128 * 1024
 
         ''' <summary>
         ''' Size, in bytes, of the initialisation vector stored in each physical chunk record.
@@ -2639,11 +2639,14 @@ Namespace Streams
         ' the backing-store reads and the copy into the caller's buffer stay serial, and
         ' each worker takes its own ChunkCipher so nothing crypto-related is shared.
         '
-        '
-        ' A read or write covering at least this many chunks runs its per-chunk crypto on a
-        ' worker pool (Options.MaxCryptoParallelism), when that option allows more than one.
-        '
-        Private Const ParallelChunkCryptoMinChunks As Integer = 8
+        ''' <summary>
+        ''' A read or write must cover at least this many chunks before its per-chunk crypto
+        ''' runs on a worker pool (<see cref="ChunkedStreamOptions.MaxCryptoParallelism" />, when
+        ''' that option allows more than one). A caller batching writes in units smaller than
+        ''' <c>ChunkSize * ParallelChunkCryptoMinChunks</c> never reaches the parallel path no
+        ''' matter how large <c>MaxCryptoParallelism</c> is.
+        ''' </summary>
+        Public Const ParallelChunkCryptoMinChunks As Integer = 8
 
         Private Structure ReadSlice
             Public PhysicalRecordId As Long
