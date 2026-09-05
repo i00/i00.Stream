@@ -4,6 +4,40 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ---
 
+## 2026-09-06
+
+### Batched concurrent chunk writes raced NTFS's zero-fill and silently lost data — DONE
+The intermittent data-integrity bug the DOP benchmark surfaced. `PlaceChunkRecordsAsync`'s
+parallel branch (taken for an async multi-chunk write when the backing store declares
+`LockFreeWrites` and `MaxPhysicalWriteParallelism > 1`) issued every physical write of the
+batch concurrently. For an appending write - the common large-write case - most of those
+writes land past the file's end at once. A write past the file system's valid-data-length
+makes it zero the gap between that length and the write offset; two such extending writes in
+flight together let one write's zero-fill land on top of the bytes another just wrote and
+blank them. On read-back the record was all-zero (`InvalidDataException: Physical record id
+mismatch. Expected N, found 0.`) or partially zeroed (`CryptographicException: Physical
+record MAC invalid.`). Reproduced ~30-90% of runs writing 512 MB - 1 GB through
+`PooledPositionedFileStream`, with and without encryption, at any DOP > 1; a pure
+`PooledPositionedFileStream` stress test missed it because its FIFO throttle kept the writes
+near offset order.
+
+Fix (`Storage.vb`): the parallel branch now issues the record that reaches furthest into the
+backing store on its own first, awaited alone. That single write advances the
+valid-data-length across the whole batch region, so every remaining write is an in-place
+overwrite within valid data - and those are safe to overlap. Cost is one record's worth of
+serialisation per batch; the benchmark already showed the parallel physical-write path gives
+no measurable throughput gain, so this is free in practice.
+
+New test `Concurrency.WriteBatchNeverRunsTwoFileExtendingWritesConcurrentlyEvenWhenTheStoreAllowsIt`:
+a backing store that models the valid-data-length hazard (an extending write bumps the length
+but defers the destructive gap-zero past a short window, and it counts extending writes in
+flight), driven by a 24-chunk `WriteAsync` with and without encryption. Fails deterministically
+without the fix ("Two file-extending physical writes overlapped (peak 8)"). The existing
+`ConcurrentAsyncWritesOverlapWhenTheBackingStoreAllowsIt` was updated for the lone priming
+write (peak overlap is now `WriterCount - 1`). Suite 321 → 322.
+
+---
+
 ## 2026-09-04
 
 ### `EmbeddedFileSystem.Mark` crashed when a problem range hit a directory's own content list — DONE

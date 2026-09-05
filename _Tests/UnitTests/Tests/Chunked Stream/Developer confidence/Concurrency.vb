@@ -382,21 +382,25 @@ Namespace Tests
 
             ''' <summary>
             ''' A single WriteAsync spanning enough chunks to trigger the parallel-CPU-prep
-            ''' path (BuildExtentsInParallelAsync) now also batches its physical writes through
+            ''' path (BuildExtentsInParallelAsync) also batches its physical writes through
             ''' PlaceChunkRecordsAsync, which is allowed to issue them concurrently when the
             ''' backing store declares PositionedIoCapabilities.LockFreeWrites and implements
-            ''' IPositionedStreamAsync. This drives that deterministically: every WriteAtAsync
-            ''' call blocks (without occupying a thread - the wait is a real await, not a
-            ''' blocking Wait) until WriterCount of them have arrived, which can only complete
-            ''' if the writes truly overlap.
+            ''' IPositionedStreamAsync. It issues the record that reaches furthest into the
+            ''' backing store on its own first (see
+            ''' WriteBatchNeverRunsTwoFileExtendingWritesConcurrentlyEvenWhenTheStoreAllowsIt),
+            ''' then overlaps the remaining WriterCount - 1. This drives that deterministically:
+            ''' every non-priming WriteAtAsync call blocks (without occupying a thread - the
+            ''' wait is a real await, not a blocking Wait) until WriterCount - 1 of them have
+            ''' arrived, which can only complete if those writes truly overlap.
             ''' </summary>
             <UnitTester.SimpleTest()>
             Public Shared Sub ConcurrentAsyncWritesOverlapWhenTheBackingStoreAllowsIt()
 
                 Const WriterCount As Integer = 8
                 Const ChunkSize As Integer = 4096
+                Const ExpectedOverlap As Integer = WriterCount - 1 ' the batch primes with one lone write first
 
-                Using Backing As New GatedWriteStreamAsync(WriterCount)
+                Using Backing As New GatedWriteStreamAsync(ExpectedOverlap)
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .ChunkSize = ChunkSize,
@@ -418,8 +422,12 @@ Namespace Tests
                         AssertBytesEqual(Expected, Cs.ToArray(), "Gated async batched write lost data.")
 
                         AssertTrue(
-                            Backing.MaxConcurrentWriters >= WriterCount,
-                            $"Writes never overlapped ({Backing.MaxConcurrentWriters} of {WriterCount} at once) - the batched write path still serialises.")
+                            Backing.PrimingWriteObserved,
+                            "The batch did not issue a lone priming write before overlapping the rest.")
+
+                        AssertTrue(
+                            Backing.MaxConcurrentWriters >= ExpectedOverlap,
+                            $"Writes never overlapped ({Backing.MaxConcurrentWriters} of {ExpectedOverlap} at once) - the batched write path still serialises.")
 
                     End Using
 
@@ -428,8 +436,266 @@ Namespace Tests
             End Sub
 
             ''' <summary>
-            ''' A seekable in-memory backing store that, once armed, makes every WriteAtAsync
-            ''' block (via an awaited gate, not a blocking wait) until WriterCount of them are
+            ''' The batched concurrent-write path must never have two file-extending writes in
+            ''' flight at once. On NTFS a write past the file's valid-data-length makes the
+            ''' file system zero the gap between that length and the write offset; when two
+            ''' such writes overlap, one write's zero-fill lands on the bytes the other just
+            ''' wrote and silently blanks them - seen on read-back as a physical record that
+            ''' is all zero (a stored RecordId of 0) or partially zeroed (a MAC failure).
+            ''' This takes a WriteAsync over enough chunks to reach the concurrent batch path
+            ''' against a backing store that models exactly that hazard: it records whether
+            ''' two extending writes ever overlapped and applies the destructive late
+            ''' zero-fill, and the test asserts neither the invariant nor the data is broken.
+            ''' Before the fix, every write in the batch extended the store at once.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub WriteBatchNeverRunsTwoFileExtendingWritesConcurrentlyEvenWhenTheStoreAllowsIt()
+
+                Const ChunkSize As Integer = 4096
+                Const ChunkCount As Integer = 24
+
+                For Each encrypt In {False, True}
+
+                    Using Backing As New ValidDataLengthModelStream()
+
+                        Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                            .ChunkSize = ChunkSize,
+                            .MaxCryptoParallelism = 8,
+                            .MaxPhysicalWriteParallelism = 8
+                        }
+                        If encrypt Then Options.EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(7401))
+
+                        Dim Expected = GenerateRandomData(ChunkSize * ChunkCount, 7402)
+
+                        Using Cs = ChunkedStream.Open(Backing, Options)
+
+                            Backing.Arm()
+                            Cs.WriteAsync(0, Expected).GetAwaiter().GetResult()
+                            Backing.Disarm()
+
+                            AssertFalse(
+                                Backing.SawConcurrentExtendingWrites,
+                                $"Two file-extending physical writes overlapped (peak {Backing.MaxExtendersInFlight}) - a concurrent extend races the file system's zero-fill (encrypt={encrypt}).")
+
+                            Cs.Validate().ThrowIfErrors()
+                            AssertBytesEqual(Expected, Cs.ToArray(), $"Batched concurrent write lost data (encrypt={encrypt}).")
+
+                        End Using
+
+                    End Using
+
+                Next
+
+            End Sub
+
+            ''' <summary>
+            ''' An in-memory backing store that models the NTFS valid-data-length hazard the
+            ''' batched concurrent-write path has to avoid. While armed, an async positioned
+            ''' write whose end is past the current length is an "extending" write: it bumps
+            ''' the length immediately but defers zeroing the gap between the old length and
+            ''' its offset until after a short window, so a lower write that lands in that gap
+            ''' during the window is then overwritten with zeros - exactly how a concurrent
+            ''' extend loses another write's data on a real file. Tracks the peak number of
+            ''' extending writes in flight at once. Declares Full lock-free capability and
+            ''' implements IPositionedStreamAsync so PlaceChunkRecordsAsync's batched
+            ''' WriteAtAsync path is what runs.
+            ''' </summary>
+            Private NotInheritable Class ValidDataLengthModelStream
+                Inherits Stream
+                Implements IPositionedStreamAsync
+
+                Private Const WindowMs As Integer = 5
+
+                Private ReadOnly _Inner As New MemoryStream()
+                Private ReadOnly _Sync As New Object()
+                Private _Armed As Boolean
+                Private _ExtendersInFlight As Integer
+                Private _MaxExtendersInFlight As Integer
+
+                Public Sub Arm()
+                    SyncLock _Sync
+                        _Armed = True
+                    End SyncLock
+                End Sub
+
+                Public Sub Disarm()
+                    SyncLock _Sync
+                        _Armed = False
+                    End SyncLock
+                End Sub
+
+                Public ReadOnly Property MaxExtendersInFlight As Integer
+                    Get
+                        SyncLock _Sync
+                            Return _MaxExtendersInFlight
+                        End SyncLock
+                    End Get
+                End Property
+
+                Public ReadOnly Property SawConcurrentExtendingWrites As Boolean
+                    Get
+                        SyncLock _Sync
+                            Return _MaxExtendersInFlight > 1
+                        End SyncLock
+                    End Get
+                End Property
+
+                Public ReadOnly Property PositionedIoCapabilities As PositionedIoCapabilities _
+                    Implements IPositionedStream.PositionedIoCapabilities
+                    Get
+                        Return PositionedIoCapabilities.Full
+                    End Get
+                End Property
+
+                Public Function ReadAt(PhysicalOffset As Long,
+                                       Buffer As Byte(),
+                                       BufferOffset As Integer,
+                                       Count As Integer) As Integer Implements IPositionedStream.ReadAt
+                    SyncLock _Sync
+                        If PhysicalOffset >= _Inner.Length Then Return 0
+                        _Inner.Position = PhysicalOffset
+                        Return _Inner.Read(Buffer, BufferOffset, Count)
+                    End SyncLock
+                End Function
+
+                Public Sub WriteAt(PhysicalOffset As Long,
+                                   Buffer As Byte(),
+                                   BufferOffset As Integer,
+                                   Count As Integer) Implements IPositionedStream.WriteAt
+                    SyncLock _Sync
+                        If PhysicalOffset > _Inner.Length Then _Inner.SetLength(PhysicalOffset)
+                        _Inner.Position = PhysicalOffset
+                        _Inner.Write(Buffer, BufferOffset, Count)
+                    End SyncLock
+                End Sub
+
+                Public Function ReadAtAsync(PhysicalOffset As Long,
+                                            Buffer As Byte(),
+                                            BufferOffset As Integer,
+                                            Count As Integer,
+                                            CancellationToken As CancellationToken) As Task(Of Integer) _
+                                            Implements IPositionedStreamAsync.ReadAtAsync
+                    Return Task.FromResult(ReadAt(PhysicalOffset, Buffer, BufferOffset, Count))
+                End Function
+
+                Public Async Function WriteAtAsync(PhysicalOffset As Long,
+                                                   Buffer As Byte(),
+                                                   BufferOffset As Integer,
+                                                   Count As Integer,
+                                                   CancellationToken As CancellationToken) As Task _
+                                                   Implements IPositionedStreamAsync.WriteAtAsync
+
+                    Dim Armed As Boolean
+                    Dim Extending As Boolean
+                    Dim ZeroFrom As Long
+                    Dim ZeroTo As Long = PhysicalOffset
+
+                    SyncLock _Sync
+                        Armed = _Armed
+                        ZeroFrom = _Inner.Length
+                        Extending = PhysicalOffset + Count > _Inner.Length
+                        If Extending Then
+                            _ExtendersInFlight += 1
+                            _MaxExtendersInFlight = Math.Max(_MaxExtendersInFlight, _ExtendersInFlight)
+                            _Inner.SetLength(PhysicalOffset + Count)
+                        End If
+                    End SyncLock
+
+                    If Armed Then Await Task.Delay(WindowMs, CancellationToken).ConfigureAwait(False)
+
+                    SyncLock _Sync
+                        If Extending AndAlso ZeroTo > ZeroFrom Then
+                            Dim Gap(CInt(ZeroTo - ZeroFrom) - 1) As Byte
+                            _Inner.Position = ZeroFrom
+                            _Inner.Write(Gap, 0, Gap.Length)
+                        End If
+                        _Inner.Position = PhysicalOffset
+                        _Inner.Write(Buffer, BufferOffset, Count)
+                        If Extending Then _ExtendersInFlight -= 1
+                    End SyncLock
+
+                End Function
+
+                Public Overrides ReadOnly Property CanRead As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property CanSeek As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property CanWrite As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property Length As Long
+                    Get
+                        SyncLock _Sync
+                            Return _Inner.Length
+                        End SyncLock
+                    End Get
+                End Property
+
+                Public Overrides Property Position As Long
+                    Get
+                        SyncLock _Sync
+                            Return _Inner.Position
+                        End SyncLock
+                    End Get
+                    Set
+                        SyncLock _Sync
+                            _Inner.Position = Value
+                        End SyncLock
+                    End Set
+                End Property
+
+                Public Overrides Sub Flush()
+                    SyncLock _Sync
+                        _Inner.Flush()
+                    End SyncLock
+                End Sub
+
+                Public Overrides Function Read(Buffer As Byte(), Offset As Integer, Count As Integer) As Integer
+                    SyncLock _Sync
+                        Return _Inner.Read(Buffer, Offset, Count)
+                    End SyncLock
+                End Function
+
+                Public Overrides Sub Write(Buffer As Byte(), Offset As Integer, Count As Integer)
+                    SyncLock _Sync
+                        _Inner.Write(Buffer, Offset, Count)
+                    End SyncLock
+                End Sub
+
+                Public Overrides Function Seek(Offset As Long, Origin As SeekOrigin) As Long
+                    SyncLock _Sync
+                        Return _Inner.Seek(Offset, Origin)
+                    End SyncLock
+                End Function
+
+                Public Overrides Sub SetLength(Value As Long)
+                    SyncLock _Sync
+                        _Inner.SetLength(Value)
+                    End SyncLock
+                End Sub
+
+                Protected Overrides Sub Dispose(Disposing As Boolean)
+                    If Disposing Then _Inner.Dispose()
+                    MyBase.Dispose(Disposing)
+                End Sub
+
+            End Class
+
+            ''' <summary>
+            ''' A seekable in-memory backing store that, once armed, lets the batch's lone
+            ''' priming write straight through, then makes every following WriteAtAsync block
+            ''' (via an awaited gate, not a blocking wait) until TargetArrivals of them are
             ''' outstanding at once, and records the peak overlap. Declares LockFreeWrites so
             ''' ChunkedStream does not funnel the writes through its own physical-I/O lock, and
             ''' implements IPositionedStreamAsync so PlaceChunkRecordsAsync's batched path (only
@@ -446,12 +712,13 @@ Namespace Tests
                 Private ReadOnly _TargetArrivals As Integer
                 Private ReadOnly _Gate As New TaskCompletionSource(Of Boolean)()
                 Private _Armed As Boolean
+                Private _PrimingWriteObserved As Boolean
                 Private _Arrivals As Integer
                 Private _InFlight As Integer
                 Private _MaxConcurrentWriters As Integer
 
-                Public Sub New(WriterCount As Integer)
-                    _TargetArrivals = WriterCount
+                Public Sub New(TargetArrivals As Integer)
+                    _TargetArrivals = TargetArrivals
                 End Sub
 
                 Public Sub ArmGate()
@@ -464,6 +731,14 @@ Namespace Tests
                     Get
                         SyncLock _Sync
                             Return _MaxConcurrentWriters
+                        End SyncLock
+                    End Get
+                End Property
+
+                Public ReadOnly Property PrimingWriteObserved As Boolean
+                    Get
+                        SyncLock _Sync
+                            Return _PrimingWriteObserved
                         End SyncLock
                     End Get
                 End Property
@@ -513,14 +788,19 @@ Namespace Tests
                                                    CancellationToken As CancellationToken) As Task _
                                                    Implements IPositionedStreamAsync.WriteAtAsync
 
-                    ' Each call rendezvouses exactly once, up to _TargetArrivals - the gate opens
-                    ' (releasing every waiter together) only once that many are outstanding at
-                    ' the same time, so the recorded peak is a true concurrent-overlap count,
-                    ' not just "several calls happened during the test".
+                    ' The batch issues the record that reaches furthest into the store on its
+                    ' own first, to push the valid-data-length past the whole batch region
+                    ' before the rest overlap; that priming write passes straight through.
+                    ' After it, each call rendezvouses exactly once, up to _TargetArrivals -
+                    ' the gate opens (releasing every waiter together) only once that many are
+                    ' outstanding at the same time, so the recorded peak is a true
+                    ' concurrent-overlap count, not just "several calls happened".
                     Dim ShouldWaitAtGate As Boolean
 
                     SyncLock _Sync
-                        If _Armed AndAlso _Arrivals < _TargetArrivals Then
+                        If _Armed AndAlso _PrimingWriteObserved = False Then
+                            _PrimingWriteObserved = True
+                        ElseIf _Armed AndAlso _Arrivals < _TargetArrivals Then
                             _Arrivals += 1
                             _InFlight += 1
                             _MaxConcurrentWriters = Math.Max(_MaxConcurrentWriters, _InFlight)

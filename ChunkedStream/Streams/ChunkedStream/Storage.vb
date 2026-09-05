@@ -1181,15 +1181,40 @@ Namespace Streams
                Options.MaxPhysicalWriteParallelism > 1 AndAlso
                RequiredPhysicalIoLocks.HasFlag(PhysicalIoLockStates.WriteLock) = False Then
 
+                '
+                ' Two writes that both land past the backing store's end must never overlap.
+                ' A write past the file system's valid-data-length makes it zero the gap
+                ' between that length and the write offset; when two extending writes are in
+                ' flight at once, one write's zero-fill can land on top of the bytes the
+                ' other just wrote and silently blank them (observed on NTFS as a physical
+                ' record that reads back all-zero - a stored RecordId of 0 - or partially
+                ' zeroed - a MAC failure). Issuing the record that reaches furthest into the
+                ' backing store on its own first advances the valid-data-length across the
+                ' whole batch region, so every remaining write is an in-place overwrite -
+                ' and those are safe to overlap.
+                '
+                Dim FurthestIndex = 0
+                For Index = 1 To Offsets.Count - 1
+                    If Offsets(Index) + PreparedRecords(Index).StoredRecord.Length >
+                       Offsets(FurthestIndex) + PreparedRecords(FurthestIndex).StoredRecord.Length Then
+                        FurthestIndex = Index
+                    End If
+                Next
+
+                Dim Furthest = PreparedRecords(FurthestIndex)
+                Await WriteAtAsync(Offsets(FurthestIndex), Furthest.StoredRecord, 0, Furthest.StoredRecord.Length, CancellationToken).ConfigureAwait(False)
+
                 Using Throttle As New Threading.SemaphoreSlim(Options.MaxPhysicalWriteParallelism, Options.MaxPhysicalWriteParallelism)
 
                     Dim WriteTasks =
-                        Offsets.Select(
-                            Async Function(Offset, Index) As Task
+                        Enumerable.Range(0, PreparedRecords.Count).
+                                   Where(Function(Index) Index <> FurthestIndex).
+                                   Select(
+                            Async Function(Index) As Task
                                 Await Throttle.WaitAsync(CancellationToken).ConfigureAwait(False)
                                 Try
                                     Dim Prepared = PreparedRecords(Index)
-                                    Await WriteAtAsync(Offset, Prepared.StoredRecord, 0, Prepared.StoredRecord.Length, CancellationToken).ConfigureAwait(False)
+                                    Await WriteAtAsync(Offsets(Index), Prepared.StoredRecord, 0, Prepared.StoredRecord.Length, CancellationToken).ConfigureAwait(False)
                                 Finally
                                     Throttle.Release()
                                 End Try
