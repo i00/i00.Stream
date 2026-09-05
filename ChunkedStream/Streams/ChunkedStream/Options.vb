@@ -414,6 +414,23 @@ Namespace Streams
             Public Property MaxCryptoParallelism As Integer = Environment.ProcessorCount
 
             ''' <summary>
+            ''' Maximum concurrent physical writes an async multi-chunk write may have in
+            ''' flight against the backing store at once. Only takes effect when the backing
+            ''' store both implements <see cref="IPositionedStreamAsync"/> and declares
+            ''' <see cref="PositionedIoCapabilities.LockFreeWrites"/> (a plain FileStream does
+            ''' neither, so this is a no-op there); otherwise every write already had to go
+            ''' through ChunkedStream's own physical-I/O lock one at a time regardless of this
+            ''' setting. Set to 1 to keep chunk writes fully serial even when the backing store
+            ''' could support more. Unlike <see cref="MaxCryptoParallelism"/> (CPU-bound, so
+            ''' processor count is a sensible default), the right value here depends entirely
+            ''' on the backing store's own queue depth - an SSD/NVMe device or a pooled-handle
+            ''' wrapper typically wants several in flight, a single spinning disk wants close to
+            ''' one. Defaults conservatively; raise it only for a backing store you know
+            ''' benefits.
+            ''' </summary>
+            Public Property MaxPhysicalWriteParallelism As Integer = 4
+
+            ''' <summary>
             ''' When True, an operation that faults the stream part-way through - leaving its
             ''' in-memory extent, physical-record or anchor state half-applied - triggers an
             ''' automatic reload of the whole in-memory image from the backing stream (the

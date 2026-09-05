@@ -380,6 +380,242 @@ Namespace Tests
 
             End Class
 
+            ''' <summary>
+            ''' A single WriteAsync spanning enough chunks to trigger the parallel-CPU-prep
+            ''' path (BuildExtentsInParallelAsync) now also batches its physical writes through
+            ''' PlaceChunkRecordsAsync, which is allowed to issue them concurrently when the
+            ''' backing store declares PositionedIoCapabilities.LockFreeWrites and implements
+            ''' IPositionedStreamAsync. This drives that deterministically: every WriteAtAsync
+            ''' call blocks (without occupying a thread - the wait is a real await, not a
+            ''' blocking Wait) until WriterCount of them have arrived, which can only complete
+            ''' if the writes truly overlap.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ConcurrentAsyncWritesOverlapWhenTheBackingStoreAllowsIt()
+
+                Const WriterCount As Integer = 8
+                Const ChunkSize As Integer = 4096
+
+                Using Backing As New GatedWriteStreamAsync(WriterCount)
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = ChunkSize,
+                        .MaxCryptoParallelism = WriterCount,
+                        .MaxPhysicalWriteParallelism = WriterCount,
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(6901))
+                    }
+
+                    Using Cs = ChunkedStream.Open(Backing, Options)
+
+                        Dim Expected = GenerateRandomData(ChunkSize * WriterCount, 6902)
+
+                        Backing.ArmGate()
+
+                        Dim Written = Cs.WriteAsync(0, Expected).GetAwaiter().GetResult()
+                        AssertEqual(Expected.Length, Written, "Gated async batched write reported the wrong count.")
+
+                        Cs.Validate().ThrowIfErrors()
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Gated async batched write lost data.")
+
+                        AssertTrue(
+                            Backing.MaxConcurrentWriters >= WriterCount,
+                            $"Writes never overlapped ({Backing.MaxConcurrentWriters} of {WriterCount} at once) - the batched write path still serialises.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' A seekable in-memory backing store that, once armed, makes every WriteAtAsync
+            ''' block (via an awaited gate, not a blocking wait) until WriterCount of them are
+            ''' outstanding at once, and records the peak overlap. Declares LockFreeWrites so
+            ''' ChunkedStream does not funnel the writes through its own physical-I/O lock, and
+            ''' implements IPositionedStreamAsync so PlaceChunkRecordsAsync's batched path (only
+            ''' reachable via WriteAtAsync) is what gets exercised.
+            ''' </summary>
+            Private NotInheritable Class GatedWriteStreamAsync
+                Inherits Stream
+                Implements IPositionedStreamAsync
+
+                Private Const GateTimeoutMs As Integer = 5000
+
+                Private ReadOnly _Inner As New MemoryStream()
+                Private ReadOnly _Sync As New Object()
+                Private ReadOnly _TargetArrivals As Integer
+                Private ReadOnly _Gate As New TaskCompletionSource(Of Boolean)()
+                Private _Armed As Boolean
+                Private _Arrivals As Integer
+                Private _InFlight As Integer
+                Private _MaxConcurrentWriters As Integer
+
+                Public Sub New(WriterCount As Integer)
+                    _TargetArrivals = WriterCount
+                End Sub
+
+                Public Sub ArmGate()
+                    SyncLock _Sync
+                        _Armed = True
+                    End SyncLock
+                End Sub
+
+                Public ReadOnly Property MaxConcurrentWriters As Integer
+                    Get
+                        SyncLock _Sync
+                            Return _MaxConcurrentWriters
+                        End SyncLock
+                    End Get
+                End Property
+
+                Public ReadOnly Property PositionedIoCapabilities As PositionedIoCapabilities _
+                    Implements IPositionedStream.PositionedIoCapabilities
+                    Get
+                        Return PositionedIoCapabilities.LockFreeWrites
+                    End Get
+                End Property
+
+                Public Function ReadAt(PhysicalOffset As Long,
+                                       Buffer As Byte(),
+                                       BufferOffset As Integer,
+                                       Count As Integer) As Integer Implements IPositionedStream.ReadAt
+                    SyncLock _Sync
+                        If PhysicalOffset >= _Inner.Length Then Return 0
+                        _Inner.Position = PhysicalOffset
+                        Return _Inner.Read(Buffer, BufferOffset, Count)
+                    End SyncLock
+                End Function
+
+                Public Sub WriteAt(PhysicalOffset As Long,
+                                   Buffer As Byte(),
+                                   BufferOffset As Integer,
+                                   Count As Integer) Implements IPositionedStream.WriteAt
+                    SyncLock _Sync
+                        If PhysicalOffset > _Inner.Length Then _Inner.SetLength(PhysicalOffset)
+                        _Inner.Position = PhysicalOffset
+                        _Inner.Write(Buffer, BufferOffset, Count)
+                    End SyncLock
+                End Sub
+
+                Public Function ReadAtAsync(PhysicalOffset As Long,
+                                            Buffer As Byte(),
+                                            BufferOffset As Integer,
+                                            Count As Integer,
+                                            CancellationToken As CancellationToken) As Task(Of Integer) _
+                                            Implements IPositionedStreamAsync.ReadAtAsync
+                    Return Task.FromResult(ReadAt(PhysicalOffset, Buffer, BufferOffset, Count))
+                End Function
+
+                Public Async Function WriteAtAsync(PhysicalOffset As Long,
+                                                   Buffer As Byte(),
+                                                   BufferOffset As Integer,
+                                                   Count As Integer,
+                                                   CancellationToken As CancellationToken) As Task _
+                                                   Implements IPositionedStreamAsync.WriteAtAsync
+
+                    ' Each call rendezvouses exactly once, up to _TargetArrivals - the gate opens
+                    ' (releasing every waiter together) only once that many are outstanding at
+                    ' the same time, so the recorded peak is a true concurrent-overlap count,
+                    ' not just "several calls happened during the test".
+                    Dim ShouldWaitAtGate As Boolean
+
+                    SyncLock _Sync
+                        If _Armed AndAlso _Arrivals < _TargetArrivals Then
+                            _Arrivals += 1
+                            _InFlight += 1
+                            _MaxConcurrentWriters = Math.Max(_MaxConcurrentWriters, _InFlight)
+                            ShouldWaitAtGate = True
+                            If _Arrivals = _TargetArrivals Then _Gate.TrySetResult(True)
+                        End If
+                    End SyncLock
+
+                    If ShouldWaitAtGate Then
+                        Await Task.WhenAny(_Gate.Task, Task.Delay(GateTimeoutMs)).ConfigureAwait(False)
+                        SyncLock _Sync
+                            _InFlight -= 1
+                        End SyncLock
+                    End If
+
+                    WriteAt(PhysicalOffset, Buffer, BufferOffset, Count)
+
+                End Function
+
+                Public Overrides ReadOnly Property CanRead As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property CanSeek As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property CanWrite As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property Length As Long
+                    Get
+                        SyncLock _Sync
+                            Return _Inner.Length
+                        End SyncLock
+                    End Get
+                End Property
+
+                Public Overrides Property Position As Long
+                    Get
+                        SyncLock _Sync
+                            Return _Inner.Position
+                        End SyncLock
+                    End Get
+                    Set
+                        SyncLock _Sync
+                            _Inner.Position = Value
+                        End SyncLock
+                    End Set
+                End Property
+
+                Public Overrides Sub Flush()
+                    SyncLock _Sync
+                        _Inner.Flush()
+                    End SyncLock
+                End Sub
+
+                Public Overrides Function Read(Buffer As Byte(), Offset As Integer, Count As Integer) As Integer
+                    SyncLock _Sync
+                        Return _Inner.Read(Buffer, Offset, Count)
+                    End SyncLock
+                End Function
+
+                Public Overrides Sub Write(Buffer As Byte(), Offset As Integer, Count As Integer)
+                    SyncLock _Sync
+                        _Inner.Write(Buffer, Offset, Count)
+                    End SyncLock
+                End Sub
+
+                Public Overrides Function Seek(Offset As Long, Origin As SeekOrigin) As Long
+                    SyncLock _Sync
+                        Return _Inner.Seek(Offset, Origin)
+                    End SyncLock
+                End Function
+
+                Public Overrides Sub SetLength(Value As Long)
+                    SyncLock _Sync
+                        _Inner.SetLength(Value)
+                    End SyncLock
+                End Sub
+
+                Protected Overrides Sub Dispose(Disposing As Boolean)
+                    If Disposing Then _Inner.Dispose()
+                    MyBase.Dispose(Disposing)
+                End Sub
+
+            End Class
+
         End Class
 
     End Class

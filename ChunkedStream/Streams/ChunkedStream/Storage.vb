@@ -1116,6 +1116,102 @@ Namespace Streams
 
         End Function
 
+        '
+        ' Batched counterpart of PlaceChunkRecordAsync, used when BuildExtentsInParallelAsync
+        ' has several prepared records to place at once. Allocation and every in-memory
+        ' bookkeeping step (free-space allocator, physical-record table, ordinal map, dirty
+        ' pages) stay single-threaded and run to completion for the WHOLE batch before any
+        ' write is issued - none of that state is safe for concurrent access, and none of it
+        ' needs the write to have physically completed first (nothing here is durable until
+        ' the caller's own metadata publish runs afterwards, same as the single-record path).
+        ' Only the actual backing-store writes are allowed to overlap, and only when doing so
+        ' can help: RunAsync (nothing to overlap on the synchronous bridge - WriteAtEitherAsync
+        ' just calls WriteAt and returns an already-completed task there), more than one record
+        ' to place, Options.MaxPhysicalWriteParallelism > 1, and the backing store declaring
+        ' PositionedIoCapabilities.LockFreeWrites (otherwise WriteAtAsync serialises on
+        ' _PhysicalIoLock regardless, so concurrent Tasks would just queue up for no benefit).
+        ' Falls back to the exact original one-at-a-time await otherwise.
+        '
+        Private Async Function PlaceChunkRecordsAsync(PreparedRecords As IReadOnlyList(Of PreparedChunkRecord),
+                                                       RunAsync As Boolean,
+                                                       CancellationToken As Threading.CancellationToken) As Task(Of List(Of PhysicalRecordEntry))
+
+            Dim Results As New List(Of PhysicalRecordEntry)(PreparedRecords.Count)
+            Dim Offsets As New List(Of Long)(PreparedRecords.Count)
+
+            For Each Prepared In PreparedRecords
+
+                If Prepared.StoredCompressionMethod <> ChunkedStreamOptions.CompressionMethods.None Then
+                    MarkCompressionFlag(Prepared.StoredCompressionMethod)
+                End If
+
+                Dim NewRecordOffset =
+                    GetNextWriteOffset(Prepared.StoredRecord.Length, Options.NewChunkWriteLocationPolicy, False)
+
+                Dim Result =
+                    New PhysicalRecordEntry With {
+                        .RecordId = Prepared.RecordId,
+                        .PhysicalOffset = NewRecordOffset,
+                        .PhysicalLength = Prepared.StoredRecord.Length,
+                        .PlainLength = Prepared.PlainLength,
+                        .RefCount = 1
+                    }
+
+                Dim Ordinal = _PhysicalRecords.Count
+
+                _PhysicalRecords.Add(Result.RecordId, Result)
+
+                AddPhysicalRecordToIndexes(Result, Ordinal)
+
+                Dim NewRecordEndOffset =
+                    NewRecordOffset + CLng(Prepared.StoredRecord.Length)
+
+                If NewRecordEndOffset > _IndexOffset Then
+                    _IndexOffset = NewRecordEndOffset
+                End If
+
+                MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
+
+                Results.Add(Result)
+                Offsets.Add(NewRecordOffset)
+
+            Next
+
+            If RunAsync AndAlso PreparedRecords.Count > 1 AndAlso
+               Options.MaxPhysicalWriteParallelism > 1 AndAlso
+               RequiredPhysicalIoLocks.HasFlag(PhysicalIoLockStates.WriteLock) = False Then
+
+                Using Throttle As New Threading.SemaphoreSlim(Options.MaxPhysicalWriteParallelism, Options.MaxPhysicalWriteParallelism)
+
+                    Dim WriteTasks =
+                        Offsets.Select(
+                            Async Function(Offset, Index) As Task
+                                Await Throttle.WaitAsync(CancellationToken).ConfigureAwait(False)
+                                Try
+                                    Dim Prepared = PreparedRecords(Index)
+                                    Await WriteAtAsync(Offset, Prepared.StoredRecord, 0, Prepared.StoredRecord.Length, CancellationToken).ConfigureAwait(False)
+                                Finally
+                                    Throttle.Release()
+                                End Try
+                            End Function).ToList()
+
+                    Await Task.WhenAll(WriteTasks).ConfigureAwait(False)
+
+                End Using
+
+            Else
+
+                For Index = 0 To PreparedRecords.Count - 1
+                    Dim Prepared = PreparedRecords(Index)
+                    Await WriteAtEitherAsync(RunAsync, Offsets(Index), Prepared.StoredRecord, 0, Prepared.StoredRecord.Length, CancellationToken).ConfigureAwait(False)
+                Next
+
+            End If
+
+            Return Results
+
+        End Function
+
         Private Function ReadPhysicalRecordPlain(Record As PhysicalRecordEntry,
                                                  Optional Cipher As ChunkCipher = Nothing) As Byte()
 

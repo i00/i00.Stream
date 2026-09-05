@@ -940,6 +940,25 @@ Namespace Streams
                 PrepareAll()
             End If
 
+            '
+            ' Placing every non-sparse record as one batch (rather than one PlaceChunkRecordAsync
+            ' await per record) is what lets PlaceChunkRecordsAsync overlap their actual disk
+            ' writes when the backing store supports it - see its own comment. NonSparse and the
+            ' returned list share the same order, so zipping them back onto Plan index is exact.
+            '
+            Dim PlacedByPlanIndex As New Dictionary(Of Integer, PhysicalRecordEntry)(NonSparse.Count)
+
+            If NonSparse.Count > 0 Then
+
+                Dim PreparedBatch = NonSparse.Select(Function(PlanIndex) PreparedByIndex(PlanIndex)).ToList()
+                Dim PlacedBatch = Await PlaceChunkRecordsAsync(PreparedBatch, RunAsync, CancellationToken).ConfigureAwait(False)
+
+                For BatchIndex = 0 To NonSparse.Count - 1
+                    PlacedByPlanIndex(NonSparse(BatchIndex)) = PlacedBatch(BatchIndex)
+                Next
+
+            End If
+
             Dim Result As New List(Of ExtentIndexEntry)()
 
             For Index = 0 To Plans.Count - 1
@@ -953,11 +972,9 @@ Namespace Streams
 
                 Else
 
-                    Dim Record = Await PlaceChunkRecordAsync(PreparedByIndex(Index), RunAsync, CancellationToken).ConfigureAwait(False)
-
                     Result.Add(New ExtentIndexEntry With {
                         .LogicalLength = Plans(Index).Segment.Length,
-                        .PhysicalRecordId = Record.RecordId,
+                        .PhysicalRecordId = PlacedByPlanIndex(Index).RecordId,
                         .PhysicalRecordOffset = 0})
 
                 End If
