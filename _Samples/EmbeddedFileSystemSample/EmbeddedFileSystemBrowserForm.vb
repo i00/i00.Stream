@@ -220,7 +220,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private ReadOnly _ThumbnailCache As New Dictionary(Of Long, Bitmap)()
     Private ReadOnly _ThumbnailPending As New HashSet(Of Long)()
     Private ReadOnly _ThumbnailUnavailable As New HashSet(Of Long)()
-    Private ReadOnly _History As New List(Of String)()
+    Private ReadOnly _History As New List(Of AddressHistoryEntry)()
     Private ReadOnly _SearchResults As New List(Of SearchHit)()
     Private ReadOnly _SearchItemInfo As New Dictionary(Of ListViewItem, SearchHit)()
     Private ReadOnly _PathColumn As New ColumnHeader() With {.Text = "Path", .Width = 260}
@@ -625,6 +625,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Try
         NewNode.EnsureVisible()
         tvFolders.Focus()
+        _LabelEditRequested = True
         NewNode.BeginEdit()
     End Sub
 
@@ -687,16 +688,17 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
     Private Sub RemoveUncommittedNode(Node As TreeNode)
         Dim Parent = Node.Parent
-        Node.Remove()
-        If Parent IsNot Nothing Then
-            Dim WasApplying = _ApplyingLocation
-            _ApplyingLocation = True
-            Try
-                tvFolders.SelectedNode = Parent
-            Finally
-                _ApplyingLocation = WasApplying
-            End Try
-        End If
+        Dim WasApplying = _ApplyingLocation
+        _ApplyingLocation = True
+        Try
+            ' Removing the selected node can itself make the TreeView jump its selection to
+            ' whatever comes next, firing a real AfterSelect before we get to reselect Parent
+            ' below - guard the removal too, not just the reselection.
+            Node.Remove()
+            If Parent IsNot Nothing Then tvFolders.SelectedNode = Parent
+        Finally
+            _ApplyingLocation = WasApplying
+        End Try
     End Sub
 
     Private Sub CommitNewFolder(Node As TreeNode, Info As DirectoryNodeInfo, Name As String)
@@ -726,15 +728,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If ParentInfo.ChildDirectories IsNot Nothing Then ParentInfo.ChildDirectories.Add(New ChildDirectory(NewId, Name))
         ResortChildNodes(ParentNode)
 
-        Dim WasApplying = _ApplyingLocation
-        _ApplyingLocation = True
-        Try
-            tvFolders.SelectedNode = Node
-        Finally
-            _ApplyingLocation = WasApplying
-        End Try
-
-        If _CurrentDirectoryAnchorId = ParentInfo.AnchorId AndAlso _SearchActive = False Then RefreshCurrentDirectory()
+        ' Navigate into the new folder, same as if the user had clicked it in the tree.
+        NavigateToDirectory(NewId)
     End Sub
 
     Private Shared Sub UpdateCachedChildName(ParentInfo As DirectoryNodeInfo, ChildAnchorId As Long, NewName As String)
@@ -1028,6 +1023,21 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     ' Programmatic changes (tree click, Back/Forward, "Open Folder", Ctrl+F) go through SetAddressText
     ' and apply immediately; only user typing is debounced.
 
+    ''' <summary>A visited address plus the file-list selection/scroll position it last had, so
+    ''' Back/Forward can restore the view exactly as it was left rather than always resetting it.
+    ''' Keyed by anchor ID rather than name - a search result list can show several entries that
+    ''' share the same name from different folders.</summary>
+    Private NotInheritable Class AddressHistoryEntry
+        Public Sub New(Text As String)
+            Me.Text = Text
+        End Sub
+
+        Public Property Text As String
+        Public Property SelectedAnchors As List(Of Long)
+        Public Property FocusedAnchor As Long
+        Public Property TopItemAnchor As Long
+    End Class
+
     ''' <summary>Sets the box text from code and applies it at once, pushing a history entry.</summary>
     Private Sub SetAddressText(Text As String)
         _SearchTimer.Stop()
@@ -1038,26 +1048,29 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Finally
             _SuppressSearchText = False
         End Try
+        CaptureCurrentViewState()
         PushAddressHistory(Text)
         ApplyAddress(Text)
         UpdateNavigationButtons()
     End Sub
 
     Private Sub PushAddressHistory(Text As String)
-        If _HistoryIndex >= 0 AndAlso String.Equals(_History(_HistoryIndex), Text, StringComparison.OrdinalIgnoreCase) Then Return
+        If _HistoryIndex >= 0 AndAlso String.Equals(_History(_HistoryIndex).Text, Text, StringComparison.OrdinalIgnoreCase) Then Return
         If _HistoryIndex < _History.Count - 1 Then _History.RemoveRange(_HistoryIndex + 1, _History.Count - _HistoryIndex - 1)
-        _History.Add(Text)
+        _History.Add(New AddressHistoryEntry(Text))
         _HistoryIndex = _History.Count - 1
     End Sub
 
     Private Sub GoBack()
         If _HistoryIndex <= 0 Then Return
+        CaptureCurrentViewState()
         _HistoryIndex -= 1
         ApplyHistoryEntry()
     End Sub
 
     Private Sub GoForward()
         If _HistoryIndex >= _History.Count - 1 Then Return
+        CaptureCurrentViewState()
         _HistoryIndex += 1
         ApplyHistoryEntry()
     End Sub
@@ -1065,15 +1078,60 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private Sub ApplyHistoryEntry()
         _SearchTimer.Stop()
         _LastPushWasTyped = False
-        Dim Text = _History(_HistoryIndex)
+        Dim Entry = _History(_HistoryIndex)
         _SuppressSearchText = True
         Try
-            tsiSearch.Text = Text
+            tsiSearch.Text = Entry.Text
         Finally
             _SuppressSearchText = False
         End Try
-        ApplyAddress(Text)
+        ApplyAddress(Entry.Text)
+        RestoreViewState(Entry)
         UpdateNavigationButtons()
+    End Sub
+
+    ''' <summary>The anchor ID of the entry behind a list item, or 0 if it has none (or Item is Nothing).</summary>
+    Private Shared Function AnchorOf(Item As ListViewItem) As Long
+        Dim Entry = TryCast(Item?.Tag, EmbeddedFileSystem.ContentListEntry)
+        Return If(Entry Is Nothing, 0, Entry.ChildAnchorId)
+    End Function
+
+    ''' <summary>Snapshots the file list's current selection/focus/scroll into the history entry
+    ''' being left, so a later Back/Forward to it can put the view back the way it was.</summary>
+    Private Sub CaptureCurrentViewState()
+        If _HistoryIndex < 0 OrElse _HistoryIndex >= _History.Count Then Return
+        Dim Entry = _History(_HistoryIndex)
+        Entry.SelectedAnchors = lvFiles.SelectedItems.
+                                        Cast(Of ListViewItem)().
+                                        Select(AddressOf AnchorOf).
+                                        Where(Function(anchor) anchor <> 0).
+                                        ToList()
+        Entry.FocusedAnchor = AnchorOf(lvFiles.FocusedItem)
+        Entry.TopItemAnchor = AnchorOf(lvFiles.GetItemAt(0, 0))
+    End Sub
+
+    ''' <summary>Re-applies a history entry's saved selection/focus/scroll after its address has
+    ''' repopulated the file list.</summary>
+    Private Sub RestoreViewState(Entry As AddressHistoryEntry)
+        If Entry.SelectedAnchors IsNot Nothing Then
+            For Each Item As ListViewItem In lvFiles.Items
+                Dim Anchor = AnchorOf(Item)
+                If Anchor = 0 Then Continue For
+                If Entry.SelectedAnchors.Contains(Anchor) Then Item.Selected = True
+                If Anchor = Entry.FocusedAnchor Then Item.Focused = True
+            Next
+        End If
+
+        If Entry.TopItemAnchor = 0 Then Return
+        For Each Item As ListViewItem In lvFiles.Items
+            If AnchorOf(Item) <> Entry.TopItemAnchor Then Continue For
+            If lvFiles.View = View.Details OrElse lvFiles.View = View.List Then
+                lvFiles.TopItem = Item
+            Else
+                Item.EnsureVisible()
+            End If
+            Exit For
+        Next
     End Sub
 
     Private Sub UpdateNavigationButtons()
@@ -1114,8 +1172,13 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         _SearchTimer.Stop()
         Dim Text = tsiSearch.Text
         If _LastPushWasTyped AndAlso _HistoryIndex >= 0 Then
-            _History(_HistoryIndex) = Text
+            Dim ExistingEntry = _History(_HistoryIndex)
+            ExistingEntry.Text = Text
+            ExistingEntry.SelectedAnchors = Nothing
+            ExistingEntry.FocusedAnchor = 0
+            ExistingEntry.TopItemAnchor = 0
         Else
+            CaptureCurrentViewState()
             PushAddressHistory(Text)
         End If
         _LastPushWasTyped = True
