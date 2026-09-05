@@ -325,12 +325,17 @@ Namespace Streams
         ''' <paramref name="WriteBufferFlushThreshold" /> sizes the buffer a sequential append fills
         ''' before it is materialised and durably published - raise it for a large sequential upload
         ''' to cut the number of fsyncs (see the comment on <c>FileStreamView.BufferedEndPosition</c>).
+        ''' <paramref name="WriteBufferFlushIntervalMilliseconds" /> is a second, time-based publish
+        ''' trigger alongside the byte threshold, so a slow or throttled upload cannot sit unpublished
+        ''' for an unbounded stretch of wall-clock time just because it hasn't filled the buffer yet.
         ''' </remarks>
         Public Function OpenFile(FileAnchorId As Long, Optional PendingOnClose As Boolean = False,
-                                 Optional WriteBufferFlushThreshold As Integer = FileStreamView.DefaultWriteBufferFlushThreshold) As FileStreamView
+                                 Optional WriteBufferFlushThreshold As Integer = FileStreamView.DefaultWriteBufferFlushThreshold,
+                                 Optional WriteBufferFlushIntervalMilliseconds As Integer = FileStreamView.DefaultWriteBufferFlushIntervalMilliseconds) As FileStreamView
             SyncLock _SyncRoot
                 ThrowIfDisposed()
                 If WriteBufferFlushThreshold <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(WriteBufferFlushThreshold))
+                If WriteBufferFlushIntervalMilliseconds <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(WriteBufferFlushIntervalMilliseconds))
                 Dim FileAnchor = GetAnchor(FileAnchorId)
                 EnsureType(FileAnchor, DataType.File)
                 If _OpenFileIds.Add(FileAnchorId) = False Then Throw New IOException($"File anchor {FileAnchorId} is already open.")
@@ -340,7 +345,7 @@ Namespace Streams
                         Throw New InvalidDataException($"Anchor {FileAnchorId} is not referenced as a file.")
                     End If
                     SetEntryType(Location, EntryTypes.PendingFile)
-                    Return New FileStreamView(Me, FileAnchor, WriteBufferFlushThreshold) With {.PendingOnClose = PendingOnClose}
+                    Return New FileStreamView(Me, FileAnchor, WriteBufferFlushThreshold, WriteBufferFlushIntervalMilliseconds) With {.PendingOnClose = PendingOnClose}
                 Catch
                     _OpenFileIds.Remove(FileAnchorId)
                     Throw
@@ -1361,18 +1366,29 @@ Namespace Streams
             ''' </summary>
             Public Const DefaultWriteBufferFlushThreshold As Integer = 4 * 1024 * 1024
 
+            ''' <summary>
+            ''' Default for <see cref="OpenFile" />'s <c>WriteBufferFlushIntervalMilliseconds</c>
+            ''' parameter.
+            ''' </summary>
+            Public Const DefaultWriteBufferFlushIntervalMilliseconds As Integer = 5000
+
             Private ReadOnly _Owner As EmbeddedFileSystem
             Private ReadOnly _Anchor As ChunkedStream.Anchor
             Private ReadOnly _WriteBuffer As New MemoryStream()
             Private ReadOnly _WriteBufferFlushThreshold As Integer
+            Private ReadOnly _WriteBufferFlushInterval As TimeSpan
+            Private _LastFlushUtc As DateTime
             Private _Position As Long
             Private _Disposed As Boolean
 
             Friend Sub New(Owner As EmbeddedFileSystem, Anchor As ChunkedStream.Anchor,
-                          WriteBufferFlushThreshold As Integer)
+                          WriteBufferFlushThreshold As Integer,
+                          WriteBufferFlushIntervalMilliseconds As Integer)
                 _Owner = Owner
                 _Anchor = Anchor
                 _WriteBufferFlushThreshold = WriteBufferFlushThreshold
+                _WriteBufferFlushInterval = TimeSpan.FromMilliseconds(WriteBufferFlushIntervalMilliseconds)
+                _LastFlushUtc = DateTime.UtcNow
             End Sub
 
             ''' <summary>
@@ -1400,6 +1416,13 @@ Namespace Streams
             ' changes). Anything else - a random-access write, a read, a seek, a length
             ' query - drains the buffer first.
             '
+            ' The byte threshold alone bounds the replay window in bytes, not time - a slow
+            ' or throttled upload could sit unpublished for an unbounded wall-clock stretch
+            ' before accumulating that many bytes. WriteBufferFlushIntervalMilliseconds adds a
+            ' second, time-based trigger (mirroring ZFS's transaction-group commit timer)
+            ' so a crash never loses more than that many seconds of progress, independent of
+            ' throughput.
+            '
             Private ReadOnly Property BufferedEndPosition As Long
                 Get
                     Return _Owner.GetFileLength(_Anchor) + _WriteBuffer.Length
@@ -1411,6 +1434,7 @@ Namespace Streams
                 Dim Tail = _WriteBuffer.ToArray()
                 _WriteBuffer.SetLength(0)
                 _Owner.WriteFile(_Anchor, _Owner.GetFileLength(_Anchor), Tail, 0, Tail.Length)
+                _LastFlushUtc = DateTime.UtcNow
             End Sub
 
             Public Overrides ReadOnly Property CanRead As Boolean
@@ -1491,7 +1515,10 @@ Namespace Streams
                 If _Position = BufferedEndPosition Then
                     _WriteBuffer.Write(Data, Offset, Count)
                     _Position += Count
-                    If _WriteBuffer.Length >= _WriteBufferFlushThreshold Then DrainWriteBuffer()
+                    If _WriteBuffer.Length >= _WriteBufferFlushThreshold OrElse
+                       DateTime.UtcNow - _LastFlushUtc >= _WriteBufferFlushInterval Then
+                        DrainWriteBuffer()
+                    End If
                     Return
                 End If
 

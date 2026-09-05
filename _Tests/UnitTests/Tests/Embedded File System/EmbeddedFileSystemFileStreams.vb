@@ -277,6 +277,49 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' OpenFile's WriteBufferFlushIntervalMilliseconds is a second, time-based publish
+            ''' trigger alongside the byte-count threshold - a slow/throttled upload that never
+            ''' fills the buffer must still get published once the interval elapses, so a crash
+            ''' can't lose an unbounded stretch of wall-clock progress. Uses a short interval and
+            ''' a huge byte threshold so only the timer can be responsible for the publish.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub WriteBufferFlushIntervalPublishesEvenBelowTheByteThreshold()
+
+                Using Cs = ChunkedStream.Open(New MemoryStream())
+                    Using Efs As New EmbeddedFileSystem(Cs)
+
+                        Dim FileId = Efs.CreateFile(Efs.RootAnchorId, "slow-upload.bin")
+
+                        Using Stream = Efs.OpenFile(FileId, PendingOnClose:=True,
+                                                    WriteBufferFlushThreshold:=10 * 1024 * 1024,
+                                                    WriteBufferFlushIntervalMilliseconds:=30)
+
+                            Dim SmallData = GenerateRandomData(64, 8001)
+                            Stream.Write(SmallData, 0, SmallData.Length)
+
+                            AssertEqual(0L, Efs.FindEntry(Efs.RootAnchorId, "slow-upload.bin").LengthOfDataAtEntry,
+                                        "A write below both the byte threshold and the flush interval should stay buffered.")
+
+                            System.Threading.Thread.Sleep(100)
+
+                            ' The interval has now elapsed, but the check only runs inside Write -
+                            ' nudge it with one more (tiny) write.
+                            Stream.Write(New Byte() {42}, 0, 1)
+
+                            AssertEqual(CLng(SmallData.Length + 1), Efs.FindEntry(Efs.RootAnchorId, "slow-upload.bin").LengthOfDataAtEntry,
+                                        "A write after the flush interval elapsed should have published the buffered tail even though the byte threshold was never reached.")
+
+                            Stream.PendingOnClose = False
+
+                        End Using
+
+                    End Using
+                End Using
+
+            End Sub
+
             Private Shared Function ReadAll(Stream As Stream) As Byte()
 
                 Using Buffer As New MemoryStream()
