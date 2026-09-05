@@ -827,11 +827,16 @@ Namespace Streams
                                                                   RunAsync As Boolean,
                                                                   CancellationToken As Threading.CancellationToken) As Task(Of PhysicalRecordEntry)
 
-            Dim Iv(IvSize - 1) As Byte
-            _Rng.GetBytes(Iv)
+            Dim SubBlockCount = ComputeSubBlockCount(PlainLength, Options.SubBlockSize)
+            Dim Ivs As Byte()() = New Byte(SubBlockCount - 1)() {}
+            For SubBlockIndex = 0 To SubBlockCount - 1
+                Dim SubIv(IvSize - 1) As Byte
+                _Rng.GetBytes(SubIv)
+                Ivs(SubBlockIndex) = SubIv
+            Next
 
             Dim Prepared =
-                PrepareChunkRecord(Plain, PlainLength, AllocatePhysicalRecordId(), Iv,
+                PrepareChunkRecord(Plain, PlainLength, AllocatePhysicalRecordId(), Ivs,
                                    CompressionMethodToUse, CompressionRatioThreshold, ForceCompression,
                                    EncryptionMethod, EvaluateFully, _ChunkCipher)
 
@@ -853,10 +858,23 @@ Namespace Streams
         ' The record id and IV are supplied because those are drawn serially by the caller,
         ' and MarkCompressionFlag (which mutates the header flags) is left to PlaceChunkRecord.
         '
+        ''' <summary>
+        ''' Number of independently compressed/encrypted/authenticated sub-blocks a chunk of
+        ''' PlainLength bytes splits into, given a configured SubBlockSize. Callers that need
+        ''' to draw IVs before invoking PrepareChunkRecord (which must stay pure-CPU and so
+        ''' cannot itself touch the shared _Rng) use this to know how many to draw.
+        ''' </summary>
+        Private Shared Function ComputeSubBlockCount(PlainLength As Integer, SubBlockSize As Integer) As Integer
+
+            Dim Configured = Math.Max(1, SubBlockSize)
+            Return Math.Max(1, CInt(Math.Min(CLng(PlainLength), (CLng(PlainLength) + Configured - 1) \ Configured)))
+
+        End Function
+
         Private Function PrepareChunkRecord(Plain As Byte(),
                                             PlainLength As Integer,
                                             RecordId As Long,
-                                            Iv As Byte(),
+                                            Ivs As Byte()(),
                                             CompressionMethodToUse As ChunkedStreamOptions.CompressionMethods,
                                             CompressionRatioThreshold As Double,
                                             ForceCompression As Boolean,
@@ -935,54 +953,114 @@ Namespace Streams
                 Flags = Flags Or ChunkFlags.PlaintextAllZero
             End If
 
-            Dim RecordLength = ChunkRecordDataOffset + PayloadLength + MacSize
+            '
+            ' StoredCompressionMethod is decided (above, via a sample or a one-shot trial
+            ' compression of the whole chunk) but the actual stored bytes are built per
+            ' sub-block below - compression is not slice-independent, so a sub-block must be
+            ' compressed on its own rather than by chopping up a whole-chunk compression
+            ' result. SubBlockCount comes from Ivs.Length (the caller drew one IV per sub-block
+            ' via ComputeSubBlockCount, serially, before this pure-CPU function was invoked -
+            ' possibly on a worker thread). EffectiveSubBlockSize (re-derived identically at
+            ' read time from PlainLength and the stored SubBlockCount - see
+            ' DecryptPhysicalRecord) is what actually splits the plaintext, so a later
+            ' Options.SubBlockSize change can never desynchronise an already-written record.
+            '
+            If Ivs Is Nothing OrElse Ivs.Length = 0 Then Throw New ArgumentException("At least one IV is required.", NameOf(Ivs))
+            Dim SubBlockCount = Ivs.Length
+            Dim EffectiveSubBlockSize = CInt((CLng(PlainLength) + SubBlockCount - 1) \ SubBlockCount)
+
+            Dim SubBlockStoredLengths(SubBlockCount - 1) As Integer
+            Dim SubBlockStoredBytes As Byte()() = New Byte(SubBlockCount - 1)() {}
+
+            Dim PlainOffset = 0
+            For SubBlockIndex = 0 To SubBlockCount - 1
+
+                Dim ThisPlainLength = Math.Min(EffectiveSubBlockSize, PlainLength - PlainOffset)
+
+                Dim SubPlain = If(ThisPlainLength = 0, Array.Empty(Of Byte)(), New Byte(ThisPlainLength - 1) {})
+                If ThisPlainLength > 0 Then Buffer.BlockCopy(Plain, PlainOffset, SubPlain, 0, ThisPlainLength)
+
+                Dim SubStored As Byte() = SubPlain
+                If StoredCompressionMethod <> ChunkedStreamOptions.CompressionMethods.None AndAlso ThisPlainLength > 0 Then
+                    SubStored = CompressPayload(StoredCompressionMethod, SubPlain, ThisPlainLength)
+                End If
+
+                SubBlockStoredLengths(SubBlockIndex) = SubStored.Length
+                SubBlockStoredBytes(SubBlockIndex) = SubStored
+
+                PlainOffset += ThisPlainLength
+
+            Next
+
+            Dim SubBlockLengthTableSize = SubBlockCount * 4
+            Dim TotalPayloadLength = SubBlockLengthTableSize
+            For Each StoredLength In SubBlockStoredLengths
+                TotalPayloadLength += IvSize + StoredLength + MacSize
+            Next
+
+            Dim RecordLength = ChunkRecordHeaderSize + TotalPayloadLength
             Dim StoredRecord(RecordLength - 1) As Byte
 
             Buffer.BlockCopy(BitConverter.GetBytes(RecordId), 0, StoredRecord, 0, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(CInt(StoredCompressionMethod)), 0, StoredRecord, ChunkCompressionMethodOffset, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(CInt(EncryptionMethod)), 0, StoredRecord, ChunkEncryptionMethodOffset, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(PlainLength), 0, StoredRecord, ChunkPlainLengthOffset, 4)
-            Buffer.BlockCopy(BitConverter.GetBytes(PayloadLength), 0, StoredRecord, ChunkPayloadLengthOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(TotalPayloadLength), 0, StoredRecord, ChunkPayloadLengthOffset, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(CInt(Flags)), 0, StoredRecord, ChunkFlagsOffset, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(CInt(CompressionEvaluatedMethod)), 0, StoredRecord, ChunkCompressionEvaluatedMethodOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(SubBlockCount), 0, StoredRecord, ChunkSubBlockCountOffset, 4)
 
             StoredRecord(ChunkCompressionEvaluatedPercentOffset) =
                 CompressionEvaluatedPercent
 
-            Buffer.BlockCopy(Iv, 0, StoredRecord, ChunkRecordIvOffset, IvSize)
+            For SubBlockIndex = 0 To SubBlockCount - 1
+                Buffer.BlockCopy(BitConverter.GetBytes(SubBlockStoredLengths(SubBlockIndex)), 0,
+                                 StoredRecord, ChunkRecordHeaderSize + SubBlockIndex * 4, 4)
+            Next
 
-            Select Case EncryptionMethod
+            If EncryptionMethod <> ChunkEncryptionMethods.None AndAlso
+               EncryptionMethod <> ChunkEncryptionMethods.AesCtrFileMasterKey Then
+                Throw New InvalidDataException($"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
+            End If
 
-                Case ChunkEncryptionMethods.None
-
-                    If PayloadLength > 0 Then
-                        Buffer.BlockCopy(Payload, 0, StoredRecord, ChunkRecordDataOffset, PayloadLength)
-                    End If
-
-                Case ChunkEncryptionMethods.AesCtrFileMasterKey
-
-                    If Cipher Is Nothing OrElse _ChunkMacKey Is Nothing Then
-                        Throw New EncryptionMismatchException(
-                            "Encryption is enabled but no file master key is available.")
-                    End If
-
-                    Cipher.Crypt(Iv, 0, Payload, 0, PayloadLength, StoredRecord, ChunkRecordDataOffset)
-
-                Case Else
-
-                    Throw New InvalidDataException($"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
-
-            End Select
+            If EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey AndAlso
+               (Cipher Is Nothing OrElse _ChunkMacKey Is Nothing) Then
+                Throw New EncryptionMismatchException("Encryption is enabled but no file master key is available.")
+            End If
 
             Dim RecordMacKey =
                 If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey,
                    _ChunkMacKey,
                    PublicIntegrityKey)
 
-            Using Hmac As New HMACSHA256(RecordMacKey)
-                Dim Mac = Hmac.ComputeHash(StoredRecord, 0, ChunkRecordDataOffset + PayloadLength)
-                Buffer.BlockCopy(Mac, 0, StoredRecord, ChunkRecordDataOffset + PayloadLength, MacSize)
-            End Using
+            Dim SubBlockOffset = ChunkRecordHeaderSize + SubBlockLengthTableSize
+            For SubBlockIndex = 0 To SubBlockCount - 1
+
+                Dim SubIv = Ivs(SubBlockIndex)
+                Dim SubStored = SubBlockStoredBytes(SubBlockIndex)
+                Dim SubStoredLength = SubBlockStoredLengths(SubBlockIndex)
+
+                Buffer.BlockCopy(SubIv, 0, StoredRecord, SubBlockOffset, IvSize)
+
+                Dim CiphertextOffset = SubBlockOffset + IvSize
+
+                If EncryptionMethod = ChunkEncryptionMethods.None Then
+                    If SubStoredLength > 0 Then Buffer.BlockCopy(SubStored, 0, StoredRecord, CiphertextOffset, SubStoredLength)
+                Else
+                    Cipher.Crypt(SubIv, 0, SubStored, 0, SubStoredLength, StoredRecord, CiphertextOffset)
+                End If
+
+                Dim MacOffset = CiphertextOffset + SubStoredLength
+
+                Using Hmac As New HMACSHA256(RecordMacKey)
+                    Hmac.TransformBlock(StoredRecord, 0, ChunkRecordHeaderSize + SubBlockLengthTableSize, Nothing, 0)
+                    Hmac.TransformFinalBlock(StoredRecord, SubBlockOffset, IvSize + SubStoredLength)
+                    Buffer.BlockCopy(Hmac.Hash, 0, StoredRecord, MacOffset, MacSize)
+                End Using
+
+                SubBlockOffset = MacOffset + MacSize
+
+            Next
 
             Return New PreparedChunkRecord With {
                 .RecordId = RecordId,
@@ -1059,6 +1137,139 @@ Namespace Streams
         End Function
 
         '
+        ' Reads and returns only [RangeOffset, RangeOffset + RangeLength) of a record's
+        ' plaintext - the actual point of splitting a chunk into sub-blocks (see the
+        ' ChunkRecordHeaderSize format comment). Reads just the header + sub-block length
+        ' table first (small and fixed once SubBlockCount is known), then only the on-disk
+        ' bytes of the sub-blocks the requested range overlaps - so a random read into a
+        ' large ChunkSize costs roughly SubBlockSize, not ChunkSize, in both I/O and
+        ' decrypt/MAC CPU. Falls back to the whole-record path when there is only one
+        ' sub-block (nothing to save) or the request already needs the whole record.
+        '
+        Private Function ReadPhysicalRecordPlainRange(Record As PhysicalRecordEntry,
+                                                      RangeOffset As Integer,
+                                                      RangeLength As Integer,
+                                                      Optional Cipher As ChunkCipher = Nothing) As Byte()
+
+            If RangeLength <= 0 Then Return Array.Empty(Of Byte)()
+
+            If Record.RecordId <= SparsePhysicalRecordId Then Throw New InvalidDataException("Invalid physical record id.")
+            If Record.PhysicalOffset < DataStartOffset Then Throw New InvalidDataException($"Invalid physical record offset for record {Record.RecordId}.")
+            If Record.PhysicalLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
+            If Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
+
+            Dim Header(ChunkRecordHeaderSize - 1) As Byte
+            ReadAt(Record.PhysicalOffset, Header, 0, Header.Length)
+
+            Dim StoredRecordId = BitConverter.ToInt64(Header, 0)
+            If StoredRecordId <> Record.RecordId Then
+                Throw New InvalidDataException($"Physical record id mismatch. Expected {Record.RecordId}, found {StoredRecordId}.")
+            End If
+
+            Dim SubBlockCount = BitConverter.ToInt32(Header, ChunkSubBlockCountOffset)
+            If SubBlockCount <= 0 Then Throw New InvalidDataException($"Invalid physical record sub-block count for record {Record.RecordId}.")
+
+            If SubBlockCount = 1 OrElse RangeLength >= Record.PlainLength Then
+                Dim Whole = ReadPhysicalRecordPlain(Record, Cipher)
+                If RangeOffset < 0 OrElse RangeOffset + RangeLength > Whole.Length Then
+                    Throw New InvalidDataException($"Invalid range for physical record {Record.RecordId}.")
+                End If
+                Dim WholeResult(RangeLength - 1) As Byte
+                Buffer.BlockCopy(Whole, RangeOffset, WholeResult, 0, RangeLength)
+                Return WholeResult
+            End If
+
+            Dim CompressionMethod = CType(BitConverter.ToInt32(Header, ChunkCompressionMethodOffset), ChunkedStreamOptions.CompressionMethods)
+            Dim EncryptionMethod = CType(BitConverter.ToInt32(Header, ChunkEncryptionMethodOffset), ChunkEncryptionMethods)
+            Dim PlainLength = BitConverter.ToInt32(Header, ChunkPlainLengthOffset)
+
+            If RangeOffset < 0 OrElse RangeOffset + RangeLength > PlainLength Then
+                Throw New InvalidDataException($"Invalid range for physical record {Record.RecordId}.")
+            End If
+
+            Dim RecordMacKey =
+                If(EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey, _ChunkMacKey, PublicIntegrityKey)
+
+            If RecordMacKey Is Nothing Then
+                Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
+            End If
+
+            Dim EffectiveCipher = If(Cipher, _ChunkCipher)
+            If EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey AndAlso
+               (_ChunkEncryptionKey Is Nothing OrElse EffectiveCipher Is Nothing) Then
+                Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
+            End If
+
+            Dim SubBlockLengthTableSize = SubBlockCount * 4
+            Dim SubBlockMacCoveredPrefixSize = ChunkRecordHeaderSize + SubBlockLengthTableSize
+            Dim LengthTable(SubBlockLengthTableSize - 1) As Byte
+            ReadAt(Record.PhysicalOffset + ChunkRecordHeaderSize, LengthTable, 0, SubBlockLengthTableSize)
+
+            Dim EffectiveSubBlockSize = CInt((CLng(PlainLength) + SubBlockCount - 1) \ SubBlockCount)
+            Dim FirstSubBlock = RangeOffset \ EffectiveSubBlockSize
+            Dim LastSubBlock = Math.Min(SubBlockCount - 1, (RangeOffset + RangeLength - 1) \ EffectiveSubBlockSize)
+
+            ' Walk the length table to find each sub-block's on-disk offset - cheap (pure
+            ' arithmetic over already-in-memory bytes), no I/O, even for sub-blocks we skip.
+            Dim SubBlockOnDiskOffset = Record.PhysicalOffset + SubBlockMacCoveredPrefixSize
+            Dim SubBlockStoredLength(SubBlockCount - 1) As Integer
+            For i = 0 To SubBlockCount - 1
+                SubBlockStoredLength(i) = BitConverter.ToInt32(LengthTable, i * 4)
+                If i < FirstSubBlock Then SubBlockOnDiskOffset += CLng(IvSize) + SubBlockStoredLength(i) + MacSize
+            Next
+
+            Dim Result(RangeLength - 1) As Byte
+            Dim ResultOffset = 0
+            Dim CurrentOnDiskOffset = SubBlockOnDiskOffset
+
+            For SubBlockIndex = FirstSubBlock To LastSubBlock
+
+                Dim StoredLength = SubBlockStoredLength(SubBlockIndex)
+                Dim SpanLength = IvSize + StoredLength + MacSize
+
+                Dim SpanBytes(SpanLength - 1) As Byte
+                ReadAt(CurrentOnDiskOffset, SpanBytes, 0, SpanLength)
+
+                Using Hmac As New HMACSHA256(RecordMacKey)
+                    Hmac.TransformBlock(Header, 0, Header.Length, Nothing, 0)
+                    Hmac.TransformBlock(LengthTable, 0, LengthTable.Length, Nothing, 0)
+                    Dim ExpectedMac = Hmac.ComputeHash(SpanBytes, 0, IvSize + StoredLength)
+                    If FixedTimeEquals(ExpectedMac, 0, SpanBytes, IvSize + StoredLength, MacSize) = False Then
+                        Throw New CryptographicException("Physical record MAC invalid.")
+                    End If
+                End Using
+
+                Dim ThisPlainOffset = SubBlockIndex * EffectiveSubBlockSize
+                Dim ThisPlainLength = Math.Min(EffectiveSubBlockSize, PlainLength - ThisPlainOffset)
+
+                Dim SubPayload = If(StoredLength = 0, Array.Empty(Of Byte)(), New Byte(StoredLength - 1) {})
+
+                If EncryptionMethod = ChunkEncryptionMethods.None Then
+                    If StoredLength > 0 Then Buffer.BlockCopy(SpanBytes, IvSize, SubPayload, 0, StoredLength)
+                Else
+                    EffectiveCipher.Crypt(SpanBytes, 0, SpanBytes, IvSize, StoredLength, SubPayload, 0)
+                End If
+
+                Dim SubPlain = DecompressPayload(CompressionMethod, SubPayload, ThisPlainLength)
+                If SubPlain.Length <> ThisPlainLength Then
+                    Throw New InvalidDataException("Physical record decompressed/plain length mismatch.")
+                End If
+
+                Dim CopyStart = Math.Max(0, RangeOffset - ThisPlainOffset)
+                Dim CopyEnd = Math.Min(ThisPlainLength, RangeOffset + RangeLength - ThisPlainOffset)
+                Dim CopyLength = Math.Max(0, CopyEnd - CopyStart)
+                If CopyLength > 0 Then Buffer.BlockCopy(SubPlain, CopyStart, Result, ResultOffset, CopyLength)
+                ResultOffset += CopyLength
+
+                CurrentOnDiskOffset += SpanLength
+
+            Next
+
+            Return Result
+
+        End Function
+
+        '
         ' Async twin of ReadPhysicalRecordPlain. Only the backing-store read differs; the
         ' guards and DecryptPhysicalRecord (MAC check, decrypt, decompress) are pure CPU
         ' and shared with the synchronous path.
@@ -1099,14 +1310,20 @@ Namespace Streams
             End If
 
             Dim Record = GetPhysicalRecord(Extent.PhysicalRecordId)
-            Dim Plain = ReadPhysicalRecordPlain(Record, Cipher)
             Dim SourceOffset = Extent.PhysicalRecordOffset + OffsetInsideExtent
 
-            If SourceOffset < 0 OrElse SourceOffset + Count > Plain.Length Then
+            If SourceOffset < 0 OrElse SourceOffset + Count > Record.PlainLength Then
                 Throw New InvalidDataException($"Extent references beyond physical record {Extent.PhysicalRecordId}.")
             End If
 
-            Buffer.BlockCopy(Plain, SourceOffset, Output, OutputOffset, Count)
+            '
+            ' ReadPhysicalRecordPlainRange only pays for the sub-blocks this request actually
+            ' overlaps (falling back to the whole-record path itself when there is nothing to
+            ' save) - this is the point of splitting a chunk into sub-blocks: a random read
+            ' into a large ChunkSize costs roughly SubBlockSize, not the whole chunk.
+            '
+            Dim Plain = ReadPhysicalRecordPlainRange(Record, SourceOffset, Count, Cipher)
+            Buffer.BlockCopy(Plain, 0, Output, OutputOffset, Count)
 
         End Sub
 

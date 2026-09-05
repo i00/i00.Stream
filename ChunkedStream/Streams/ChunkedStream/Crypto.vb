@@ -618,8 +618,14 @@ Namespace Streams
                 Throw New InvalidDataException("Invalid physical record plain length.")
             End If
 
-            If PayloadLength < 0 OrElse ChunkRecordDataOffset + PayloadLength + MacSize <> Record.Length Then
+            If PayloadLength < 0 OrElse ChunkRecordHeaderSize + PayloadLength <> Record.Length Then
                 Throw New InvalidDataException("Invalid physical record payload length.")
+            End If
+
+            Dim SubBlockCount = BitConverter.ToInt32(Record, ChunkSubBlockCountOffset)
+
+            If SubBlockCount <= 0 OrElse SubBlockCount > Math.Max(1, PlainLength) Then
+                Throw New InvalidDataException("Invalid physical record sub-block count.")
             End If
 
             If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then
@@ -646,53 +652,73 @@ Namespace Streams
                 Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
             End If
 
-            Using Hmac As New HMACSHA256(RecordMacKey)
-
-                Dim ExpectedMac = Hmac.ComputeHash(Record, 0, ChunkRecordDataOffset + PayloadLength)
-
-                If FixedTimeEquals(ExpectedMac, 0, Record, ChunkRecordDataOffset + PayloadLength, MacSize) = False Then
-                    Throw New CryptographicException("Physical record MAC invalid.")
+            If EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey Then
+                Dim EffectiveCipherCheck = If(Cipher, _ChunkCipher)
+                If _ChunkEncryptionKey Is Nothing OrElse EffectiveCipherCheck Is Nothing Then
+                    Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
                 End If
-
-            End Using
-
-            Dim Payload =
-                If(PayloadLength = 0,
-                   New Byte() {},
-                   New Byte(PayloadLength - 1) {})
-
-            Select Case EncryptionMethod
-
-                Case ChunkEncryptionMethods.None
-
-                    If PayloadLength > 0 Then
-                        Buffer.BlockCopy(Record, ChunkRecordDataOffset, Payload, 0, PayloadLength)
-                    End If
-
-                Case ChunkEncryptionMethods.AesCtrFileMasterKey
-
-                    Dim EffectiveCipher = If(Cipher, _ChunkCipher)
-
-                    If _ChunkEncryptionKey Is Nothing OrElse EffectiveCipher Is Nothing Then
-                        Throw New EncryptionMismatchException("Encrypted physical record exists but no file master key is available.")
-                    End If
-
-                    EffectiveCipher.Crypt(Record, ChunkRecordIvOffset, Record, ChunkRecordDataOffset, PayloadLength, Payload, 0)
-
-                Case Else
-
-                    Throw New InvalidDataException($"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
-
-            End Select
-
-            Dim Restored = DecompressPayload(CompressionMethod, Payload, PlainLength)
-
-            If Restored.Length <> PlainLength Then
-                Throw New InvalidDataException("Physical record decompressed/plain length mismatch.")
+            ElseIf EncryptionMethod <> ChunkEncryptionMethods.None Then
+                Throw New InvalidDataException($"Unsupported chunk encryption method: {CInt(EncryptionMethod)}.")
             End If
 
-            If PlainLength > 0 Then
-                Buffer.BlockCopy(Restored, 0, Plain, 0, PlainLength)
+            Dim SubBlockLengthTableSize = SubBlockCount * 4
+            Dim SubBlockMacCoveredPrefixSize = ChunkRecordHeaderSize + SubBlockLengthTableSize
+
+            If SubBlockMacCoveredPrefixSize > Record.Length Then
+                Throw New InvalidDataException("Physical record sub-block length table is truncated.")
+            End If
+
+            Dim EffectiveSubBlockSize = CInt((CLng(PlainLength) + SubBlockCount - 1) \ SubBlockCount)
+            Dim EffectiveCipher = If(Cipher, _ChunkCipher)
+
+            Dim SubBlockOffset = SubBlockMacCoveredPrefixSize
+            Dim PlainOffset = 0
+
+            For SubBlockIndex = 0 To SubBlockCount - 1
+
+                Dim SubStoredLength = BitConverter.ToInt32(Record, ChunkRecordHeaderSize + SubBlockIndex * 4)
+                If SubStoredLength < 0 OrElse SubBlockOffset + IvSize + SubStoredLength + MacSize > Record.Length Then
+                    Throw New InvalidDataException("Invalid physical record sub-block length.")
+                End If
+
+                Dim MacOffset = SubBlockOffset + IvSize + SubStoredLength
+
+                Using Hmac As New HMACSHA256(RecordMacKey)
+                    Hmac.TransformBlock(Record, 0, SubBlockMacCoveredPrefixSize, Nothing, 0)
+                    Dim ExpectedMac = Hmac.ComputeHash(Record, SubBlockOffset, IvSize + SubStoredLength)
+                    If FixedTimeEquals(ExpectedMac, 0, Record, MacOffset, MacSize) = False Then
+                        Throw New CryptographicException("Physical record MAC invalid.")
+                    End If
+                End Using
+
+                Dim ThisPlainLength = Math.Min(EffectiveSubBlockSize, PlainLength - PlainOffset)
+
+                Dim SubPayload =
+                    If(SubStoredLength = 0,
+                       Array.Empty(Of Byte)(),
+                       New Byte(SubStoredLength - 1) {})
+
+                If EncryptionMethod = ChunkEncryptionMethods.None Then
+                    If SubStoredLength > 0 Then Buffer.BlockCopy(Record, SubBlockOffset + IvSize, SubPayload, 0, SubStoredLength)
+                Else
+                    EffectiveCipher.Crypt(Record, SubBlockOffset, Record, SubBlockOffset + IvSize, SubStoredLength, SubPayload, 0)
+                End If
+
+                Dim Restored = DecompressPayload(CompressionMethod, SubPayload, ThisPlainLength)
+
+                If Restored.Length <> ThisPlainLength Then
+                    Throw New InvalidDataException("Physical record decompressed/plain length mismatch.")
+                End If
+
+                If ThisPlainLength > 0 Then Buffer.BlockCopy(Restored, 0, Plain, PlainOffset, ThisPlainLength)
+
+                PlainOffset += ThisPlainLength
+                SubBlockOffset = MacOffset + MacSize
+
+            Next
+
+            If SubBlockOffset <> Record.Length Then
+                Throw New InvalidDataException("Physical record sub-blocks do not account for the whole record.")
             End If
 
         End Sub

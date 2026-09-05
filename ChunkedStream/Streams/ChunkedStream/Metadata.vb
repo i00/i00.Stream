@@ -1041,7 +1041,7 @@ Namespace Streams
                     New PhysicalRecordEntry With {
                         .RecordId = RecordId,
                         .PhysicalOffset = DataStartOffset,
-                        .PhysicalLength = ChunkRecordDataOffset + PayloadLength + MacSize,
+                        .PhysicalLength = ChunkRecordHeaderSize + PayloadLength,
                         .PlainLength = PlainLength,
                         .RefCount = 1
                     }

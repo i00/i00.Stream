@@ -581,12 +581,15 @@ Namespace Streams
             If BitConverter.ToInt64(Buffer, 0) <> Record.RecordId Then Return Unreadable($"Physical record {Record.RecordId} has a mismatched id in its stored header.")
 
             Dim EncryptionMethod = CType(BitConverter.ToInt32(Buffer, ChunkEncryptionMethodOffset), ChunkEncryptionMethods)
+            Dim PlainLength = BitConverter.ToInt32(Buffer, ChunkPlainLengthOffset)
             Dim PayloadLength = BitConverter.ToInt32(Buffer, ChunkPayloadLengthOffset)
             Dim Flags = CType(BitConverter.ToInt32(Buffer, ChunkFlagsOffset), ChunkFlags)
             Dim CompressionEvaluatedPercent = CInt(Buffer(ChunkCompressionEvaluatedPercentOffset))
+            Dim SubBlockCount = BitConverter.ToInt32(Buffer, ChunkSubBlockCountOffset)
 
-            If PayloadLength < 0 Then Return Unreadable($"Physical record {Record.RecordId} has an invalid payload length.")
-            If ChunkRecordDataOffset + PayloadLength + MacSize <> Buffer.Length Then Return Unreadable($"Physical record {Record.RecordId} has an inconsistent stored length.")
+            If PlainLength < 0 Then Return Unreadable($"Physical record {Record.RecordId} has an invalid plain length.")
+            If PayloadLength < 0 OrElse ChunkRecordHeaderSize + PayloadLength <> Buffer.Length Then Return Unreadable($"Physical record {Record.RecordId} has an inconsistent stored length.")
+            If SubBlockCount <= 0 OrElse SubBlockCount > Math.Max(1, PlainLength) Then Return Unreadable($"Physical record {Record.RecordId} has an invalid sub-block count.")
             If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then Return Unreadable($"Physical record {Record.RecordId} has unsupported chunk flags {CInt(Flags)}.")
             If CompressionEvaluatedPercent < MinimumCompressionEvaluatedPercent OrElse CompressionEvaluatedPercent > MaximumCompressionEvaluatedPercent Then
                 Return Unreadable($"Physical record {Record.RecordId} has an invalid compression-evaluated percent {CompressionEvaluatedPercent}.")
@@ -600,12 +603,33 @@ Namespace Streams
                                              CanRepair:=False, RepairIsLossy:=False)
             End If
 
-            Using Hmac As New HMACSHA256(RecordMacKey)
-                Dim ExpectedMac = Hmac.ComputeHash(Buffer, 0, ChunkRecordDataOffset + PayloadLength)
-                If FixedTimeEquals(ExpectedMac, 0, Buffer, ChunkRecordDataOffset + PayloadLength, MacSize) = False Then
-                    Return Unreadable($"Physical record {Record.RecordId} failed authentication.")
+            Dim SubBlockLengthTableSize = SubBlockCount * 4
+            Dim SubBlockMacCoveredPrefixSize = ChunkRecordHeaderSize + SubBlockLengthTableSize
+            If SubBlockMacCoveredPrefixSize > Buffer.Length Then Return Unreadable($"Physical record {Record.RecordId} has a truncated sub-block length table.")
+
+            Dim SubBlockOffset = SubBlockMacCoveredPrefixSize
+            For SubBlockIndex = 0 To SubBlockCount - 1
+
+                Dim SubStoredLength = BitConverter.ToInt32(Buffer, ChunkRecordHeaderSize + SubBlockIndex * 4)
+                If SubStoredLength < 0 OrElse SubBlockOffset + IvSize + SubStoredLength + MacSize > Buffer.Length Then
+                    Return Unreadable($"Physical record {Record.RecordId} has an invalid sub-block length.")
                 End If
-            End Using
+
+                Dim MacOffset = SubBlockOffset + IvSize + SubStoredLength
+
+                Using Hmac As New HMACSHA256(RecordMacKey)
+                    Hmac.TransformBlock(Buffer, 0, SubBlockMacCoveredPrefixSize, Nothing, 0)
+                    Dim ExpectedMac = Hmac.ComputeHash(Buffer, SubBlockOffset, IvSize + SubStoredLength)
+                    If FixedTimeEquals(ExpectedMac, 0, Buffer, MacOffset, MacSize) = False Then
+                        Return Unreadable($"Physical record {Record.RecordId} failed authentication.")
+                    End If
+                End Using
+
+                SubBlockOffset = MacOffset + MacSize
+
+            Next
+
+            If SubBlockOffset <> Buffer.Length Then Return Unreadable($"Physical record {Record.RecordId}'s sub-blocks do not account for the whole record.")
 
             Return Nothing
 

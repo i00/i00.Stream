@@ -848,7 +848,7 @@ Namespace Streams
             Public Segment As Byte()
             Public IsSparse As Boolean
             Public RecordId As Long
-            Public Iv As Byte()
+            Public Ivs As Byte()()
         End Structure
 
         '
@@ -886,8 +886,14 @@ Namespace Streams
 
                 If Plan.IsSparse = False Then
                     Plan.RecordId = AllocatePhysicalRecordId()
-                    Plan.Iv = New Byte(IvSize - 1) {}
-                    _Rng.GetBytes(Plan.Iv)
+                    Dim SubBlockCount = ComputeSubBlockCount(SegmentLength, Options.SubBlockSize)
+                    Dim Ivs As Byte()() = New Byte(SubBlockCount - 1)() {}
+                    For SubBlockIndex = 0 To SubBlockCount - 1
+                        Dim SubIv(IvSize - 1) As Byte
+                        _Rng.GetBytes(SubIv)
+                        Ivs(SubBlockIndex) = SubIv
+                    Next
+                    Plan.Ivs = Ivs
                 End If
 
                 Plans.Add(Plan)
@@ -915,7 +921,7 @@ Namespace Streams
                             Function(PlanIndex, LoopState, Cipher)
                                 Dim P = Plans(PlanIndex)
                                 PreparedByIndex(PlanIndex) =
-                                    PrepareChunkRecord(P.Segment, P.Segment.Length, P.RecordId, P.Iv,
+                                    PrepareChunkRecord(P.Segment, P.Segment.Length, P.RecordId, P.Ivs,
                                                        Options.CompressionMethod, Options.CompressionRatioThreshold,
                                                        False, EncryptionMethod, False, Cipher)
                                 Return Cipher

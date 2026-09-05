@@ -694,6 +694,7 @@ Namespace Streams
 
             Dim PlainLength = BitConverter.ToInt32(Header, ChunkPlainLengthOffset)
             Dim PayloadLength = BitConverter.ToInt32(Header, ChunkPayloadLengthOffset)
+            Dim SubBlockCount = BitConverter.ToInt32(Header, ChunkSubBlockCountOffset)
 
             Dim Flags =
                 CType(BitConverter.ToInt32(Header, ChunkFlagsOffset),
@@ -711,9 +712,23 @@ Namespace Streams
                 Throw New InvalidDataException($"Invalid payload length for physical record {Record.RecordId}.")
             End If
 
-            If ChunkRecordDataOffset + PayloadLength + MacSize <> Record.PhysicalLength Then
+            If ChunkRecordHeaderSize + PayloadLength <> Record.PhysicalLength Then
                 Throw New InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
             End If
+
+            If SubBlockCount <= 0 OrElse SubBlockCount > Math.Max(1, PlainLength) Then
+                Throw New InvalidDataException($"Invalid physical record sub-block count for record {Record.RecordId}.")
+            End If
+
+            '
+            ' PayloadLength on disk is now "everything after the header" (the sub-block length
+            ' table plus every sub-block's IV, ciphertext and MAC - see the format comment on
+            ' ChunkRecordHeaderSize). The diagnostic ChunkHeaderSnapshot.PayloadLength keeps its
+            ' original, narrower meaning - the actual compressed/plain payload size, excluding
+            ' per-sub-block crypto/integrity overhead - derived arithmetically rather than by
+            ' reading the sub-block length table (SubBlockCount alone is enough).
+            '
+            Dim CompressedPayloadLength = PayloadLength - SubBlockCount * (4 + IvSize + MacSize)
 
             If (CInt(Flags) And Not CInt(SupportedChunkFlags)) <> 0 Then
                 Throw New InvalidDataException($"Unsupported physical record flags for record {Record.RecordId}: {CInt(Flags)}.")
@@ -730,7 +745,7 @@ Namespace Streams
                 .CompressionEvaluatedPercent = CompressionEvaluatedPercent,
                 .EncryptionMethod = EncryptionMethod,
                 .PlainLength = PlainLength,
-                .PayloadLength = PayloadLength,
+                .PayloadLength = CompressedPayloadLength,
                 .ChunkFlags = Flags
             }
 

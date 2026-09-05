@@ -1361,7 +1361,7 @@ Namespace Streams
                 Throw New System.IO.InvalidDataException($"Invalid payload length for record {Record.RecordId}.")
             End If
 
-            If ChunkRecordDataOffset + PayloadLength + MacSize <> Record.PhysicalLength Then
+            If ChunkRecordHeaderSize + PayloadLength <> Record.PhysicalLength Then
                 Throw New System.IO.InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
             End If
 
