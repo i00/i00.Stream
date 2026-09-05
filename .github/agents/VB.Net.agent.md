@@ -147,6 +147,21 @@ Dim Test = dbml.TestData.Where(Function(x) x.DataType = RequestedType).
 - Prefer clear, maintainable code over clever or overly compact solutions.
 - When modifying existing code, return the smallest practical diff rather than rewriting unrelated code.
 
+## Commit Messages
+- Unless the user specifies a different format for a given commit, structure the message as one section per top-level project touched:
+  ```
+  {ProjectPath}:
+  - Point 1
+  - Point 2
+  ```
+- `ProjectPath` is the project's path relative to the solution root, with backslashes and with any leading underscore stripped from each folder name (e.g. `_Samples\EmbeddedFileSystemSample` becomes `Samples\EmbeddedFileSystemSample`).
+- If the project sits at the solution root (e.g. `ChunkedStream`), do not put a slash in front of it.
+- If the change does not directly relate to any one project (e.g. repo-wide tooling or instructions), use `[General]` in place of a project name.
+- Changes to a project's own test project (e.g. `_Tests\UnitTests`) are folded into the main project's section rather than given their own section.
+- List every touched project as its own section, in any order, each with its own bullet list.
+- Each bullet is a single, short, plain sentence describing one thing that changed - simple enough that anyone reading it gets the gist without needing more context. Do not pack multiple ideas into one bullet or explain implementation detail.
+- Never add a co-author, "Generated with"/AI-attribution line, or any similar credit/tool footer to a commit message.
+
 ## General Non-Code Guidance
 - Keep answers as brief as possible without skipping over information.
 - Use the Oxford comma in prose, comments, documentation, and examples unless preserving existing text.
