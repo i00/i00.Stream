@@ -414,6 +414,23 @@ Namespace Streams
             Public Property MaxCryptoParallelism As Integer = Environment.ProcessorCount
 
             ''' <summary>
+            ''' Maximum worker threads used to encrypt/decrypt/authenticate a single chunk's
+            ''' own sub-blocks in parallel - on top of, not instead of,
+            ''' <see cref="MaxCryptoParallelism"/>'s parallelism across different chunks. Only
+            ''' matters when a chunk actually contains more than one sub-block
+            ''' (<see cref="SubBlockSize"/> less than <see cref="ChunkSize"/>) - most useful
+            ''' when a single very large chunk is being read or written and there are too few
+            ''' chunks for MaxCryptoParallelism to have anything to spread across. Defaults to
+            ''' 1 (serial): unlike MaxCryptoParallelism's per-chunk units of work, a sub-block
+            ''' is much smaller (often ~128 KB), so parallel-dispatch overhead is
+            ''' proportionally larger, and combining this with MaxCryptoParallelism can
+            ''' oversubscribe the thread pool (each of MaxCryptoParallelism's chunk workers
+            ''' may itself spin up this many more threads). Benchmark for your own
+            ''' ChunkSize/SubBlockSize combination before raising it.
+            ''' </summary>
+            Public Property MaxSubBlockCryptoParallelism As Integer = 1
+
+            ''' <summary>
             ''' Maximum concurrent physical writes an async multi-chunk write may have in
             ''' flight against the backing store at once. Only takes effect when the backing
             ''' store both implements <see cref="IPositionedStreamAsync"/> and declares

@@ -206,6 +206,103 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Options.MaxSubBlockCryptoParallelism lets a single chunk's own sub-blocks be
+            ''' encrypted/decrypted/authenticated on several threads at once, on top of (not
+            ''' instead of) the cross-chunk parallelism Options.MaxCryptoParallelism already
+            ''' provides. A single chunk here (one Write call, well under
+            ''' ParallelChunkCryptoMinChunks) exercises exactly the case this option targets:
+            ''' with only one physical record involved, MaxCryptoParallelism's own
+            ''' Parallel.ForEach never gets more than one work item, so any parallelism has to
+            ''' come from inside PrepareChunkRecord/DecryptPhysicalRecord's own sub-block loops.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub IntraChunkParallelismRoundTripsCorrectlyForALargeChunk()
+
+                Const ChunkSize As Integer = 1024 * 1024
+                Const SubBlockSize As Integer = 32 * 1024 ' 32 sub-blocks in one chunk
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = ChunkSize,
+                        .SubBlockSize = SubBlockSize,
+                        .MaxSubBlockCryptoParallelism = 8,
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(9401))
+                    }
+
+                    ' Shorter than ChunkSize, so the last sub-block is also short - exercises
+                    ' the parallel path's handling of a non-uniform final sub-block length too.
+                    Dim Expected = GenerateRandomData(ChunkSize - 777, 9402)
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, Expected)
+
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Intra-chunk parallel round trip failed.")
+                        Cs.Validate().ThrowIfErrors()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, New ChunkedStream.ChunkedStreamOptions With {
+                            .MaxSubBlockCryptoParallelism = 8,
+                            .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(9401))})
+                        AssertBytesEqual(Expected, Reopened.ToArray(), "Reopen after an intra-chunk parallel write lost data.")
+                        Reopened.Validate().ThrowIfErrors()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' A corrupted sub-block must still surface as a CryptographicException when
+            ''' MaxSubBlockCryptoParallelism runs the sub-block loop on Parallel.For - proving
+            ''' RunSubBlockWork's AggregateException unwrap works, not just that the parallel
+            ''' path happens not to throw.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CorruptedSubBlockThrowsCorrectExceptionUnderIntraChunkParallelism()
+
+                Const ChunkSize As Integer = 1024 * 1024
+                Const SubBlockSize As Integer = 32 * 1024 ' 32 sub-blocks in one chunk
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = ChunkSize,
+                        .SubBlockSize = SubBlockSize,
+                        .MaxSubBlockCryptoParallelism = 8,
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.None,
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(9501))
+                    }
+
+                    Dim Expected = GenerateRandomData(ChunkSize, 9502)
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, Expected)
+                        Cs.Validate().ThrowIfErrors()
+
+                        Dim Chunk = Cs.GetStructure().Chunks.First(Function(item) item.PhysicalOffset.HasValue)
+
+                        Dim MacOffset = Chunk.PhysicalOffset.Value + Chunk.PhysicalLength.Value - ChunkedStream.MacSize
+                        Ms.Position = MacOffset
+                        Dim OriginalByte = Ms.ReadByte()
+                        Ms.Position = MacOffset
+                        Ms.WriteByte(CByte(OriginalByte Xor &HFF))
+
+                        AssertThrows(Of Security.Cryptography.CryptographicException)(
+                            Sub() Cs.ToArray(),
+                            "A corrupted sub-block should surface a CryptographicException even when the sub-block loop runs in parallel.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

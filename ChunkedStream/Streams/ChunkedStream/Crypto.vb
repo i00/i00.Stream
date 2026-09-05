@@ -25,6 +25,7 @@
 Imports System.IO
 Imports System.Security.Cryptography
 Imports System.Text
+Imports System.Threading
 
 Namespace Streams
 
@@ -342,6 +343,49 @@ Namespace Streams
             Return New ChunkCipher(_ChunkEncryptionKey)
 
         End Function
+
+        '
+        ' Runs Body once per index in [0, Count), either serially (reusing SerialCipher, the
+        ' caller's own single-threaded cipher) or via Parallel.For bounded by
+        ' Options.MaxSubBlockCryptoParallelism, when Count and that option both allow more
+        ' than one worker. NeedsCipher controls whether a fresh ChunkCipher is created (and
+        ' disposed) per parallel worker - the compression pass has no cipher at all, so it
+        ' passes False and Body simply ignores the Nothing it receives. Parallel.For wraps any
+        ' exception from Body in an AggregateException; this unwraps it back to the original,
+        ' matching this class's other parallel-chunk loops, so callers see the same exception
+        ' type whether or not the parallel path ran.
+        '
+        Private Sub RunSubBlockWork(Count As Integer, NeedsCipher As Boolean, SerialCipher As ChunkCipher, Body As Action(Of Integer, ChunkCipher))
+
+            Dim EffectiveDop = Math.Max(1, Options.MaxSubBlockCryptoParallelism)
+
+            If Count > 1 AndAlso EffectiveDop > 1 Then
+
+                Dim LoopOptions As New Tasks.ParallelOptions With {.MaxDegreeOfParallelism = EffectiveDop}
+
+                Try
+                    Tasks.Parallel.For(0, Count, LoopOptions,
+                        Function() If(NeedsCipher, CreateChunkCipher(), Nothing),
+                        Function(Index, LoopState, LocalCipher)
+                            Body(Index, LocalCipher)
+                            Return LocalCipher
+                        End Function,
+                        Sub(LocalCipher)
+                            If LocalCipher IsNot Nothing Then LocalCipher.Dispose()
+                        End Sub)
+                Catch ex As AggregateException When ex.InnerExceptions.Count > 0
+                    Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerExceptions(0)).Throw()
+                End Try
+
+            Else
+
+                For Index = 0 To Count - 1
+                    Body(Index, SerialCipher)
+                Next
+
+            End If
+
+        End Sub
 
         '
         ' AES-CTR chunk cipher: an AES-ECB keystream generator plus the scratch buffers one
@@ -671,55 +715,74 @@ Namespace Streams
             Dim EffectiveSubBlockSize = CInt((CLng(PlainLength) + SubBlockCount - 1) \ SubBlockCount)
             Dim EffectiveCipher = If(Cipher, _ChunkCipher)
 
-            Dim SubBlockOffset = SubBlockMacCoveredPrefixSize
-            Dim PlainOffset = 0
+            '
+            ' Every sub-block's stored length is already sitting in the length table read
+            ' above, so its on-disk offset can be derived up front with a serial prefix-sum
+            ' pass (cheap - just Int32 arithmetic) instead of threading a running offset
+            ' through the per-sub-block loop below. That is what lets that loop's iterations
+            ' run independently of one another (and therefore in parallel, per
+            ' Options.MaxSubBlockCryptoParallelism) - each one only ever touches its own
+            ' sub-block's byte range of Record and its own byte range of Plain.
+            '
+            Dim SubBlockStoredLengths(SubBlockCount - 1) As Integer
+            Dim SubBlockOffsets(SubBlockCount - 1) As Integer
+            Dim RunningOffset = SubBlockMacCoveredPrefixSize
 
             For SubBlockIndex = 0 To SubBlockCount - 1
 
                 Dim SubStoredLength = BitConverter.ToInt32(Record, ChunkRecordHeaderSize + SubBlockIndex * 4)
-                If SubStoredLength < 0 OrElse SubBlockOffset + IvSize + SubStoredLength + MacSize > Record.Length Then
+                If SubStoredLength < 0 OrElse RunningOffset + IvSize + SubStoredLength + MacSize > Record.Length Then
                     Throw New InvalidDataException("Invalid physical record sub-block length.")
                 End If
 
-                Dim MacOffset = SubBlockOffset + IvSize + SubStoredLength
-
-                Using Hmac As New HMACSHA256(RecordMacKey)
-                    Hmac.TransformBlock(Record, 0, SubBlockMacCoveredPrefixSize, Nothing, 0)
-                    Dim ExpectedMac = Hmac.ComputeHash(Record, SubBlockOffset, IvSize + SubStoredLength)
-                    If FixedTimeEquals(ExpectedMac, 0, Record, MacOffset, MacSize) = False Then
-                        Throw New CryptographicException("Physical record MAC invalid.")
-                    End If
-                End Using
-
-                Dim ThisPlainLength = Math.Min(EffectiveSubBlockSize, PlainLength - PlainOffset)
-
-                Dim SubPayload =
-                    If(SubStoredLength = 0,
-                       Array.Empty(Of Byte)(),
-                       New Byte(SubStoredLength - 1) {})
-
-                If EncryptionMethod = ChunkEncryptionMethods.None Then
-                    If SubStoredLength > 0 Then Buffer.BlockCopy(Record, SubBlockOffset + IvSize, SubPayload, 0, SubStoredLength)
-                Else
-                    EffectiveCipher.Crypt(Record, SubBlockOffset, Record, SubBlockOffset + IvSize, SubStoredLength, SubPayload, 0)
-                End If
-
-                Dim Restored = DecompressPayload(CompressionMethod, SubPayload, ThisPlainLength)
-
-                If Restored.Length <> ThisPlainLength Then
-                    Throw New InvalidDataException("Physical record decompressed/plain length mismatch.")
-                End If
-
-                If ThisPlainLength > 0 Then Buffer.BlockCopy(Restored, 0, Plain, PlainOffset, ThisPlainLength)
-
-                PlainOffset += ThisPlainLength
-                SubBlockOffset = MacOffset + MacSize
+                SubBlockStoredLengths(SubBlockIndex) = SubStoredLength
+                SubBlockOffsets(SubBlockIndex) = RunningOffset
+                RunningOffset += IvSize + SubStoredLength + MacSize
 
             Next
 
-            If SubBlockOffset <> Record.Length Then
+            If RunningOffset <> Record.Length Then
                 Throw New InvalidDataException("Physical record sub-blocks do not account for the whole record.")
             End If
+
+            RunSubBlockWork(SubBlockCount, EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey, EffectiveCipher,
+                Sub(SubBlockIndex, LocalCipher)
+
+                    Dim SubBlockOffset = SubBlockOffsets(SubBlockIndex)
+                    Dim SubStoredLength = SubBlockStoredLengths(SubBlockIndex)
+                    Dim MacOffset = SubBlockOffset + IvSize + SubStoredLength
+
+                    Using Hmac As New HMACSHA256(RecordMacKey)
+                        Hmac.TransformBlock(Record, 0, SubBlockMacCoveredPrefixSize, Nothing, 0)
+                        Dim ExpectedMac = Hmac.ComputeHash(Record, SubBlockOffset, IvSize + SubStoredLength)
+                        If FixedTimeEquals(ExpectedMac, 0, Record, MacOffset, MacSize) = False Then
+                            Throw New CryptographicException("Physical record MAC invalid.")
+                        End If
+                    End Using
+
+                    Dim PlainOffset = SubBlockIndex * EffectiveSubBlockSize
+                    Dim ThisPlainLength = Math.Min(EffectiveSubBlockSize, PlainLength - PlainOffset)
+
+                    Dim SubPayload =
+                        If(SubStoredLength = 0,
+                           Array.Empty(Of Byte)(),
+                           New Byte(SubStoredLength - 1) {})
+
+                    If EncryptionMethod = ChunkEncryptionMethods.None Then
+                        If SubStoredLength > 0 Then Buffer.BlockCopy(Record, SubBlockOffset + IvSize, SubPayload, 0, SubStoredLength)
+                    Else
+                        LocalCipher.Crypt(Record, SubBlockOffset, Record, SubBlockOffset + IvSize, SubStoredLength, SubPayload, 0)
+                    End If
+
+                    Dim Restored = DecompressPayload(CompressionMethod, SubPayload, ThisPlainLength)
+
+                    If Restored.Length <> ThisPlainLength Then
+                        Throw New InvalidDataException("Physical record decompressed/plain length mismatch.")
+                    End If
+
+                    If ThisPlainLength > 0 Then Buffer.BlockCopy(Restored, 0, Plain, PlainOffset, ThisPlainLength)
+
+                End Sub)
 
         End Sub
 

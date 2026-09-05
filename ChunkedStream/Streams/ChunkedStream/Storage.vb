@@ -972,25 +972,30 @@ Namespace Streams
             Dim SubBlockStoredLengths(SubBlockCount - 1) As Integer
             Dim SubBlockStoredBytes As Byte()() = New Byte(SubBlockCount - 1)() {}
 
-            Dim PlainOffset = 0
-            For SubBlockIndex = 0 To SubBlockCount - 1
+            '
+            ' Every sub-block's plaintext slice has a fixed, independently-derivable offset
+            ' (SubBlockIndex * EffectiveSubBlockSize - the same derivation DecryptPhysicalRecord
+            ' uses), so compressing them is embarrassingly parallel: per
+            ' Options.MaxSubBlockCryptoParallelism, via RunSubBlockWork.
+            '
+            RunSubBlockWork(SubBlockCount, False, Nothing,
+                Sub(SubBlockIndex, LocalCipher)
 
-                Dim ThisPlainLength = Math.Min(EffectiveSubBlockSize, PlainLength - PlainOffset)
+                    Dim PlainOffset = SubBlockIndex * EffectiveSubBlockSize
+                    Dim ThisPlainLength = Math.Min(EffectiveSubBlockSize, PlainLength - PlainOffset)
 
-                Dim SubPlain = If(ThisPlainLength = 0, Array.Empty(Of Byte)(), New Byte(ThisPlainLength - 1) {})
-                If ThisPlainLength > 0 Then Buffer.BlockCopy(Plain, PlainOffset, SubPlain, 0, ThisPlainLength)
+                    Dim SubPlain = If(ThisPlainLength = 0, Array.Empty(Of Byte)(), New Byte(ThisPlainLength - 1) {})
+                    If ThisPlainLength > 0 Then Buffer.BlockCopy(Plain, PlainOffset, SubPlain, 0, ThisPlainLength)
 
-                Dim SubStored As Byte() = SubPlain
-                If StoredCompressionMethod <> ChunkedStreamOptions.CompressionMethods.None AndAlso ThisPlainLength > 0 Then
-                    SubStored = CompressPayload(StoredCompressionMethod, SubPlain, ThisPlainLength)
-                End If
+                    Dim SubStored As Byte() = SubPlain
+                    If StoredCompressionMethod <> ChunkedStreamOptions.CompressionMethods.None AndAlso ThisPlainLength > 0 Then
+                        SubStored = CompressPayload(StoredCompressionMethod, SubPlain, ThisPlainLength)
+                    End If
 
-                SubBlockStoredLengths(SubBlockIndex) = SubStored.Length
-                SubBlockStoredBytes(SubBlockIndex) = SubStored
+                    SubBlockStoredLengths(SubBlockIndex) = SubStored.Length
+                    SubBlockStoredBytes(SubBlockIndex) = SubStored
 
-                PlainOffset += ThisPlainLength
-
-            Next
+                End Sub)
 
             Dim SubBlockLengthTableSize = SubBlockCount * 4
             Dim TotalPayloadLength = SubBlockLengthTableSize
@@ -1033,34 +1038,50 @@ Namespace Streams
                    _ChunkMacKey,
                    PublicIntegrityKey)
 
-            Dim SubBlockOffset = ChunkRecordHeaderSize + SubBlockLengthTableSize
+            '
+            ' Each sub-block's on-disk offset within StoredRecord used to be threaded through
+            ' the loop below as a running total, since it depends on every earlier sub-block's
+            ' (post-compression) stored length. Precomputing it here via a serial prefix-sum
+            ' pass - cheap Int32 arithmetic over SubBlockStoredLengths, already fully known at
+            ' this point - lets that loop's iterations run independently of one another (and
+            ' therefore in parallel, per Options.MaxSubBlockCryptoParallelism, via
+            ' RunSubBlockWork), since each one then only ever touches its own byte range of
+            ' StoredRecord.
+            '
+            Dim SubBlockOffsets(SubBlockCount - 1) As Integer
+            Dim RunningOffset = ChunkRecordHeaderSize + SubBlockLengthTableSize
             For SubBlockIndex = 0 To SubBlockCount - 1
-
-                Dim SubIv = Ivs(SubBlockIndex)
-                Dim SubStored = SubBlockStoredBytes(SubBlockIndex)
-                Dim SubStoredLength = SubBlockStoredLengths(SubBlockIndex)
-
-                Buffer.BlockCopy(SubIv, 0, StoredRecord, SubBlockOffset, IvSize)
-
-                Dim CiphertextOffset = SubBlockOffset + IvSize
-
-                If EncryptionMethod = ChunkEncryptionMethods.None Then
-                    If SubStoredLength > 0 Then Buffer.BlockCopy(SubStored, 0, StoredRecord, CiphertextOffset, SubStoredLength)
-                Else
-                    Cipher.Crypt(SubIv, 0, SubStored, 0, SubStoredLength, StoredRecord, CiphertextOffset)
-                End If
-
-                Dim MacOffset = CiphertextOffset + SubStoredLength
-
-                Using Hmac As New HMACSHA256(RecordMacKey)
-                    Hmac.TransformBlock(StoredRecord, 0, ChunkRecordHeaderSize + SubBlockLengthTableSize, Nothing, 0)
-                    Hmac.TransformFinalBlock(StoredRecord, SubBlockOffset, IvSize + SubStoredLength)
-                    Buffer.BlockCopy(Hmac.Hash, 0, StoredRecord, MacOffset, MacSize)
-                End Using
-
-                SubBlockOffset = MacOffset + MacSize
-
+                SubBlockOffsets(SubBlockIndex) = RunningOffset
+                RunningOffset += IvSize + SubBlockStoredLengths(SubBlockIndex) + MacSize
             Next
+
+            RunSubBlockWork(SubBlockCount, EncryptionMethod = ChunkEncryptionMethods.AesCtrFileMasterKey, Cipher,
+                Sub(SubBlockIndex, LocalCipher)
+
+                    Dim SubIv = Ivs(SubBlockIndex)
+                    Dim SubStored = SubBlockStoredBytes(SubBlockIndex)
+                    Dim SubStoredLength = SubBlockStoredLengths(SubBlockIndex)
+                    Dim SubBlockOffset = SubBlockOffsets(SubBlockIndex)
+
+                    Buffer.BlockCopy(SubIv, 0, StoredRecord, SubBlockOffset, IvSize)
+
+                    Dim CiphertextOffset = SubBlockOffset + IvSize
+
+                    If EncryptionMethod = ChunkEncryptionMethods.None Then
+                        If SubStoredLength > 0 Then Buffer.BlockCopy(SubStored, 0, StoredRecord, CiphertextOffset, SubStoredLength)
+                    Else
+                        LocalCipher.Crypt(SubIv, 0, SubStored, 0, SubStoredLength, StoredRecord, CiphertextOffset)
+                    End If
+
+                    Dim MacOffset = CiphertextOffset + SubStoredLength
+
+                    Using Hmac As New HMACSHA256(RecordMacKey)
+                        Hmac.TransformBlock(StoredRecord, 0, ChunkRecordHeaderSize + SubBlockLengthTableSize, Nothing, 0)
+                        Hmac.TransformFinalBlock(StoredRecord, SubBlockOffset, IvSize + SubStoredLength)
+                        Buffer.BlockCopy(Hmac.Hash, 0, StoredRecord, MacOffset, MacSize)
+                    End Using
+
+                End Sub)
 
             Return New PreparedChunkRecord With {
                 .RecordId = RecordId,
