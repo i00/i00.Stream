@@ -435,6 +435,13 @@ Namespace Streams
         Public Const DefaultChunkSize As Integer = 128 * 1024
 
         ''' <summary>
+        ''' Default sub-block size, in bytes, used when no sub-block size is configured. Equal
+        ''' to <see cref="DefaultChunkSize" /> so a chunk is exactly one sub-block (today's
+        ''' behaviour) unless <see cref="ChunkSize" /> is raised above it.
+        ''' </summary>
+        Public Const DefaultSubBlockSize As Integer = DefaultChunkSize
+
+        ''' <summary>
         ''' Size, in bytes, of the initialisation vector stored in each physical chunk record.
         ''' </summary>
         Friend Const IvSize As Integer = 16
@@ -509,14 +516,34 @@ Namespace Streams
         Private Const ExtentEntrySize As Integer = 32
         Private Const PhysicalRecordEntrySize As Integer = 32
 
+        '
+        ' A chunk record's plaintext is split into SubBlockCount independently compressed,
+        ' encrypted and authenticated sub-blocks of at most Options.SubBlockSize bytes each -
+        ' decoupling the MAC/compression/decrypt granularity from ChunkSize (the allocation /
+        ' metadata-table granularity). A large ChunkSize keeps the physical-record table small
+        ' at multi-TB scale (see the FreeSpaceAllocator / DefaultChunkSize work); a small
+        ' SubBlockSize keeps a random read's decrypt+verify cost small regardless of ChunkSize -
+        ' reading any byte no longer means paying for the whole chunk. SubBlockCount is stored
+        ' per record (not derived from the current Options.SubBlockSize) so a record stays
+        ' self-describing even if that option changes later; SubBlockCount = 1 (the common case
+        ' when SubBlockSize >= ChunkSize) reduces to a single sub-block spanning the whole
+        ' payload - no special-casing needed elsewhere.
+        '
+        ' Layout: [Header 48][SubBlockLengths: SubBlockCount x Int32][SubBlock 0: IV+Ciphertext+MAC]...[SubBlock N-1]
+        ' Each sub-block's MAC covers Header + SubBlockLengths + that sub-block's own IV+Ciphertext
+        ' only - so verifying/decrypting sub-block K never requires touching any other sub-block.
+        '
         Private Const ChunkRecordHeaderSize As Integer = 48
-        Private Const ChunkRecordIvOffset As Integer = ChunkRecordHeaderSize
-        Private Const ChunkRecordDataOffset As Integer = ChunkRecordHeaderSize + IvSize
-        Private Const MinChunkRecordSize As Integer = ChunkRecordHeaderSize + IvSize + MacSize
+        Private Const MinChunkRecordSize As Integer = ChunkRecordHeaderSize + 4 + IvSize + MacSize
 
         Private Const ChunkCompressionMethodOffset As Integer = 8
         Private Const ChunkEncryptionMethodOffset As Integer = 12
         Private Const ChunkPlainLengthOffset As Integer = 16
+
+        ''' <summary>
+        ''' Total bytes stored after the 48-byte header: the sub-block length table plus every
+        ''' sub-block's IV, ciphertext and MAC.
+        ''' </summary>
         Private Const ChunkPayloadLengthOffset As Integer = 20
         <ComponentModel.EditorBrowsable(ComponentModel.EditorBrowsableState.Never)>
         Friend Const ChunkFlagsOffset As Integer = 24
@@ -525,8 +552,10 @@ Namespace Streams
         <ComponentModel.EditorBrowsable(ComponentModel.EditorBrowsableState.Never)>
         Friend Const ChunkCompressionEvaluatedPercentOffset As Integer = 32
 
-        Private Const ChunkReservedOffset As Integer = 33
-        Private Const ChunkReservedSize As Integer = 15
+        Private Const ChunkSubBlockCountOffset As Integer = 33
+
+        Private Const ChunkReservedOffset As Integer = 37
+        Private Const ChunkReservedSize As Integer = 11
 
         Private Const MetadataRootOffsetOffset As Integer = 248
         Private Const MetadataRootLengthOffset As Integer = 256

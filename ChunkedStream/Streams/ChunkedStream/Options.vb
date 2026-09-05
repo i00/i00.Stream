@@ -115,6 +115,33 @@ Namespace Streams
                 End Set
             End Property
 
+            Private _SubBlockSize As Integer = ChunkedStream.DefaultSubBlockSize
+
+            ''' <summary>
+            ''' Largest number of plaintext bytes independently compressed, encrypted and
+            ''' authenticated within one chunk record.
+            ''' </summary>
+            ''' <remarks>
+            ''' Decouples the MAC/compression/decrypt granularity from <see cref="ChunkSize" />
+            ''' (which sets the physical-record / metadata-table granularity instead). Reading
+            ''' or verifying any part of a chunk costs roughly this many bytes of decrypt/MAC
+            ''' work, not the whole chunk - so a large <see cref="ChunkSize" /> (chosen to keep
+            ''' the physical-record table small for a very large archive) need not make random
+            ''' access expensive: keep this at a few hundred KB and only <see cref="ChunkSize" />
+            ''' needs to grow. Applies to new chunk records only; each record stores how many
+            ''' sub-blocks it was split into, so existing records are unaffected by a later
+            ''' change to this property.
+            ''' </remarks>
+            Public Property SubBlockSize As Integer
+                Get
+                    Return _SubBlockSize
+                End Get
+                Set
+                    If Value <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(SubBlockSize))
+                    _SubBlockSize = Value
+                End Set
+            End Property
+
             Private _IndexPageEntryCount As Integer = 256
             Private _IndexDirectoryEntryCount As Integer = 256
 
