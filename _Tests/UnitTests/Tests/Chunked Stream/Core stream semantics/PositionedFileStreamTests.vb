@@ -91,6 +91,53 @@ Namespace Tests
             End Sub
 
             ''' <summary>
+            ''' Regression test for a real bug in MakeOverlapped: it built the OVERLAPPED
+            ''' structure's OffsetLow field with a checked CInt of a masked (unsigned) 32-bit
+            ''' value, which throws OverflowException for any offset with the low DWORD's sign
+            ''' bit set - i.e. every offset from 2 GiB up, recurring every 4 GiB after that.
+            ''' WriteAt/ReadAt were therefore completely unusable past the 2 GiB mark until the
+            ''' fix (LowDWordBits reinterprets the bit pattern instead of range-checking it).
+            ''' SetLength grows the file first - on NTFS this only updates file-size metadata
+            ''' rather than physically writing the whole range, so this stays fast without
+            ''' needing multiple gigabytes of real disk I/O.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ReadAtWriteAtWorkAtOffsetsPastTwoGigabytes()
+
+                Dim TempPath = NewTempPath()
+                Try
+                    Using Pfs As New PositionedFileStream(TempPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None)
+
+                        Pfs.SetLength(5L * 1024 * 1024 * 1024)
+
+                        ' Offsets around the low DWORD's sign bit (>= 2 GiB) and the 4 GiB
+                        ' wraparound - every one of these threw OverflowException before the fix.
+                        Dim Offsets() As Long = {
+                            CLng(Integer.MaxValue) + 1L,
+                            3L * 1024 * 1024 * 1024,
+                            4L * 1024 * 1024 * 1024 - 1L,
+                            4L * 1024 * 1024 * 1024,
+                            4L * 1024 * 1024 * 1024 + 500L
+                        }
+
+                        For Each Offset In Offsets
+                            Dim Data = GenerateRandomData(500, CInt(Offset Mod 10000) + 1)
+                            Pfs.WriteAt(Offset, Data, 0, Data.Length)
+
+                            Dim ReadBack(Data.Length - 1) As Byte
+                            Dim ReadCount = Pfs.ReadAt(Offset, ReadBack, 0, ReadBack.Length)
+                            AssertEqual(Data.Length, ReadCount, $"ReadAt at offset {Offset} returned the wrong count.")
+                            AssertBytesEqual(Data, ReadBack, $"ReadAt/WriteAt round trip mismatch at offset {Offset}.")
+                        Next
+
+                    End Using
+                Finally
+                    TryDelete(TempPath)
+                End Try
+
+            End Sub
+
+            ''' <summary>
             ''' A full ChunkedStream round trip through a real file, including reopening via a
             ''' fresh PositionedFileStream instance on the same path. No FlushDurableAction is
             ''' passed - PositionedFileStream implements IDurableFlush, so Cs.Flush() already

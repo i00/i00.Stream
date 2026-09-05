@@ -132,10 +132,26 @@ Namespace Streams
             End If
         End Sub
 
+        ''' <summary>
+        ''' Reinterprets the low 32 bits of <paramref name="Value" /> as a signed
+        ''' <see cref="Integer" /> with the same bit pattern - NOT the same as <c>CInt</c>,
+        ''' which performs a checked, range-validated conversion and throws
+        ''' <see cref="OverflowException" /> for any masked value of 0x80000000 or above (i.e.
+        ''' any file offset from 2 GiB up already trips this on just the low DWORD, and
+        ''' recurs every 4 GiB after that). OVERLAPPED's Offset fields are plain DWORDs as far
+        ''' as the OS is concerned - only the bit pattern matters, not whether .NET reads it as
+        ''' positive or negative.
+        ''' </summary>
+        Private Shared Function LowDWordBits(Value As Long) As Integer
+            Dim Masked = Value And &HFFFFFFFFL
+            If Masked > Integer.MaxValue Then Masked -= &H100000000L
+            Return CInt(Masked)
+        End Function
+
         Private Shared Function MakeOverlapped(PhysicalOffset As Long) As NATIVE_OVERLAPPED
             Dim Result As New NATIVE_OVERLAPPED()
-            Result.OffsetLow = CInt(PhysicalOffset And &HFFFFFFFFL)
-            Result.OffsetHigh = CInt((PhysicalOffset >> 32) And &HFFFFFFFFL)
+            Result.OffsetLow = LowDWordBits(PhysicalOffset)
+            Result.OffsetHigh = LowDWordBits(PhysicalOffset >> 32)
             Result.hEvent = IntPtr.Zero
             Return Result
         End Function
