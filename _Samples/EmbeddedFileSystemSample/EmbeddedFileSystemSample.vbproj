@@ -111,6 +111,7 @@
     <Compile Include="i00CodeLib\ToolStripAsMenu.vb" />
     <Compile Include="i00CodeLib\UsingLambda.vb" />
     <Compile Include="i00CodeLib\VirtualFileDragDrop.vb" />
+    <Compile Include="MemoizedEnumerable.vb" />
     <Compile Include="PeIconReader.vb" />
     <Compile Include="My Project\AssemblyInfo.vb" />
     <Compile Include="My Project\Application.Designer.vb">

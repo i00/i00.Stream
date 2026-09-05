@@ -2141,13 +2141,17 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         ExecuteLongBlockingActionOnThread(
             Sub(Report)
-                Report.SetText("Preparing upload...")
-                Dim WorkItems = BuildUploadWorkList(RootPaths)
-                If WorkItems.Count = 0 Then Return
+                Report.SetText("Uploading...")
 
-                ' The copy starts as soon as the paths are walked; the total byte count - the part
-                ' that is slow over a network share or a deep tree - is summed on a second thread and
-                ' published when ready. The copy reports byte progress only once the total is known.
+                ' The disk walk (EnumerateUploadEntries) only ever runs once no matter how many
+                ' independent passes are made over WorkItems below - the copy and the size scan each
+                ' get their own cursor, but only whichever one is further ahead actually touches disk.
+                Dim WorkItems = MemoizedEnumerable.Create(EnumerateUploadEntries(RootPaths))
+                If WorkItems.Any() = False Then Return
+
+                ' The copy starts as soon as the first item is available; the total byte count - the
+                ' part that is slow over a network share or a deep tree - is summed on a second thread
+                ' and published when ready. The copy reports byte progress only once the total is known.
                 Dim TotalSize As New TotalSizeBox()
                 Using Cancellation As New CancellationTokenSource()
                     Dim Sizer = New Thread(
@@ -2181,42 +2185,43 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     ''' <summary>
-    ''' Walks <paramref name="RootPaths"/> and returns every directory-create and file-copy step,
-    ''' ordered so a directory always precedes its contents.
+    ''' Lazily walks <paramref name="RootPaths"/>, yielding every directory-create and file-copy step
+    ''' one at a time, ordered so a directory always precedes its contents. Nothing is read from disk
+    ''' until a consumer actually asks for the next item, so a caller can start acting on the first
+    ''' result instead of waiting for the whole tree to be walked first.
     ''' </summary>
-    Private Shared Function BuildUploadWorkList(RootPaths As IEnumerable(Of String)) As List(Of UploadWorkItem)
-        Dim Result As New List(Of UploadWorkItem)()
-        For Each rootPath In RootPaths
-            If File.Exists(rootPath) Then
-                Result.Add(New UploadWorkItem(rootPath, String.Empty, Path.GetFileName(rootPath), False))
-            ElseIf Directory.Exists(rootPath) Then
-                AddDirectoryToWorkList(rootPath, String.Empty, New DirectoryInfo(rootPath).Name, Result)
+    Private Shared Iterator Function EnumerateUploadEntries(RootPaths As IEnumerable(Of String)) As IEnumerable(Of UploadWorkItem)
+        For Each RootPath In RootPaths
+            If File.Exists(RootPath) Then
+                Yield New UploadWorkItem(RootPath, String.Empty, Path.GetFileName(RootPath), False)
+            ElseIf Directory.Exists(RootPath) Then
+                For Each WorkItem In EnumerateDirectoryEntries(RootPath, String.Empty, New DirectoryInfo(RootPath).Name)
+                    Yield WorkItem
+                Next
             End If
         Next
-        Return Result
     End Function
 
-    Private Shared Sub AddDirectoryToWorkList(DiskPath As String, RelativeParent As String, Name As String,
-                                              Result As List(Of UploadWorkItem))
-        Result.Add(New UploadWorkItem(Nothing, RelativeParent, Name, True))
+    Private Shared Iterator Function EnumerateDirectoryEntries(DiskPath As String, RelativeParent As String, Name As String) As IEnumerable(Of UploadWorkItem)
+        Yield New UploadWorkItem(Nothing, RelativeParent, Name, True)
         Dim ChildRelativeParent = If(RelativeParent.Length = 0, Name, $"{RelativeParent}/{Name}")
 
-        For Each filePath In Directory.EnumerateFiles(DiskPath)
-            Result.Add(New UploadWorkItem(filePath, ChildRelativeParent, Path.GetFileName(filePath), False))
+        For Each FilePath In Directory.EnumerateFiles(DiskPath)
+            Yield New UploadWorkItem(FilePath, ChildRelativeParent, Path.GetFileName(FilePath), False)
         Next
-        For Each childPath In Directory.EnumerateDirectories(DiskPath)
-            AddDirectoryToWorkList(childPath, ChildRelativeParent, New DirectoryInfo(childPath).Name, Result)
+        For Each ChildPath In Directory.EnumerateDirectories(DiskPath)
+            For Each WorkItem In EnumerateDirectoryEntries(ChildPath, ChildRelativeParent, New DirectoryInfo(ChildPath).Name)
+                Yield WorkItem
+            Next
         Next
-    End Sub
+    End Function
 
-    Private Sub CopyUploadWorkList(WorkItems As List(Of UploadWorkItem), TargetDirectoryAnchorId As Long,
+    Private Sub CopyUploadWorkList(WorkItems As IEnumerable(Of UploadWorkItem), TargetDirectoryAnchorId As Long,
                                    TotalSize As TotalSizeBox, Report As frmProgress.ProgressReport)
         Dim FolderAnchors As New Dictionary(Of String, Long)() From {{String.Empty, TargetDirectoryAnchorId}}
         Dim Resolution As ConflictChoice = ConflictChoice.Cancel
         Dim Resolved As Boolean = False
         Dim CopiedBytes As Long = 0
-        Dim FileCount = WorkItems.Where(Function(x) x.IsDirectory = False).Count()
-        Dim CopiedFiles = 0
         Dim LastReport As Date = Date.MinValue
 
         For Each workItem In WorkItems
@@ -2253,9 +2258,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                     Case ConflictChoice.Cancel
                         Throw New OperationCanceledException()
                     Case ConflictChoice.Skip, ConflictChoice.SkipAll
-                        CopiedFiles += 1
                         CopiedBytes += SafeFileLength(workItem.SourcePath)
-                        ReportUploadProgress(Report, TotalSize, CopiedBytes, CopiedFiles, FileCount, workItem.Name, LastReport, True)
+                        ReportUploadProgress(Report, TotalSize, CopiedBytes, workItem.Name, LastReport, True)
                         Continue For
                     Case Else
                         Replace = True
@@ -2273,7 +2277,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                         If BytesRead = 0 Then Exit While
                         DestinationStream.Write(Buffer, 0, BytesRead)
                         CopiedBytes += BytesRead
-                        ReportUploadProgress(Report, TotalSize, CopiedBytes, CopiedFiles, FileCount, workItem.Name, LastReport, False)
+                        ReportUploadProgress(Report, TotalSize, CopiedBytes, workItem.Name, LastReport, False)
                     End While
                     DestinationStream.Flush()
 
@@ -2283,17 +2287,16 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 End Using
             End Using
 
-            CopiedFiles += 1
-            ReportUploadProgress(Report, TotalSize, CopiedBytes, CopiedFiles, FileCount, workItem.Name, LastReport, True)
+            ReportUploadProgress(Report, TotalSize, CopiedBytes, workItem.Name, LastReport, True)
         Next
     End Sub
 
     ''' <summary>
-    ''' Pushes the current byte/file counts to the progress dialog. Throttled to ~10 updates a second
+    ''' Pushes the current byte progress to the progress dialog. Throttled to ~10 updates a second
     ''' unless <paramref name="Force"/> is set (file finished, or an item was skipped).
     ''' </summary>
     Private Shared Sub ReportUploadProgress(Report As frmProgress.ProgressReport, TotalSize As TotalSizeBox,
-                                            CopiedBytes As Long, CopiedFiles As Integer, FileCount As Integer, Name As String,
+                                            CopiedBytes As Long, Name As String,
                                             ByRef LastReport As Date, Force As Boolean)
         Dim Timestamp = Date.UtcNow
         If Force = False AndAlso Timestamp.Subtract(LastReport).TotalMilliseconds < 100 Then Return
@@ -2301,7 +2304,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         Dim Total = TotalSize.Value
         If Total.HasValue Then
-            Report.SetText($"Uploading {Name} ({CopiedFiles:N0} of {FileCount:N0})...")
+            Report.SetText($"Uploading {Name} ({FormatByteLength(CopiedBytes)} of {FormatByteLength(Total.Value)})...")
             Report.SetProgress(CopiedBytes, Math.Max(Total.Value, CopiedBytes))
         Else
             Report.SetText($"Uploading {Name} ({FormatByteLength(CopiedBytes)} copied)...")

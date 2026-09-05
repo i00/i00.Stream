@@ -19,6 +19,9 @@ description: VB.NET Coding Standard
 - Do not explicitly specify `ByVal`, as it is the default.
 - When implementing an expanded property, omit the implicit `value` parameter declaration. Prefer `Set` over `Set(value As Type)`.
 
+## Generics
+- When a generic class's type arguments can be inferred from a constructor argument, add a same-named non-generic companion class with Shared `Create` factory method(s) that delegate to `New GenericClass(Of T)(...)`, so callers can write `GenericClass.Create(arg)` instead of spelling out `New GenericClass(Of T)(arg)`.
+
 ## Available Libraries & Technologies
 - Do not use libraries or technologies that are not already present in the project unless explicitly requested.
 
