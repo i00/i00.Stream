@@ -431,6 +431,19 @@ Namespace Streams
             Public Property MaxPhysicalWriteParallelism As Integer = 4
 
             ''' <summary>
+            ''' Maximum concurrent physical reads an async multi-chunk read may have in flight
+            ''' against the backing store at once, fetching the distinct physical records a
+            ''' large read touches before the (already-parallel) per-chunk decrypt/decompress
+            ''' runs on them. Same conditions and caveats as
+            ''' <see cref="MaxPhysicalWriteParallelism"/>: needs the backing store to implement
+            ''' <see cref="IPositionedStreamAsync"/> and declare
+            ''' <see cref="PositionedIoCapabilities.LockFreeReads"/>, a plain FileStream does
+            ''' neither, and the right value depends on the backing store's queue depth, not
+            ''' processor count.
+            ''' </summary>
+            Public Property MaxPhysicalReadParallelism As Integer = 4
+
+            ''' <summary>
             ''' When True, an operation that faults the stream part-way through - leaving its
             ''' in-memory extent, physical-record or anchor state half-applied - triggers an
             ''' automatic reload of the whole in-memory image from the backing stream (the

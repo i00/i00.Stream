@@ -616,6 +616,242 @@ Namespace Tests
 
             End Class
 
+            ''' <summary>
+            ''' A single async bulk read spanning enough chunks to trigger the parallel-decrypt
+            ''' path (ShouldReadRangeInParallel) now also fetches its distinct physical records
+            ''' via ReadRangeInParallelAsync, which is allowed to issue those ReadAtAsync calls
+            ''' concurrently when the backing store declares LockFreeReads and implements
+            ''' IPositionedStreamAsync - mirroring the write-side proof above, for the read side.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ConcurrentAsyncBulkReadFetchesOverlapWhenTheBackingStoreAllowsIt()
+
+                Const RecordCount As Integer = 8
+                Const ChunkSize As Integer = 4096
+
+                Using Backing As New GatedReadStreamAsync(RecordCount)
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = ChunkSize,
+                        .MaxCryptoParallelism = RecordCount,
+                        .MaxPhysicalReadParallelism = RecordCount,
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(7001))
+                    }
+
+                    Dim Expected = GenerateRandomData(ChunkSize * RecordCount, 7002)
+
+                    Using Cs = ChunkedStream.Open(Backing, Options)
+
+                        Cs.Write(0, Expected)
+                        Cs.Validate().ThrowIfErrors()
+
+                        Backing.ArmGate()
+
+                        Dim ReadBuffer(Expected.Length - 1) As Byte
+                        Dim ReadCount = Cs.ReadAsync(0, ReadBuffer, 0, ReadBuffer.Length).GetAwaiter().GetResult()
+
+                        AssertEqual(Expected.Length, ReadCount, "Gated async bulk read reported the wrong count.")
+                        AssertBytesEqual(Expected, ReadBuffer, "Gated async bulk read returned the wrong bytes.")
+
+                        AssertTrue(
+                            Backing.MaxConcurrentReaders >= RecordCount,
+                            $"Reads never overlapped ({Backing.MaxConcurrentReaders} of {RecordCount} at once) - the bulk-read fetch path still serialises.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' A seekable in-memory backing store that, once armed, makes every ReadAtAsync
+            ''' block (via an awaited gate, not a blocking wait) until RecordCount of them are
+            ''' outstanding at once, and records the peak overlap. Declares LockFreeReads so
+            ''' ChunkedStream does not funnel the reads through its own physical-I/O lock, and
+            ''' implements IPositionedStreamAsync so ReadRangeInParallelAsync's concurrent fetch
+            ''' path (only reachable via ReadAtAsync) is what gets exercised.
+            ''' </summary>
+            Private NotInheritable Class GatedReadStreamAsync
+                Inherits Stream
+                Implements IPositionedStreamAsync
+
+                Private Const GateTimeoutMs As Integer = 5000
+
+                Private ReadOnly _Inner As New MemoryStream()
+                Private ReadOnly _Sync As New Object()
+                Private ReadOnly _TargetArrivals As Integer
+                Private ReadOnly _Gate As New TaskCompletionSource(Of Boolean)()
+                Private _Armed As Boolean
+                Private _Arrivals As Integer
+                Private _InFlight As Integer
+                Private _MaxConcurrentReaders As Integer
+
+                Public Sub New(RecordCount As Integer)
+                    _TargetArrivals = RecordCount
+                End Sub
+
+                Public Sub ArmGate()
+                    SyncLock _Sync
+                        _Armed = True
+                    End SyncLock
+                End Sub
+
+                Public ReadOnly Property MaxConcurrentReaders As Integer
+                    Get
+                        SyncLock _Sync
+                            Return _MaxConcurrentReaders
+                        End SyncLock
+                    End Get
+                End Property
+
+                Public ReadOnly Property PositionedIoCapabilities As PositionedIoCapabilities _
+                    Implements IPositionedStream.PositionedIoCapabilities
+                    Get
+                        Return PositionedIoCapabilities.LockFreeReads
+                    End Get
+                End Property
+
+                Public Function ReadAt(PhysicalOffset As Long,
+                                       Buffer As Byte(),
+                                       BufferOffset As Integer,
+                                       Count As Integer) As Integer Implements IPositionedStream.ReadAt
+                    SyncLock _Sync
+                        If PhysicalOffset >= _Inner.Length Then Return 0
+                        _Inner.Position = PhysicalOffset
+                        Return _Inner.Read(Buffer, BufferOffset, Count)
+                    End SyncLock
+                End Function
+
+                Public Sub WriteAt(PhysicalOffset As Long,
+                                   Buffer As Byte(),
+                                   BufferOffset As Integer,
+                                   Count As Integer) Implements IPositionedStream.WriteAt
+                    SyncLock _Sync
+                        If PhysicalOffset > _Inner.Length Then _Inner.SetLength(PhysicalOffset)
+                        _Inner.Position = PhysicalOffset
+                        _Inner.Write(Buffer, BufferOffset, Count)
+                    End SyncLock
+                End Sub
+
+                Public Function WriteAtAsync(PhysicalOffset As Long,
+                                             Buffer As Byte(),
+                                             BufferOffset As Integer,
+                                             Count As Integer,
+                                             CancellationToken As CancellationToken) As Task _
+                                             Implements IPositionedStreamAsync.WriteAtAsync
+                    WriteAt(PhysicalOffset, Buffer, BufferOffset, Count)
+                    Return Task.CompletedTask
+                End Function
+
+                Public Async Function ReadAtAsync(PhysicalOffset As Long,
+                                                  Buffer As Byte(),
+                                                  BufferOffset As Integer,
+                                                  Count As Integer,
+                                                  CancellationToken As CancellationToken) As Task(Of Integer) _
+                                                  Implements IPositionedStreamAsync.ReadAtAsync
+
+                    ' Same hard-rendezvous gate as GatedWriteStreamAsync.WriteAtAsync, mirrored
+                    ' for reads: nothing proceeds until _TargetArrivals calls are all
+                    ' outstanding at once, so the recorded peak is a true overlap count.
+                    Dim ShouldWaitAtGate As Boolean
+
+                    SyncLock _Sync
+                        If _Armed AndAlso _Arrivals < _TargetArrivals Then
+                            _Arrivals += 1
+                            _InFlight += 1
+                            _MaxConcurrentReaders = Math.Max(_MaxConcurrentReaders, _InFlight)
+                            ShouldWaitAtGate = True
+                            If _Arrivals = _TargetArrivals Then _Gate.TrySetResult(True)
+                        End If
+                    End SyncLock
+
+                    If ShouldWaitAtGate Then
+                        Await Task.WhenAny(_Gate.Task, Task.Delay(GateTimeoutMs)).ConfigureAwait(False)
+                        SyncLock _Sync
+                            _InFlight -= 1
+                        End SyncLock
+                    End If
+
+                    Return ReadAt(PhysicalOffset, Buffer, BufferOffset, Count)
+
+                End Function
+
+                Public Overrides ReadOnly Property CanRead As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property CanSeek As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property CanWrite As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property Length As Long
+                    Get
+                        SyncLock _Sync
+                            Return _Inner.Length
+                        End SyncLock
+                    End Get
+                End Property
+
+                Public Overrides Property Position As Long
+                    Get
+                        SyncLock _Sync
+                            Return _Inner.Position
+                        End SyncLock
+                    End Get
+                    Set
+                        SyncLock _Sync
+                            _Inner.Position = Value
+                        End SyncLock
+                    End Set
+                End Property
+
+                Public Overrides Sub Flush()
+                    SyncLock _Sync
+                        _Inner.Flush()
+                    End SyncLock
+                End Sub
+
+                Public Overrides Function Read(Buffer As Byte(), Offset As Integer, Count As Integer) As Integer
+                    SyncLock _Sync
+                        Return _Inner.Read(Buffer, Offset, Count)
+                    End SyncLock
+                End Function
+
+                Public Overrides Sub Write(Buffer As Byte(), Offset As Integer, Count As Integer)
+                    SyncLock _Sync
+                        _Inner.Write(Buffer, Offset, Count)
+                    End SyncLock
+                End Sub
+
+                Public Overrides Function Seek(Offset As Long, Origin As SeekOrigin) As Long
+                    SyncLock _Sync
+                        Return _Inner.Seek(Offset, Origin)
+                    End SyncLock
+                End Function
+
+                Public Overrides Sub SetLength(Value As Long)
+                    SyncLock _Sync
+                        _Inner.SetLength(Value)
+                    End SyncLock
+                End Sub
+
+                Protected Overrides Sub Dispose(Disposing As Boolean)
+                    If Disposing Then _Inner.Dispose()
+                    MyBase.Dispose(Disposing)
+                End Sub
+
+            End Class
+
         End Class
 
     End Class

@@ -2786,6 +2786,145 @@ Namespace Streams
         End Sub
 
         '
+        ' True async twin of ReadRangeInParallel - not just that method offloaded onto a
+        ' worker thread (which is all the ReadCoreAsync call site used to do). Fetches the
+        ' distinct physical records a large read touches concurrently via ReadAtAsync, bounded
+        ' by Options.MaxPhysicalReadParallelism, when the backing store implements
+        ' IPositionedStreamAsync and declares PositionedIoCapabilities.LockFreeReads -
+        ' mirroring PlaceChunkRecordsAsync's write-side design exactly. Falls back to fetching
+        ' them one at a time (still via ReadAtAsync, just sequentially) otherwise; the
+        ' already-parallel per-chunk decrypt/decompress step is unchanged either way.
+        '
+        Private Async Function ReadRangeInParallelAsync(LogicalOffset As Long, Output As Byte(), OutputOffset As Integer, Count As Integer,
+                                                        CancellationToken As Threading.CancellationToken) As Task
+
+            Dim Slices As New List(Of ReadSlice)()
+            Dim CurrentLogical = LogicalOffset
+            Dim CurrentOutput = OutputOffset
+            Dim Remaining = Count
+
+            While Remaining > 0
+
+                Dim ExtentIndex = FindExtentIndex(CurrentLogical)
+                If ExtentIndex < 0 Then Throw New InvalidDataException($"No extent found for logical offset {CurrentLogical}.")
+
+                Dim Extent = _Extents(ExtentIndex)
+                Dim OffsetInsideExtent = CInt(CurrentLogical - Extent.LogicalOffset)
+                Dim CopyLength = Math.Min(Remaining, Extent.LogicalLength - OffsetInsideExtent)
+
+                Slices.Add(New ReadSlice With {
+                    .PhysicalRecordId = Extent.PhysicalRecordId,
+                    .SourceOffset = Extent.PhysicalRecordOffset + OffsetInsideExtent,
+                    .OutputOffset = CurrentOutput,
+                    .Count = CopyLength})
+
+                CurrentLogical += CopyLength
+                CurrentOutput += CopyLength
+                Remaining -= CopyLength
+
+            End While
+
+            Dim StoredById As New Dictionary(Of Long, Byte())()
+            Dim PlainById As New Dictionary(Of Long, Byte())()
+            Dim RecordById As New Dictionary(Of Long, PhysicalRecordEntry)()
+
+            For Each Slice In Slices
+
+                If Slice.PhysicalRecordId = SparsePhysicalRecordId Then Continue For
+                If RecordById.ContainsKey(Slice.PhysicalRecordId) Then Continue For
+
+                Dim Record = GetPhysicalRecord(Slice.PhysicalRecordId)
+
+                If Record.PhysicalOffset < DataStartOffset OrElse
+                   Record.PhysicalLength < MinChunkRecordSize OrElse
+                   Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then
+                    Throw New InvalidDataException($"Invalid physical record {Slice.PhysicalRecordId}.")
+                End If
+
+                RecordById(Slice.PhysicalRecordId) = Record
+                PlainById(Slice.PhysicalRecordId) = New Byte(Record.PlainLength - 1) {}
+
+            Next
+
+            If RecordById.Count > 0 Then
+
+                Dim RecordIds As New List(Of Long)(RecordById.Keys)
+
+                If RecordIds.Count > 1 AndAlso Options.MaxPhysicalReadParallelism > 1 AndAlso
+                   RequiredPhysicalIoLocks.HasFlag(PhysicalIoLockStates.ReadLock) = False Then
+
+                    Using Throttle As New Threading.SemaphoreSlim(Options.MaxPhysicalReadParallelism, Options.MaxPhysicalReadParallelism)
+
+                        Dim FetchTasks =
+                            RecordIds.Select(
+                                Async Function(RecordId) As Task
+                                    Await Throttle.WaitAsync(CancellationToken).ConfigureAwait(False)
+                                    Try
+                                        Dim Record = RecordById(RecordId)
+                                        Dim Stored(Record.PhysicalLength - 1) As Byte
+                                        Await ReadAtAsync(Record.PhysicalOffset, Stored, 0, Stored.Length, CancellationToken).ConfigureAwait(False)
+                                        SyncLock StoredById
+                                            StoredById(RecordId) = Stored
+                                        End SyncLock
+                                    Finally
+                                        Throttle.Release()
+                                    End Try
+                                End Function).ToList()
+
+                        Await Task.WhenAll(FetchTasks).ConfigureAwait(False)
+
+                    End Using
+
+                Else
+
+                    For Each RecordId In RecordIds
+                        Dim Record = RecordById(RecordId)
+                        Dim Stored(Record.PhysicalLength - 1) As Byte
+                        Await ReadAtAsync(Record.PhysicalOffset, Stored, 0, Stored.Length, CancellationToken).ConfigureAwait(False)
+                        StoredById(RecordId) = Stored
+                    Next
+
+                End If
+
+                Dim LoopOptions As New Tasks.ParallelOptions With {
+                    .MaxDegreeOfParallelism = Math.Max(1, Options.MaxCryptoParallelism)}
+
+                Try
+                    Tasks.Parallel.ForEach(RecordIds, LoopOptions,
+                        Function() CreateChunkCipher(),
+                        Function(RecordId, LoopState, Cipher)
+                            DecryptPhysicalRecord(RecordId, StoredById(RecordId), PlainById(RecordId), Cipher)
+                            Return Cipher
+                        End Function,
+                        Sub(Cipher)
+                            If Cipher IsNot Nothing Then Cipher.Dispose()
+                        End Sub)
+                Catch ex As AggregateException When ex.InnerExceptions.Count > 0
+                    Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerExceptions(0)).Throw()
+                End Try
+
+            End If
+
+            For Each Slice In Slices
+
+                If Slice.PhysicalRecordId = SparsePhysicalRecordId Then
+                    Array.Clear(Output, Slice.OutputOffset, Slice.Count)
+                    Continue For
+                End If
+
+                Dim Plain = PlainById(Slice.PhysicalRecordId)
+
+                If Slice.SourceOffset < 0 OrElse Slice.SourceOffset + Slice.Count > Plain.Length Then
+                    Throw New InvalidDataException($"Extent references beyond physical record {Slice.PhysicalRecordId}.")
+                End If
+
+                Buffer.BlockCopy(Plain, Slice.SourceOffset, Output, Slice.OutputOffset, Slice.Count)
+
+            Next
+
+        End Function
+
+        '
         ' Async twin of the range-read ReadCore. Mirrors it exactly; only ReadExtentBytes
         ' becomes awaited. Assumes the state lock is held (like the synchronous Core).
         '
@@ -2820,11 +2959,11 @@ Namespace Streams
 
             If ShouldReadRangeInParallel(ToRead) Then
                 '
-                ' The parallel decrypt is pure CPU but its backing-store reads are
-                ' synchronous, so run the whole thing on the pool rather than blocking the
-                ' awaiting thread. The state lock is still held by this frame throughout.
+                ' ReadRangeInParallelAsync fetches the distinct touched records concurrently
+                ' when the backing store allows it (see its own comment); the state lock is
+                ' still held by this frame throughout.
                 '
-                Await Tasks.Task.Run(Sub() ReadRangeInParallel(LogicalOffset, Output, OutputOffset, ToRead)).ConfigureAwait(False)
+                Await ReadRangeInParallelAsync(LogicalOffset, Output, OutputOffset, ToRead, CancellationToken).ConfigureAwait(False)
                 Return ToRead
             End If
 
