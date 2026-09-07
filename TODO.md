@@ -140,7 +140,55 @@ not a flat-index location. Rename: `_IndexOffset` → `_MetadataBoundary` (or `_
 ### `DirectoryTypes` only has 4 types (`None` / `ExtentPages` / `PhysicalRecordPages` /
 `Holes`) — decide whether that's complete or document why.
 
+### Stray `'TODO: Check` on `Metadata.vb` `ReadMetadataRoot` — resolve or delete the marker.
+
+### `Autoexec.vb` (the new `Sub Main` benchmark harness that replaced Form1)
+- Unused `Imports System.Windows.Forms`; `Imports i00CodeLib` warns (`BC40056`).
+- **D1 residual:** the project is still `OutputType=Exe` with WinForms / `System.Drawing`
+  references (`System.Drawing` used only by the fragmentation-bitmap methods in
+  `Structure.Extensions.vb`). Decide whether the library should ship as `Library` with the
+  demo/benchmark split out.
+
 ### `README.md` — fill in once the API settles.
+
+---
+
+## From the rev 8 audit re-read (2026-09-06)
+
+New observations from re-reading `Crypto.vb` / `Storage.vb` / the positioned-stream layer
+against the current branch. None are correctness bugs.
+
+### Sub-block MAC omits the sub-block index (S1/S2 family)
+Each sub-block's HMAC covers the record header, the sub-block length table and that
+sub-block's own IV + ciphertext — but **not its index**. Two sub-blocks of equal stored
+length within one record can be transposed by someone with backing-store write access and
+every MAC still verifies; the plaintext lands scrambled. Same call as S1/S2 (the MACs target
+bit-rot, which never reorders blocks). Cheap hardening: fold a 4-byte `SubBlockIndex` into
+each sub-block's `HMACSHA256.TransformBlock` before the sub-block bytes. **No test** for
+transposition yet.
+
+### SB-1 — per-sub-block compression: no fallback, wrong evaluated percent
+`PrepareChunkRecord` decides `StoredCompressionMethod` from a whole-chunk trial compression,
+then compresses each sub-block independently. An incompressible sub-block inside an
+otherwise-compressible chunk is stored **inflated** (the compressed result is used
+unconditionally — no per-sub-block "keep plaintext if smaller"). And
+`CompressionEvaluatedPercent` is recorded from the whole-chunk trial, not the sub-block total
+actually stored, so `ApplyOptions(Compression)`'s re-evaluation works off a slightly wrong
+number. (The independent-per-sub-block ratio hit itself is the intended random-read tradeoff.)
+
+### SB-2 — dead vars in `PrepareChunkRecord`
+`Payload` / `PayloadLength` and the whole-chunk `Compressed` trial are assigned but the stored
+bytes + header payload length are built entirely from the per-sub-block pass
+(`TotalPayloadLength`). The trial is still needed to *decide* `StoredCompressionMethod`; the
+leftover assignments just read as if the whole-chunk result is used. Trim.
+
+### rw-lock — read path has no re-entrancy guard
+`AsyncReaderWriterLock` is writer-preference. `EnterReadLock` is a no-op only when the flow
+already holds the *write* lock. Shared-lock readers never nest today, but if a future change
+nests one shared-lock read inside another *while a writer is queued*, the inner
+`EnterReadAsync` parks behind the writer while the outer read still holds a slot → reader
+re-entrancy deadlock. Add a comment on `EnterReadLock` ("read path must not nest") or a Debug
+depth-assert.
 
 ---
 
@@ -190,12 +238,18 @@ by `BuildExtentsInParallelAsync`) + serial `PlaceChunkRecordAsync`.
 See the audit artifact for the reasoning.
 
 - **S1 / S2** — metadata / header authenticated only with the public integrity key even when
-  encrypted, and a record's MAC key is chosen from its own `EncryptionMethod` field. The MAC
-  targets bit-rot and accidental change without needing a key; the `None` path is what lets a
-  user rewrite a file to plaintext and read it instantly.
-- **S4** — `DefaultPBKDF2Iterations` is a mutable global; it is Friend/test-only.
-- **D1** — the project builds as a WinExe with WinForms; that's Form1 (a playground being
-  removed) and lazily-loaded `System.Drawing`.
+  encrypted; a record's MAC key is chosen from its own `EncryptionMethod` field; and the
+  per-sub-block MAC omits the sub-block index (equal-length sub-blocks within a record are
+  transposable — see rev-8 section above). The MACs target bit-rot and accidental change
+  without needing a key; the `None` path is what lets a user rewrite a file to plaintext and
+  read it instantly. (The `SubBlockIndex`-in-MAC hardening is cheap if the threat model widens.)
+- **S4** — `EncryptionInfo.DefaultPBKDF2Iterations` is a mutable process-global with a public
+  setter; the test harness drops it to 1. Default 600,000.
+- **D1** — Form1 is gone (replaced by the `Autoexec.vb` benchmark `Sub Main`, `Console`
+  MyType). Residual is housekeeping: still `OutputType=Exe` + WinForms / `System.Drawing`
+  references. See housekeeping section.
+- **S5** — reader concurrency was blocked by shared AES-CTR state; that's now the re-entrant
+  `ChunkCipher` and lock-free parallel reads shipped. **No longer accepted — fixed.** See DONE.
 
 (**D7** — in-checkpoint chunk writes reusing pre-checkpoint holes — is **fixed**, not
 accepted: shipped in `eac5ccd` with C7 and never reverted. See DONE.)

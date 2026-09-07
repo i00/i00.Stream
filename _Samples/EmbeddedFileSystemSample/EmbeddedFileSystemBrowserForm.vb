@@ -2224,6 +2224,15 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim CopiedBytes As Long = 0
         Dim LastReport As Date = Date.MinValue
 
+        Dim DirectoryEntryCache As New Dictionary(Of Long, IReadOnlyList(Of EmbeddedFileSystem.ContentListEntry))
+        Dim GetDirectoryEntries =
+            Function(AnchorId As Long)
+                If Not DirectoryEntryCache.ContainsKey(AnchorId) Then
+                    DirectoryEntryCache(AnchorId) = _FileSystem.GetDirectoryEntries(AnchorId)
+                End If
+                Return DirectoryEntryCache(AnchorId)
+            End Function
+
         For Each workItem In WorkItems
             If workItem.IsDirectory Then
                 EnsureUploadFolder(workItem.RelativeParent, workItem.Name, TargetDirectoryAnchorId, FolderAnchors)
@@ -2231,8 +2240,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             End If
 
             Dim ParentAnchor = EnsureUploadFolderPath(workItem.RelativeParent, TargetDirectoryAnchorId, FolderAnchors)
-            Dim Existing = _FileSystem.GetDirectoryEntries(ParentAnchor).
-                                       FirstOrDefault(Function(x) String.Equals(x.Name, workItem.Name, StringComparison.OrdinalIgnoreCase))
+            Dim Existing = GetDirectoryEntries(ParentAnchor).
+                           FirstOrDefault(Function(x) String.Equals(x.Name, workItem.Name, StringComparison.OrdinalIgnoreCase))
 
             Dim Replace As Boolean
             If Existing Is Nothing Then

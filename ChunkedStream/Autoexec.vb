@@ -1,7 +1,5 @@
-﻿Imports i00CodeLib
-Imports System.IO
+﻿Imports System.IO
 Imports i00.Streams
-Imports System.Windows.Forms
 
 Friend NotInheritable Class Autoexec
 
