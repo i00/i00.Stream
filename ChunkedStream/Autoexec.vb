@@ -27,7 +27,7 @@ Friend NotInheritable Class Autoexec
 
         Dim StartConsoleColor = Console.ForegroundColor
 
-        Dim BufferSize = 1024 * 1024
+        Dim BufferSize = 16 * 1024 * 1024
 
         Dim Features As New List(Of String)
         If Options.CompressionMethod <> ChunkedStream.ChunkedStreamOptions.CompressionMethods.None Then
@@ -50,7 +50,7 @@ Friend NotInheritable Class Autoexec
         Next
         Console.WriteLine()
 
-        Using EncStorage = New MemoryStream()
+        Using EncStorage = New PositionedMemoryStream()
 
 
             Dim OrigFileLength As Long

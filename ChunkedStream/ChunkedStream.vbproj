@@ -82,10 +82,10 @@
     <Compile Include="Streams\ChunkedStream\Diagnostics.vb" />
     <Compile Include="Streams\ChunkedStream\Extents.vb" />
     <Compile Include="Streams\ChunkedStream\Options.vb" />
-    <Compile Include="Streams\ChunkedStream\Positioned Storage Interface.vb" />
-    <Compile Include="Streams\ChunkedStream\PositionedFileStream.vb" />
-    <Compile Include="Streams\ChunkedStream\PooledPositionedFileStream.vb" />
-    <Compile Include="Streams\ChunkedStream\PositionedMemoryStream.vb" />
+    <Compile Include="Streams\Positioned Storage Interface.vb" />
+    <Compile Include="Streams\PositionedFileStream.vb" />
+    <Compile Include="Streams\PooledPositionedFileStream.vb" />
+    <Compile Include="Streams\PositionedMemoryStream.vb" />
     <Compile Include="Streams\ChunkedStream\Recovery.vb" />
     <Compile Include="Streams\ChunkedStream\Repair.vb" />
     <Compile Include="Streams\ChunkedStream\Defrag.vb" />
@@ -115,7 +115,7 @@
       <DesignTimeSharedInput>True</DesignTimeSharedInput>
     </Compile>
     <Compile Include="Streams\ChunkedStream\Structure.Extensions.vb" />
-    <Compile Include="Streams\Extensions.vb" />
+    <Compile Include="Streams\General\Extensions.vb" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="My Project\Resources.resx">
