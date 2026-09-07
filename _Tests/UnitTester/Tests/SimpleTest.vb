@@ -94,7 +94,7 @@
                                                      Result.Add(ResultTypes.Failure, FunctionText, $"Return was not expected: {Misc.ConvertToDotNetEntryData(TestResult)}")
                                                  End If
                                              Else
-                                                 Result.Add(ResultTypes.OK, FunctionText, SuccessMessage)
+                                                 Result.Add((BenchmarkResult?.ResultType).GetValueOrDefault(ResultTypes.OK), FunctionText, SuccessMessage)
                                              End If
                                          Catch ex As System.Reflection.TargetInvocationException
                                              If TypeOf ex.InnerException Is WarningException Then
@@ -117,9 +117,12 @@
     End Sub
 
     Public Class BenchmarkResult
-        Public ReadOnly Property Message As String
-        Public Sub New(Message As String)
+        Public Property Message As String
+        Public Property ResultType As ResultTypes
+
+        Public Sub New(Message As String, Optional ResultType As ResultTypes = ResultTypes.OK)
             Me.Message = Message
+            Me.ResultType = ResultType
         End Sub
     End Class
 

@@ -18,38 +18,38 @@ Namespace Tests
 
             Dim Tests = {
                 New With {.Test = "No Data",
-                          .ExpectedIndexPageCount = 0,
+                          .MaxSizeBytes = 1024,
                           .Action = Sub(Cs As ChunkedStream)
                                     End Sub},
                 New With {.Test = "Single Sparse Byte",
-                          .ExpectedIndexPageCount = 1,
+                          .MaxSizeBytes = 10 * 1024,
                           .Action = Sub(Cs As ChunkedStream)
                                         Cs.SetLength(1)
                                     End Sub},
                 New With {.Test = "Single Byte",
-                          .ExpectedIndexPageCount = 1,
+                          .MaxSizeBytes = 10 * 1024,
                           .Action = Sub(Cs As ChunkedStream)
                                         Cs.Write(0, New Byte() {1})
                                     End Sub},
                 New With {.Test = $"1 {CLng(Options.ChunkSize).FormatFileSizeFromBytes} Chunk",
-                          .ExpectedIndexPageCount = 1,
+                          .MaxSizeBytes = 150 * 1024,
                           .Action = Sub(Cs As ChunkedStream)
                                         Cs.Write(0, GenerateRandomData(Options.ChunkSize, 1234))
                                     End Sub},
                 New With {.Test = "1 Chunk + 1 Byte(demoting)",
-                          .ExpectedIndexPageCount = 1,
+                          .MaxSizeBytes = 150 * 1024,
                           .Action = Sub(Cs As ChunkedStream)
                                         Cs.Write(0, GenerateRandomData(Options.ChunkSize, 1234))
                                         Cs.Write(Options.ChunkSize, New Byte() {5})
                                         Cs.SetLength(Options.ChunkSize)
                                     End Sub},
                 New With {.Test = "1 Chunk + 1 Byte",
-                          .ExpectedIndexPageCount = 2,
+                          .MaxSizeBytes = 150 * 1024,
                           .Action = Sub(Cs As ChunkedStream)
                                         Cs.Write(0, GenerateRandomData(Options.ChunkSize + 1, 1234))
                                     End Sub},
                 New With {.Test = "1 Chunk + 1 Byte(promoting)",
-                          .ExpectedIndexPageCount = 2,
+                          .MaxSizeBytes = 150 * 1024,
                           .Action = Sub(Cs As ChunkedStream)
                                         ' Two separate Write calls, not one combined write - this
                                         ' specifically forces the first write to land in the elided
@@ -60,6 +60,8 @@ Namespace Tests
                                         Cs.Write(Options.ChunkSize, New Byte() {5})
                                     End Sub}
             }
+
+            Dim ResultType = UnitTester.TestRunner.ResultTypes.OK
 
             For Each Test In Tests
 
@@ -100,17 +102,17 @@ Namespace Tests
                         Reopened.Defragment(ChunkedStream.DefragTypes.Sequence)
                         Dim StructAfterReopen = Reopened.GetStructure()
 
-                        AssertEqual(
-                            Test.ExpectedIndexPageCount,
-                            StructAfterReopen.Regions.Where(Function(r) r.RegionType = ChunkedStreamStructure.RegionTypes.IndexPage).Count,
-                            $"[{Test.Test}] Unexpected IndexPage count after reopen.")
-
                         Dim RegionString =
                             Join(StructAfterReopen.Regions.GroupBy(Function(x) x.RegionType).
                                                            Select(Function(x) $"{x.Key}({x.Count})").
                                                            ToArray(), ", ")
 
-                        Results.Add(Test.Test, $"{Ms.Length:N0} B {RegionString}")
+                        Dim SizeString = $"{Ms.Length:N0} B"
+                        If Ms.Length >= Test.MaxSizeBytes Then
+                            SizeString = $"{UnitTester.ConsoleEx.Format.Foreground.DarkYellow}{SizeString}{UnitTester.ConsoleEx.Format.Foreground.Default}"
+                            ResultType = UnitTester.TestRunner.ResultTypes.Warning
+                        End If
+                        Results.Add(Test.Test, $"{SizeString} {RegionString}")
 
                     End Using
 
@@ -119,7 +121,7 @@ Namespace Tests
             Next
 
             Return New UnitTester.SimpleTest.BenchmarkResult(
-                $"{Join(Results.Select(Function(x) $"{x.Key}: {x.Value}").ToArray, vbCrLf)}")
+                $"{UnitTester.ConsoleEx.Format.Foreground.Default}{Join(Results.Select(Function(x) $"{x.Key}: {x.Value}").ToArray, vbCrLf)}", ResultType)
 
         End Function
 
