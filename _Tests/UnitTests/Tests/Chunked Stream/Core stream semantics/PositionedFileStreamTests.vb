@@ -97,43 +97,42 @@ Namespace Tests
             ''' bit set - i.e. every offset from 2 GiB up, recurring every 4 GiB after that.
             ''' WriteAt/ReadAt were therefore completely unusable past the 2 GiB mark until the
             ''' fix (LowDWordBits reinterprets the bit pattern instead of range-checking it).
-            ''' SetLength grows the file first - on NTFS this only updates file-size metadata
-            ''' rather than physically writing the whole range, so this stays fast without
-            ''' needing multiple gigabytes of real disk I/O.
+            '''
+            ''' Checks the bit arithmetic directly via the Debug_LowDWordBits seam rather than
+            ''' actually growing a file past 2 GiB: Windows zero-fills a file's extended region
+            ''' on SetLength/SetEndOfFile unless the caller holds SeManageVolumePrivilege (to
+            ''' stop a process reading previously-deleted disk content), so a real multi-
+            ''' gigabyte file here would cost several GB of genuine disk writes on every test
+            ''' run - not the "just metadata" no-op an earlier version of this test assumed.
+            ''' The other tests in this class already prove the real ReadFile/WriteFile/
+            ''' OVERLAPPED path works correctly at ordinary offsets, so this only needs to prove
+            ''' the arithmetic itself is now correct at the exact values that broke it.
             ''' </summary>
             <UnitTester.SimpleTest()>
-            Public Shared Sub ReadAtWriteAtWorkAtOffsetsPastTwoGigabytes()
+            Public Shared Sub LowDWordBitsReinterpretsOffsetsPastTwoAndFourGigabytes()
 
-                Dim TempPath = NewTempPath()
-                Try
-                    Using Pfs As New PositionedFileStream(TempPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None)
+                ' Value, ExpectedBitPattern - ExpectedBitPattern is what the low 32 bits of
+                ' Value look like when read back as a signed Int32, which is exactly what a
+                ' checked CInt refuses to produce for anything from &H80000000 up.
+                Dim Cases As New List(Of Tuple(Of Long, Integer))() From {
+                    Tuple.Create(0L, 0),
+                    Tuple.Create(CLng(Integer.MaxValue), Integer.MaxValue),        ' &H7FFFFFFF - last value CInt still handled correctly
+                    Tuple.Create(CLng(Integer.MaxValue) + 1L, Integer.MinValue),   ' &H80000000 (2 GiB) - first value that used to throw
+                    Tuple.Create(3L * 1024 * 1024 * 1024, -1073741824),           ' &HC0000000 (3 GiB)
+                    Tuple.Create(4L * 1024 * 1024 * 1024 - 1L, -1),               ' &HFFFFFFFF - just under 4 GiB
+                    Tuple.Create(4L * 1024 * 1024 * 1024, 0),                     ' &H100000000 - low DWORD wraps back to 0
+                    Tuple.Create(4L * 1024 * 1024 * 1024 + 500L, 500)             ' just past the 4 GiB wraparound
+                }
 
-                        Pfs.SetLength(5L * 1024 * 1024 * 1024)
+                For Each Case_ In Cases
+                    Dim Actual = PositionedFileStream.Debug_LowDWordBits(Case_.Item1)
+                    AssertEqual(Case_.Item2, Actual, $"LowDWordBits({Case_.Item1}) returned the wrong bit pattern.")
+                Next
 
-                        ' Offsets around the low DWORD's sign bit (>= 2 GiB) and the 4 GiB
-                        ' wraparound - every one of these threw OverflowException before the fix.
-                        Dim Offsets() As Long = {
-                            CLng(Integer.MaxValue) + 1L,
-                            3L * 1024 * 1024 * 1024,
-                            4L * 1024 * 1024 * 1024 - 1L,
-                            4L * 1024 * 1024 * 1024,
-                            4L * 1024 * 1024 * 1024 + 500L
-                        }
-
-                        For Each Offset In Offsets
-                            Dim Data = GenerateRandomData(500, CInt(Offset Mod 10000) + 1)
-                            Pfs.WriteAt(Offset, Data, 0, Data.Length)
-
-                            Dim ReadBack(Data.Length - 1) As Byte
-                            Dim ReadCount = Pfs.ReadAt(Offset, ReadBack, 0, ReadBack.Length)
-                            AssertEqual(Data.Length, ReadCount, $"ReadAt at offset {Offset} returned the wrong count.")
-                            AssertBytesEqual(Data, ReadBack, $"ReadAt/WriteAt round trip mismatch at offset {Offset}.")
-                        Next
-
-                    End Using
-                Finally
-                    TryDelete(TempPath)
-                End Try
+                ' MakeOverlapped applies the same function to (PhysicalOffset >> 32) for
+                ' OffsetHigh, so a file whose size needs the high DWORD (>= 4 GiB) is covered
+                ' by the same arithmetic, already proven above for every input LowDWordBits can
+                ' receive - no separate case needed here.
 
             End Sub
 

@@ -148,6 +148,19 @@ Namespace Streams
             Return CInt(Masked)
         End Function
 
+        ''' <summary>
+        ''' Test-only seam onto <see cref="LowDWordBits" /> - lets a regression test check the
+        ''' exact bit-reinterpretation at the offsets that broke it (2 GiB, 4 GiB, and
+        ''' neighbours) directly, without needing an actual multi-gigabyte file: growing a real
+        ''' file to that size costs real disk writes (Windows zero-fills a file's extended
+        ''' region on SetLength/SetEndOfFile unless the caller holds SeManageVolumePrivilege,
+        ''' to stop a process reading previously-deleted disk content - it is not the "just
+        ''' metadata" no-op it might look like).
+        ''' </summary>
+        Friend Shared Function Debug_LowDWordBits(Value As Long) As Integer
+            Return LowDWordBits(Value)
+        End Function
+
         Private Shared Function MakeOverlapped(PhysicalOffset As Long) As NATIVE_OVERLAPPED
             Dim Result As New NATIVE_OVERLAPPED()
             Result.OffsetLow = LowDWordBits(PhysicalOffset)
