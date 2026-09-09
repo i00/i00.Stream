@@ -4,6 +4,36 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ---
 
+## 2026-09-10
+
+### `Validate()` buffered every live physical record into memory at once — DONE
+`Validate()` captured its diagnostics snapshot under the state lock and, in the same pass,
+read the full bytes of *every* live physical record into `DiagnosticsSnapshot.StoredRecords`
+(`CaptureDiagnosticsSnapshotCore(IncludeStoredRecords:=True)`). For a large archive that put
+the entire payload in RAM at once — and held the write lock for the whole read — before any
+per-record inspection or progress callback ran.
+
+Fix (`Diagnostics.vb`): `CaptureDiagnosticsSnapshotCore` no longer reads record bytes (the
+`IncludeStoredRecords` parameter and the `StoredRecords` dictionary are gone).
+`CollectPhysicalRecordProblems` now reads one record at a time through a new
+`ReadPhysicalRecordForValidation`, which re-enters the state lock only long enough to copy
+that record's bytes, then releases it so the CPU-heavy MAC checks still run unlocked. Peak
+extra memory during validation drops from the whole archive to a single record. The lock is
+now taken and dropped per record instead of held across the entire snapshot read, so a
+concurrent reader or writer no longer waits out the full scan. A record that is moved or
+reclaimed between the snapshot and its read is reported as unreadable; `Repair` already
+re-verifies every physical-record problem under the lock before acting, so a spurious report
+from that race is skipped. `Repair.vb`'s `PhysicalRecordProblemStillPresent` passes the one
+record's bytes straight to `InspectPhysicalRecordSnapshot`, which now takes the buffer as a
+parameter.
+
+New test `Validation.ValidateReadsPhysicalRecordsOneAtATimeNotAllUpFront`: a positioned
+backing store that counts reads, driven by `Validate` with a progress callback. By the first
+callback only the first record has been read (was: all of them), and reads keep arriving as
+later callbacks fire. Suite 324 → 325.
+
+---
+
 ## 2026-09-06
 
 ### Batched concurrent chunk writes raced NTFS's zero-fill and silently lost data — DONE

@@ -975,6 +975,169 @@ Namespace Tests
 
             End Sub
 
+            ' ================================================================================
+            ' Memory footprint
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Verifies that validation reads physical records one at a time as it inspects
+            ''' them, rather than buffering every live record into memory up front - the latter
+            ''' put the whole archive in RAM for a large stream. The progress callback fires
+            ''' once per record, so by the first callback only the first record can have been
+            ''' read, and reads must keep arriving as later callbacks fire.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ValidateReadsPhysicalRecordsOneAtATimeNotAllUpFront()
+
+                Const ChunkCount As Integer = 12
+
+                Using Backing As New ReadCountingStream()
+
+                    Using Cs = ChunkedStream.Open(Backing)
+
+                        Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * ChunkCount, 4500))
+
+                        Dim BaselineReads = Backing.ReadAtCount
+                        Dim ReadsAtFirstCallback As Integer = -1
+                        Dim CallbackCount As Integer = 0
+
+                        Cs.Validate(
+                            Sub(ProcessedUnits, TotalUnits, UnitType, Token)
+                                CallbackCount += 1
+                                If CallbackCount = 1 Then ReadsAtFirstCallback = Backing.ReadAtCount - BaselineReads
+                            End Sub)
+
+                        Dim TotalValidateReads = Backing.ReadAtCount - BaselineReads
+
+                        AssertTrue(
+                            CallbackCount >= ChunkCount,
+                            "Validation should report progress once per physical record.")
+
+                        AssertTrue(
+                            ReadsAtFirstCallback >= 1,
+                            "The first record's bytes should have been read before its progress callback.")
+
+                        AssertTrue(
+                            ReadsAtFirstCallback <= 2,
+                            $"Validation read {ReadsAtFirstCallback} records before its first progress callback - it is buffering the whole archive up front.")
+
+                        AssertTrue(
+                            TotalValidateReads > ReadsAtFirstCallback,
+                            "Physical records should still be read as validation reports progress, not all before it starts.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' A seekable in-memory backing store that counts positioned reads, so a test can
+            ''' observe when validation reads physical-record bytes.
+            ''' </summary>
+            Private NotInheritable Class ReadCountingStream
+                Inherits Stream
+                Implements IPositionedStream
+
+                Private ReadOnly _Inner As New MemoryStream()
+                Private _ReadAtCount As Integer
+
+                Public ReadOnly Property ReadAtCount As Integer
+                    Get
+                        Return _ReadAtCount
+                    End Get
+                End Property
+
+                Public ReadOnly Property PositionedIoCapabilities As PositionedIoCapabilities _
+                    Implements IPositionedStream.PositionedIoCapabilities
+                    Get
+                        Return PositionedIoCapabilities.None
+                    End Get
+                End Property
+
+                Public Function ReadAt(PhysicalOffset As Long,
+                                       Buffer As Byte(),
+                                       BufferOffset As Integer,
+                                       Count As Integer) As Integer Implements IPositionedStream.ReadAt
+
+                    _ReadAtCount += 1
+                    If PhysicalOffset >= _Inner.Length Then Return 0
+                    _Inner.Position = PhysicalOffset
+                    Return _Inner.Read(Buffer, BufferOffset, Count)
+
+                End Function
+
+                Public Sub WriteAt(PhysicalOffset As Long,
+                                   Buffer As Byte(),
+                                   BufferOffset As Integer,
+                                   Count As Integer) Implements IPositionedStream.WriteAt
+
+                    If PhysicalOffset > _Inner.Length Then _Inner.SetLength(PhysicalOffset)
+                    _Inner.Position = PhysicalOffset
+                    _Inner.Write(Buffer, BufferOffset, Count)
+
+                End Sub
+
+                Public Overrides ReadOnly Property CanRead As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property CanSeek As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property CanWrite As Boolean
+                    Get
+                        Return True
+                    End Get
+                End Property
+
+                Public Overrides ReadOnly Property Length As Long
+                    Get
+                        Return _Inner.Length
+                    End Get
+                End Property
+
+                Public Overrides Property Position As Long
+                    Get
+                        Return _Inner.Position
+                    End Get
+                    Set
+                        _Inner.Position = Value
+                    End Set
+                End Property
+
+                Public Overrides Sub Flush()
+                    _Inner.Flush()
+                End Sub
+
+                Public Overrides Function Read(Buffer As Byte(), Offset As Integer, Count As Integer) As Integer
+                    Return _Inner.Read(Buffer, Offset, Count)
+                End Function
+
+                Public Overrides Sub Write(Buffer As Byte(), Offset As Integer, Count As Integer)
+                    _Inner.Write(Buffer, Offset, Count)
+                End Sub
+
+                Public Overrides Function Seek(Offset As Long, Origin As SeekOrigin) As Long
+                    Return _Inner.Seek(Offset, Origin)
+                End Function
+
+                Public Overrides Sub SetLength(Value As Long)
+                    _Inner.SetLength(Value)
+                End Sub
+
+                Protected Overrides Sub Dispose(Disposing As Boolean)
+                    If Disposing Then _Inner.Dispose()
+                    MyBase.Dispose(Disposing)
+                End Sub
+
+            End Class
+
         End Class
 
     End Class

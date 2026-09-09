@@ -213,7 +213,6 @@ Namespace Streams
             Public LivePhysicalRecordOffsets As Dictionary(Of Long, Long)
             Public Extents As List(Of ExtentIndexEntry)
             Public PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry)
-            Public StoredRecords As Dictionary(Of Long, Byte())
             Public ChunkMacKey As Byte()
         End Class
 
@@ -230,7 +229,7 @@ Namespace Streams
             Dim Snapshot As DiagnosticsSnapshot
 
             Using EnterStateLock()
-                Snapshot = CaptureDiagnosticsSnapshotCore(False)
+                Snapshot = CaptureDiagnosticsSnapshotCore()
             End Using
 
             CancellationToken.ThrowIfCancellationRequested()
@@ -284,7 +283,7 @@ Namespace Streams
             Dim Snapshot As DiagnosticsSnapshot
 
             Using EnterStateLock()
-                Snapshot = CaptureDiagnosticsSnapshotCore(True)
+                Snapshot = CaptureDiagnosticsSnapshotCore()
             End Using
 
             CancellationToken.ThrowIfCancellationRequested()
@@ -305,11 +304,11 @@ Namespace Streams
                 End Function, CancellationToken).ConfigureAwait(False)
         End Function
 
-        Private Function CaptureDiagnosticsSnapshotCore(IncludeStoredRecords As Boolean) As DiagnosticsSnapshot
+        Private Function CaptureDiagnosticsSnapshotCore() As DiagnosticsSnapshot
 
             ThrowIfDisposed()
 
-            Dim Snapshot = New DiagnosticsSnapshot With {
+            Return New DiagnosticsSnapshot With {
                 .LogicalLength = _Length,
                 .DataEnd = GetDataEndFromIndex(),
                 .AnchorIndexCount = _ExtentIndexesByAnchorId.Count,
@@ -317,24 +316,8 @@ Namespace Streams
                 .LivePhysicalRecordOffsets = _LivePhysicalRecordIdsByOffset.ToDictionary(Function(pair) pair.Key, Function(pair) pair.Value),
                 .Extents = New List(Of ExtentIndexEntry)(_Extents),
                 .PhysicalRecords = New Dictionary(Of Long, PhysicalRecordEntry)(_PhysicalRecords),
-                .StoredRecords = New Dictionary(Of Long, Byte())(),
                 .ChunkMacKey = If(_ChunkMacKey Is Nothing, Nothing, DirectCast(_ChunkMacKey.Clone(), Byte()))
             }
-
-            If IncludeStoredRecords Then
-                For Each Pair In Snapshot.PhysicalRecords
-                    Dim Record = Pair.Value
-                    If Record.RefCount <= 0 Then Continue For
-                    If Record.PhysicalOffset < DataStartOffset Then Continue For
-                    If Record.PhysicalLength < MinChunkRecordSize Then Continue For
-                    If Record.PhysicalOffset > BaseStream.Length - Record.PhysicalLength Then Continue For
-                    Dim Buffer(Record.PhysicalLength - 1) As Byte
-                    ReadAt(Record.PhysicalOffset, Buffer, 0, Buffer.Length)
-                    Snapshot.StoredRecords.Add(Record.RecordId, Buffer)
-                Next
-            End If
-
-            Return Snapshot
 
         End Function
 
@@ -551,7 +534,7 @@ Namespace Streams
                 ThreadingCancellationToken.ThrowIfCancellationRequested()
 
                 If Pair.Value.RefCount > 0 Then
-                    Dim Problem = InspectPhysicalRecordSnapshot(Snapshot, Pair.Value)
+                    Dim Problem = InspectPhysicalRecordSnapshot(Snapshot, Pair.Value, ReadPhysicalRecordForValidation(Pair.Value.RecordId))
                     If Problem IsNot Nothing Then Problems.Add(Problem)
                 End If
 
@@ -562,8 +545,37 @@ Namespace Streams
 
         End Sub
 
+        '
+        ' Reads one live physical record's stored bytes for validation, re-entering the
+        ' state lock only long enough to copy them. Validation buffers a single record at a
+        ' time this way rather than the whole archive at once. Returns Nothing when the
+        ' record is no longer live or no longer fits the backing stream, which
+        ' InspectPhysicalRecordSnapshot reports as an unreadable record.
+        '
+        Private Function ReadPhysicalRecordForValidation(RecordId As Long) As Byte()
+
+            Using EnterStateLock()
+
+                ThrowIfDisposed()
+
+                Dim Record As PhysicalRecordEntry
+                If _PhysicalRecords.TryGetValue(RecordId, Record) = False Then Return Nothing
+                If Record.RefCount <= 0 Then Return Nothing
+                If Record.PhysicalOffset < DataStartOffset Then Return Nothing
+                If Record.PhysicalLength < MinChunkRecordSize Then Return Nothing
+                If Record.PhysicalOffset > BaseStream.Length - Record.PhysicalLength Then Return Nothing
+
+                Dim Buffer(Record.PhysicalLength - 1) As Byte
+                ReadAt(Record.PhysicalOffset, Buffer, 0, Buffer.Length)
+                Return Buffer
+
+            End Using
+
+        End Function
+
         Private Function InspectPhysicalRecordSnapshot(Snapshot As DiagnosticsSnapshot,
-                                                       Record As PhysicalRecordEntry) As ValidationProblem
+                                                       Record As PhysicalRecordEntry,
+                                                       Buffer As Byte()) As ValidationProblem
 
             Dim Unreadable = Function(message As String) _
                 New ValidationProblem(ValidationSeverity.[Error], ValidationProblemKind.PhysicalRecordUnreadable,
@@ -574,8 +586,7 @@ Namespace Streams
             If Record.PhysicalOffset < DataStartOffset Then Return Unreadable($"Physical record {Record.RecordId} has an invalid offset.")
             If Record.PhysicalLength < MinChunkRecordSize Then Return Unreadable($"Physical record {Record.RecordId} has an invalid length.")
 
-            Dim Buffer As Byte() = Nothing
-            If Snapshot.StoredRecords.TryGetValue(Record.RecordId, Buffer) = False Then
+            If Buffer Is Nothing Then
                 Return Unreadable($"Physical record {Record.RecordId} extends beyond the end of the backing stream.")
             End If
             If BitConverter.ToInt64(Buffer, 0) <> Record.RecordId Then Return Unreadable($"Physical record {Record.RecordId} has a mismatched id in its stored header.")

@@ -163,21 +163,20 @@ Namespace Streams
             Dim Probe = New DiagnosticsSnapshot With {
                 .Extents = _Extents,
                 .PhysicalRecords = _PhysicalRecords,
-                .StoredRecords = New Dictionary(Of Long, Byte())(),
                 .ChunkMacKey = If(_ChunkMacKey Is Nothing, Nothing, DirectCast(_ChunkMacKey.Clone(), Byte()))
             }
 
+            Dim Buffer As Byte() = Nothing
             If Record.PhysicalOffset >= DataStartOffset AndAlso
                Record.PhysicalLength >= MinChunkRecordSize AndAlso
                Record.PhysicalOffset <= BaseStream.Length - Record.PhysicalLength Then
 
-                Dim Buffer(Record.PhysicalLength - 1) As Byte
+                Buffer = New Byte(Record.PhysicalLength - 1) {}
                 ReadAt(Record.PhysicalOffset, Buffer, 0, Buffer.Length)
-                Probe.StoredRecords.Add(RecordId, Buffer)
 
             End If
 
-            Return InspectPhysicalRecordSnapshot(Probe, Record) IsNot Nothing
+            Return InspectPhysicalRecordSnapshot(Probe, Record, Buffer) IsNot Nothing
 
         End Function
 
