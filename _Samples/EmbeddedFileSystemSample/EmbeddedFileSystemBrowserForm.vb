@@ -25,10 +25,25 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private Const LvmSetExtendedListViewStyle As Integer = &H1000 + 54
     Private Const LvsExDoubleBuffer As Integer = &H10000
 
-    ''' <summary>Extensions previewed as thumbnails in the thumbnail views (all GDI+-decodable).</summary>
-    Private Shared ReadOnly ThumbnailImageExtensions As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-        ".png", ".jpg", ".jpeg", ".jfif", ".gif", ".bmp", ".dib", ".tif", ".tiff", ".ico"
-    }
+    '''' <summary>Extensions previewed as thumbnails in the thumbnail views (all GDI+-decodable).</summary>
+    'Private Shared ReadOnly ThumbnailImageExtensions As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+    '    ".png", ".jpg", ".jpeg", ".jfif", ".gif", ".bmp", ".dib", ".tif", ".tiff", ".ico"
+    '}
+    Private Shared ReadOnly Property ThumbnailImageExtensions As HashSet(Of String)
+        Get
+            Static _Returner As HashSet(Of String)
+            If _Returner Is Nothing Then
+                _Returner = New HashSet(Of String)(
+                                Imaging.ImageCodecInfo.GetImageDecoders().
+                                        SelectMany(Function(x) x.FilenameExtension.Split(";"c)).
+                                        Select(Function(x) IO.Path.GetExtension(x)).
+                                        Distinct(), StringComparer.OrdinalIgnoreCase)
+            End If
+            Return _Returner
+        End Get
+    End Property
+
+
     Private Const MaximumThumbnailSourceBytes As Long = 40L * 1024L * 1024L
     Private Const ThumbnailRenderSize As Integer = 256
 
@@ -224,7 +239,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private ReadOnly _SearchResults As New List(Of SearchHit)()
     Private ReadOnly _SearchItemInfo As New Dictionary(Of ListViewItem, SearchHit)()
     Private ReadOnly _PathColumn As New ColumnHeader() With {.Text = "Path", .Width = 260}
-    Private WithEvents _SearchTimer As New System.Windows.Forms.Timer() With {.Interval = 400}
+    'Private WithEvents _SearchTimer As New System.Windows.Forms.Timer() With {.Interval = 400}
     Private _HistoryIndex As Integer = -1
     Private _ApplyingLocation As Boolean
     Private _SearchActive As Boolean
@@ -268,9 +283,13 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         lvFiles.ContextMenuStrip = Nothing
         tvFolders.ContextMenuStrip = Nothing
 
+        Dim MouseNavigation = New MouseNavigationButtonsMessageFilter(Me,
+            Sub() GoBack(),
+            Sub() GoForward())
+
         Try
-            SetWindowTheme(tvFolders.Handle, "Explorer", Nothing)
-            SetWindowTheme(lvFiles.Handle, "Explorer", Nothing)
+            'SetWindowTheme(tvFolders.Handle, "Explorer", Nothing)
+            'SetWindowTheme(lvFiles.Handle, "Explorer", Nothing)
             SendMessage(lvFiles.Handle, LvmSetExtendedListViewStyle, New IntPtr(LvsExDoubleBuffer), New IntPtr(LvsExDoubleBuffer))
         Catch ex As Exception
 
@@ -312,13 +331,16 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End If
 
         'Dim Fragmentation = _FileSystem.ChunkedStream.GetFragmentation
-        Dim Struct = FileSystem.ChunkedStream.GetStructure()
+        'Dim Struct = FileSystem.ChunkedStream.GetStructure()
 
-        tsiFragmentation.Text = $"Fragmentation: {Struct.FragmentationRatio:P0}{vbCrLf}Click to defrag"
-        tsiCompression.Text = $"File size: {Struct.PhysicalLength.FormatFileSizeFromBytes()} " &
-                              $"Data size: {Struct.LogicalLength.FormatFileSizeFromBytes()} " &
-                              $"Fragmented waste: {Struct.FragmentedBytes.FormatFileSizeFromBytes()} "
-
+        'tsiFragmentation.Text = $"Fragmentation: {Struct.FragmentationRatio:P0}{vbCrLf}Click to defrag"
+        'tsiCompression.Text = $"File size: {Struct.PhysicalLength.FormatFileSizeFromBytes()} " &
+        '                      $"Data size: {Struct.LogicalLength.FormatFileSizeFromBytes()} " &
+        '                      $"Fragmented waste: {Struct.FragmentedBytes.FormatFileSizeFromBytes()} "
+        tsiFragmentation.Text = $"Fragmentation: {FileSystem.ChunkedStream.GetFragmentation():P0}"
+        tsiFragmentation.ToolTipText = $"Click to defrag"
+        tsiCompression.Text = $"File size: {FileSystem.ChunkedStream.Length.FormatFileSizeFromBytes()} " &
+                              $"Data size: {FileSystem.ChunkedStream.BaseStream.Length.FormatFileSizeFromBytes()}"
 
         'If Fragmentation >= 0.1 Then
         '    tsiCompression.Visible = True
@@ -938,7 +960,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         If _SearchActive Then
             Dim ProgressText = If(_SearchGeneration = _CompletedSearchGeneration, String.Empty, " (searching...)")
-            StatusLabel.Text = $"'{_CurrentQueryText}': {lvFiles.Items.Count:N0} result{If(lvFiles.Items.Count = 1, "", "s")}{ProgressText}{SelectionText}"
+            StatusLabel.Text = $"Search for '{_CurrentQueryText}': {lvFiles.Items.Count:N0} result{If(lvFiles.Items.Count = 1, "", "s")}{ProgressText}{SelectionText}"
             ' Incremental result batches update this caption faster than the ToolStrip repaints
             ' itself, so force it while a search is on screen.
             StatusLabel.Owner?.Refresh()
@@ -1035,12 +1057,15 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Public Property Text As String
         Public Property SelectedAnchors As List(Of Long)
         Public Property FocusedAnchor As Long
-        Public Property TopItemAnchor As Long
+
+        ' I removed this as setting the top item does not work in certain views
+        'Public Property TopItemAnchor As Long
+        Public Property ScrollPosition As Point
     End Class
 
     ''' <summary>Sets the box text from code and applies it at once, pushing a history entry.</summary>
     Private Sub SetAddressText(Text As String)
-        _SearchTimer.Stop()
+        '_SearchTimer.Stop()
         _LastPushWasTyped = False
         _SuppressSearchText = True
         Try
@@ -1076,7 +1101,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub ApplyHistoryEntry()
-        _SearchTimer.Stop()
+        '_SearchTimer.Stop()
+
         _LastPushWasTyped = False
         Dim Entry = _History(_HistoryIndex)
         _SuppressSearchText = True
@@ -1085,9 +1111,11 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Finally
             _SuppressSearchText = False
         End Try
+
         ApplyAddress(Entry.Text)
         RestoreViewState(Entry)
         UpdateNavigationButtons()
+
     End Sub
 
     ''' <summary>The anchor ID of the entry behind a list item, or 0 if it has none (or Item is Nothing).</summary>
@@ -1107,7 +1135,13 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                                         Where(Function(anchor) anchor <> 0).
                                         ToList()
         Entry.FocusedAnchor = AnchorOf(lvFiles.FocusedItem)
-        Entry.TopItemAnchor = AnchorOf(lvFiles.GetItemAt(0, 0))
+
+        Entry.ScrollPosition = GetScrollPosition(lvFiles)
+        'Dim TopVisibleItem = lvFiles.Items.
+        '    Cast(Of ListViewItem)().
+        '    FirstOrDefault(Function(Item) lvFiles.ClientRectangle.IntersectsWith(Item.Bounds))
+        'Entry.TopItemAnchor = AnchorOf(TopVisibleItem)
+
     End Sub
 
     ''' <summary>Re-applies a history entry's saved selection/focus/scroll after its address has
@@ -1122,16 +1156,60 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Next
         End If
 
-        If Entry.TopItemAnchor = 0 Then Return
-        For Each Item As ListViewItem In lvFiles.Items
-            If AnchorOf(Item) <> Entry.TopItemAnchor Then Continue For
-            If lvFiles.View = View.Details OrElse lvFiles.View = View.List Then
-                lvFiles.TopItem = Item
-            Else
-                Item.EnsureVisible()
-            End If
-            Exit For
-        Next
+        SetScrollPosition(lvFiles, Entry.ScrollPosition)
+        'If Entry.TopItemAnchor = 0 Then Return
+        'For Each Item As ListViewItem In lvFiles.Items
+        '    If AnchorOf(Item) <> Entry.TopItemAnchor Then Continue For
+        '    If lvFiles.View = View.Details OrElse lvFiles.View = View.List Then
+        '        lvFiles.TopItem = Item
+        '    Else
+        '        Item.EnsureVisible()
+        '    End If
+        '    Exit For
+        'Next
+    End Sub
+
+    Private Const LVM_FIRST As Integer = &H1000
+    Private Const LVM_GETORIGIN As Integer = LVM_FIRST + 41
+    Private Const LVM_SCROLL As Integer = LVM_FIRST + 20
+
+
+    <StructLayout(LayoutKind.Sequential)>
+    Private Structure NativePoint
+        Public X As Integer
+        Public Y As Integer
+    End Structure
+
+    <DllImport("user32.dll", CharSet:=CharSet.Auto)>
+    Private Shared Function SendMessage(
+    HWnd As IntPtr,
+    Msg As Integer,
+    WParam As IntPtr,
+    ByRef LParam As NativePoint) As IntPtr
+    End Function
+
+    Private Function GetScrollPosition(ListView As ListView) As Point
+
+        Dim Origin As NativePoint
+
+        SendMessage(ListView.Handle,
+                LVM_GETORIGIN,
+                IntPtr.Zero,
+                Origin)
+
+        Return New Point(Origin.X, Origin.Y)
+
+    End Function
+
+    Private Sub SetScrollPosition(ListView As ListView, TargetPosition As Point)
+
+        Dim CurrentPosition = GetScrollPosition(ListView)
+
+        SendMessage(ListView.Handle,
+                LVM_SCROLL,
+                CType(TargetPosition.X - CurrentPosition.X, IntPtr),
+                CType(TargetPosition.Y - CurrentPosition.Y, IntPtr))
+
     End Sub
 
     Private Sub UpdateNavigationButtons()
@@ -1148,35 +1226,36 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub tsiSearch_TextChanged(Sender As Object, EventArgs As EventArgs) Handles tsiSearch.TextChanged
-        If _SuppressSearchText Then Return
-        _SearchTimer.Stop()
-        _SearchTimer.Start()
+        'If _SuppressSearchText Then Return
+        '_SearchTimer.Stop()
+        '_SearchTimer.Start()
     End Sub
 
-    Private Sub SearchTimer_Tick(Sender As Object, EventArgs As EventArgs) Handles _SearchTimer.Tick
-        _SearchTimer.Stop()
-        CommitTypedAddress()
-    End Sub
+    'Private Sub SearchTimer_Tick(Sender As Object, EventArgs As EventArgs) Handles _SearchTimer.Tick
+    '    _SearchTimer.Stop()
+    '    CommitTypedAddress()
+    'End Sub
 
     ''' <summary>Enter applies the typed text at once instead of waiting out the debounce.</summary>
     Private Sub tsiSearch_KeyDown(Sender As Object, EventArgs As KeyEventArgs) Handles tsiSearch.KeyDown
         If EventArgs.KeyCode <> Keys.Enter AndAlso EventArgs.KeyCode <> Keys.Return Then Return
-        _SearchTimer.Stop()
+        '_SearchTimer.Stop()
         CommitTypedAddress()
         EventArgs.Handled = True
         EventArgs.SuppressKeyPress = True
+        lvFiles.Focus()
     End Sub
 
     ''' <summary>Applies text the user typed. Consecutive typed edits collapse into one history entry.</summary>
     Private Sub CommitTypedAddress()
-        _SearchTimer.Stop()
+        '_SearchTimer.Stop()
         Dim Text = tsiSearch.Text
         If _LastPushWasTyped AndAlso _HistoryIndex >= 0 Then
             Dim ExistingEntry = _History(_HistoryIndex)
             ExistingEntry.Text = Text
             ExistingEntry.SelectedAnchors = Nothing
             ExistingEntry.FocusedAnchor = 0
-            ExistingEntry.TopItemAnchor = 0
+            ExistingEntry.ScrollPosition = New Point()
         Else
             CaptureCurrentViewState()
             PushAddressHistory(Text)
@@ -1202,7 +1281,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 _SuppressSearchText = False
             End Try
         End If
-        _SearchTimer.Stop()
+        '_SearchTimer.Stop()
         tsiSearch.SelectionStart = tsiSearch.Text.Length
         tsiSearch.SelectionLength = 0
     End Sub
@@ -1424,7 +1503,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Return Function(Name) Compiled.IsMatch(Name)
     End Function
 
-    Private Const SearchResultFlushIntervalMs As Integer = 80
+    Private Const SearchResultFlushIntervalMs As Integer = 250
 
     Private Sub RunSearch(Generation As Integer, Scopes As List(Of SearchScope))
         Dim Seen As New HashSet(Of Long)()
@@ -1493,8 +1572,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             For Each Hit In Batch
                 lvFiles.Items.Add(CreateSearchListItem(Hit))
             Next
-            lvFiles.ListViewItemSorter = _ListSorter
-            lvFiles.Sort()
+            'lvFiles.ListViewItemSorter = _ListSorter
+            'lvFiles.Sort()
         Finally
             lvFiles.EndUpdate()
         End Try
@@ -1513,11 +1592,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             lvFiles.ListViewItemSorter = Nothing
             lvFiles.Items.Clear()
             _SearchItemInfo.Clear()
-            For Each Hit In _SearchResults
-                lvFiles.Items.Add(CreateSearchListItem(Hit))
-            Next
-            lvFiles.ListViewItemSorter = _ListSorter
-            lvFiles.Sort()
+            lvFiles.Items.AddRange(_SearchResults.Select(Function(x) CreateSearchListItem(x)).ToArray())
+            'lvFiles.ListViewItemSorter = _ListSorter
+            'lvFiles.Sort()
         Finally
             lvFiles.EndUpdate()
         End Try
@@ -1586,14 +1663,46 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         SaveSelectedEntries(Me, EventArgs)
     End Sub
 
-    Private Sub lvFiles_ColumnClick(Sender As Object, EventArgs As ColumnClickEventArgs) Handles lvFiles.ColumnClick
-        If EventArgs.Column = _ListSorter.Column Then
-            _ListSorter.Order = If(_ListSorter.Order = SortOrder.Ascending, SortOrder.Descending, SortOrder.Ascending)
-        Else
-            _ListSorter.Column = EventArgs.Column
-            _ListSorter.Order = SortOrder.Ascending
+    <DllImport("user32.dll")>
+    Private Shared Function InvalidateRect(
+        hWnd As IntPtr,
+        lpRect As IntPtr,
+        bErase As Boolean) As Boolean
+    End Function
+
+    Private Const LVM_GETHEADER As Integer = &H101F
+
+    Private Sub InvalidateHeader(lv As ListView)
+
+        Dim hHeader = SendMessage(
+            lv.Handle,
+            LVM_GETHEADER,
+            IntPtr.Zero,
+            IntPtr.Zero)
+
+        If hHeader <> IntPtr.Zero Then
+            InvalidateRect(hHeader, IntPtr.Zero, True)
         End If
+
+    End Sub
+
+    Private Sub SortByColumn(ColumnIndex As Integer)
+        If lvFiles.ListViewItemSorter Is Nothing OrElse ColumnIndex <> _ListSorter.Column Then
+            lvFiles.ListViewItemSorter = _ListSorter
+            _ListSorter.Column = ColumnIndex
+            _ListSorter.Order = SortOrder.Ascending
+        Else
+            _ListSorter.Order = If(_ListSorter.Order = SortOrder.Ascending, SortOrder.Descending, SortOrder.Ascending)
+        End If
+
+        lvFiles.Invalidate(New Rectangle(0, 0, 100, 100))
+
+        InvalidateHeader(lvFiles)
         lvFiles.Sort()
+    End Sub
+
+    Private Sub lvFiles_ColumnClick(Sender As Object, e As ColumnClickEventArgs) Handles lvFiles.ColumnClick
+        SortByColumn(e.Column)
     End Sub
 
     ' ===================================================================================================
@@ -1648,9 +1757,36 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         tsiDelete.Available = Any
         tsiUploadFiles.Available = _SearchActive = False
         tsiUploadFolder.Available = _SearchActive = False
-        tsiNewFolder.Available = _SearchActive = False
+        tsiNewFolder.Available = _SearchActive = False AndAlso Any = False
         tsiRefresh.Available = True
         tsiView.Available = True
+        ' We did use DrawIconViewItem to custom render these - but we are in the process of unifying it all into DrawThumbnailItem...
+        ' so in the meantime these are not avaliable:
+        tsiViewSmIcon.Available = False
+        tsiViewList.Available = False
+        tsiViewTiles.Available = False
+
+        tsiSortBy.Available = True
+        Static SortByMenuItems As Dictionary(Of Integer, ToolStripMenuItem) =
+            lvFiles.Columns().OfType(Of ColumnHeader).
+                              Select(Function(x)
+                                         Dim colIndex = lvFiles.Columns.IndexOf(x)
+                                         Dim tsi As New ToolStripMenuItem(x.Text, Nothing,
+                                             Sub(ss, ee)
+                                                 SortByColumn(colIndex)
+                                             End Sub)
+                                         tsiSortBy.DropDownItems.Add(tsi)
+                                         Return New With {.Column = colIndex, .tsi = tsi}
+                                     End Function).
+                              ToDictionary(Function(x) x.Column, Function(x) x.tsi)
+        For Each SortByItem In SortByMenuItems
+            SortByItem.Value.Checked = lvFiles.ListViewItemSorter IsNot Nothing AndAlso _ListSorter.Column = SortByItem.Key
+        Next
+
+        tsiCut.Available = Any
+        tsiCopy.Available = Any
+        tsiPaste.Available = True 'TODO: <
+
         UpdateViewMenuChecks()
 
         TidySeparators(FileContextMenu)
@@ -1809,81 +1945,231 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Select
     End Function
 
-    Private Sub lvFiles_DrawColumnHeader(Sender As Object, EventArgs As DrawListViewColumnHeaderEventArgs) Handles lvFiles.DrawColumnHeader
-        EventArgs.DrawDefault = True
+    Private Sub lvFiles_DrawColumnHeader(Sender As Object, e As DrawListViewColumnHeaderEventArgs) Handles lvFiles.DrawColumnHeader
+        e.DrawBackground()
+
+        Dim Bounds = e.Bounds
+
+        Dim Flags = TextFormatFlags.VerticalCenter Or TextFormatFlags.EndEllipsis Or TextFormatFlags.NoPrefix
+        If e.Header IsNot Nothing AndAlso e.Header.TextAlign = HorizontalAlignment.Right Then
+            Flags = Flags Or TextFormatFlags.Right
+        ElseIf e.Header IsNot Nothing AndAlso e.Header.TextAlign = HorizontalAlignment.Center Then
+            Flags = Flags Or TextFormatFlags.HorizontalCenter
+        End If
+        TextRenderer.DrawText(e.Graphics, e.Header.Text, e.Font, Bounds, e.ForeColor, Flags)
+
+        If e.ColumnIndex = _ListSorter.Column AndAlso lvFiles.ListViewItemSorter IsNot Nothing Then
+            DrawSortIndicator(e.Graphics, Bounds, _ListSorter.Order)
+        End If
+
     End Sub
 
-    Private Sub lvFiles_DrawItem(Sender As Object, EventArgs As DrawListViewItemEventArgs) Handles lvFiles.DrawItem
-        ' In Details view every column is painted by DrawSubItem instead.
-        If lvFiles.View = View.Details Then Return
+    Shared Function DrawSortIndicator(g As Graphics, r As Rectangle, order As SortOrder) As Rectangle
+        If order = SortOrder.None Then Return r
 
-        If _ThumbnailCellSize <> 0 Then
-            DrawThumbnailItem(EventArgs)
+        If VisualStyles.VisualStyleRenderer.IsSupported Then
+            Dim Element = If(order = SortOrder.Ascending, VisualStyles.VisualStyleElement.Header.SortArrow.SortedUp, VisualStyles.VisualStyleElement.Header.SortArrow.SortedDown)
+            If VisualStyles.VisualStyleRenderer.IsElementDefined(Element) Then
+                'yay - rendering supported
+
+                Dim renderer2 = New VisualStyles.VisualStyleRenderer(Element)
+                If renderer2 IsNot Nothing Then
+                    Dim sz As Size = renderer2.GetPartSize(g, VisualStyles.ThemeSizeType.True)
+                    Dim pt As Point = renderer2.GetPoint(VisualStyles.PointProperty.Offset)
+                    ' GetPoint() should work, but if it doesn't, put the arrow in the top middle
+                    If pt.IsEmpty Then
+                        pt = New Point(CInt(r.X + (r.Width / 2) - (sz.Width / 2)), r.Y)
+                    End If
+                    renderer2.DrawBackground(g, New Rectangle(pt, sz))
+
+                    Return r
+                End If
+            End If
+        End If
+
+        ' No theme support for sort indicators. So, we draw a triangle at the right edge
+        ' of the column header.
+        Const triangleHeight As Integer = 16
+        Const triangleWidth As Integer = 16
+        Const midX As Integer = triangleWidth \ 2
+        Const midY As Integer = (triangleHeight \ 2) - 1
+        Const deltaX As Integer = midX - 2
+        Const deltaY As Integer = deltaX \ 2
+
+        Dim triangleLocation As New Point(r.Right - triangleWidth - 2, r.Top + (r.Height - triangleHeight) \ 2)
+        Dim pts As Point() = New Point() {triangleLocation, triangleLocation, triangleLocation}
+
+        If order = SortOrder.Ascending Then
+            pts(0).Offset(midX - deltaX, midY + deltaY)
+            pts(1).Offset(midX, midY - deltaY - 1)
+            pts(2).Offset(midX + deltaX, midY + deltaY)
         Else
-            DrawIconViewItem(EventArgs)
+            pts(0).Offset(midX - deltaX, midY - deltaY)
+            pts(1).Offset(midX, midY + deltaY)
+            pts(2).Offset(midX + deltaX, midY - deltaY)
+        End If
+
+        g.FillPolygon(SystemBrushes.ControlDark, pts)
+        r.Width = r.Width - triangleWidth
+        Return r
+
+    End Function
+
+    Public Shared Sub DrawBackground(g As Graphics, rect As Rectangle, DrawElement As VisualStyles.VisualStyleElement)
+        If VisualStyles.VisualStyleRenderer.IsSupported AndAlso VisualStyles.VisualStyleRenderer.IsElementDefined(DrawElement) Then
+            Dim vsr = New System.Windows.Forms.VisualStyles.VisualStyleRenderer(DrawElement)
+            vsr.DrawBackground(g, rect)
+        Else
+            ControlPaint.DrawBorder3D(g, rect, Border3DStyle.RaisedInner)
+            If DrawElement Is VisualStyles.VisualStyleElement.Header.Item.Pressed Then
+                ControlPaint.DrawBorder3D(g, rect, Border3DStyle.SunkenInner)
+            Else
+                ControlPaint.DrawBorder3D(g, rect, Border3DStyle.RaisedInner)
+            End If
         End If
     End Sub
 
-    Private Sub lvFiles_DrawSubItem(Sender As Object, EventArgs As DrawListViewSubItemEventArgs) Handles lvFiles.DrawSubItem
-        If EventArgs.SubItem Is Nothing Then
-            EventArgs.DrawDefault = True
+    Private Sub lvFiles_DrawItem(Sender As Object, e As DrawListViewItemEventArgs) Handles lvFiles.DrawItem
+        ' In Details view every column is painted by DrawSubItem instead.
+
+        If lvFiles.View = View.Details Then
             Return
         End If
 
-        Dim Canvas = EventArgs.Graphics
-        Dim Bounds = EventArgs.Bounds
-        Dim Selected = EventArgs.Item.Selected
+        ' We need this check because the ListView seems to request items to be drawn even if they are not in the visible area.
+        If lvFiles.ClientRectangle.IntersectsWith(e.Bounds) = False Then
+            Return
+        End If
 
-        Using Background As New SolidBrush(If(Selected, SystemColors.Highlight, lvFiles.BackColor))
-            Canvas.FillRectangle(Background, Bounds)
+        DrawThumbnailItem(e)
+        'If _ThumbnailCellSize <> 0 Then
+        '    DrawThumbnailItem(e)
+        'Else
+        '    DrawIconViewItem(e)
+        'End If
+    End Sub
+
+    Private Sub lvFiles_DrawSubItem(Sender As Object, e As DrawListViewSubItemEventArgs) Handles lvFiles.DrawSubItem
+        If e.SubItem Is Nothing Then
+            e.DrawDefault = True
+            Return
+        End If
+
+        'stop the built in control from rendering the background
+        Using sb As New SolidBrush(lvFiles.BackColor)
+            e.Graphics.FillRectangle(sb, e.Bounds)
         End Using
 
-        Dim ForeColour = If(Selected, SystemColors.HighlightText, EventArgs.Item.ForeColor)
+        Dim Canvas = e.Graphics
+        Dim Bounds = e.Bounds
+        Dim Selected = e.Item.Selected
+
+        'Using Background As New SolidBrush(If(Selected, SystemColors.Highlight, lvFiles.BackColor))
+        '    Canvas.FillRectangle(Background, Bounds)
+        'End Using
+        If Selected Then
+            Using Fill As New SolidBrush(Color.FromArgb(48, SystemColors.Highlight))
+                Canvas.FillRectangle(Fill, Bounds)
+            End Using
+            'Using Border As New Pen(SystemColors.Highlight)
+            '    Canvas.DrawRectangle(Border, Bounds.X + 1, Bounds.Y + 1, Bounds.Width - 2, Bounds.Height - 2)
+            'End Using
+        End If
+
         Dim TextBounds = Bounds
-        If EventArgs.ColumnIndex = 0 Then
-            Dim Entry = TryCast(EventArgs.Item.Tag, EmbeddedFileSystem.ContentListEntry)
+        If e.ColumnIndex = 0 Then
+            Dim Entry = TryCast(e.Item.Tag, EmbeddedFileSystem.ContentListEntry)
             Dim IconRectangle = New Rectangle(Bounds.X + 2, Bounds.Y + ((Bounds.Height - FileIconProvider.SmallIconSize) \ 2),
                                               FileIconProvider.SmallIconSize, FileIconProvider.SmallIconSize)
             DrawEntryIcon(Canvas, Entry, IconRectangle)
             TextBounds = Rectangle.FromLTRB(IconRectangle.Right + 4, Bounds.Top, Bounds.Right, Bounds.Bottom)
         End If
 
-        If EventArgs.ColumnIndex = 0 AndAlso IsListItemBeingEdited(EventArgs.Item) Then Return
+        If e.ColumnIndex = 0 AndAlso IsListItemBeingEdited(e.Item) Then Return
 
         Dim Flags = TextFormatFlags.VerticalCenter Or TextFormatFlags.EndEllipsis Or TextFormatFlags.NoPrefix
-        If EventArgs.Header IsNot Nothing AndAlso EventArgs.Header.TextAlign = HorizontalAlignment.Right Then
+        If e.Header IsNot Nothing AndAlso e.Header.TextAlign = HorizontalAlignment.Right Then
             Flags = Flags Or TextFormatFlags.Right
-        ElseIf EventArgs.Header IsNot Nothing AndAlso EventArgs.Header.TextAlign = HorizontalAlignment.Center Then
+        ElseIf e.Header IsNot Nothing AndAlso e.Header.TextAlign = HorizontalAlignment.Center Then
             Flags = Flags Or TextFormatFlags.HorizontalCenter
         End If
-        TextRenderer.DrawText(Canvas, EventArgs.SubItem.Text, lvFiles.Font, TextBounds, ForeColour, Flags)
+        Dim ForeColour = e.SubItem.ForeColor 'If(Selected, SystemColors.HighlightText, EventArgs.Item.ForeColor)
+        TextRenderer.DrawText(Canvas, e.SubItem.Text, e.SubItem.Font, TextBounds, ForeColour, Flags)
+
+        If e.Item.Focused AndAlso lvFiles.Focused Then
+            'EventArgs.DrawFocusRectangle()
+            Dim FirstCol = e.ColumnIndex = 0
+            Dim LastCol = e.ColumnIndex = lvFiles.Columns.Count - 1
+            Using Border As New Pen(SystemColors.Highlight)
+                'Canvas.DrawRectangle(Border, Bounds.X + 1, Bounds.Y + 1, Bounds.Width - 2, Bounds.Height - 2)
+                Dim RectBounds = New Rectangle(Bounds.X + 1, Bounds.Y + 1, Bounds.Width - 2, Bounds.Height - 2)
+                'top
+                Canvas.DrawLine(Border, RectBounds.X, RectBounds.Y, RectBounds.Right, RectBounds.Y)
+                'bottom
+                Canvas.DrawLine(Border, RectBounds.X, RectBounds.Bottom, RectBounds.Right, RectBounds.Bottom)
+                If FirstCol Then
+                    'left
+                    Canvas.DrawLine(Border, RectBounds.X, RectBounds.Y, RectBounds.X, RectBounds.Bottom)
+                End If
+                If LastCol Then
+                    'right
+                    Canvas.DrawLine(Border, RectBounds.Right, RectBounds.Y, RectBounds.Right, RectBounds.Bottom)
+                End If
+            End Using
+        End If
     End Sub
 
-    Private Sub DrawIconViewItem(EventArgs As DrawListViewItemEventArgs)
-        Dim Canvas = EventArgs.Graphics
-        Canvas.InterpolationMode = InterpolationMode.HighQualityBicubic
-        EventArgs.DrawBackground()
+    Private Sub tvFolders_DrawNode(sender As Object, e As DrawTreeNodeEventArgs) Handles tvFolders.DrawNode
 
-        Dim Bounds = EventArgs.Bounds
-        Dim Entry = TryCast(EventArgs.Item.Tag, EmbeddedFileSystem.ContentListEntry)
-        Dim IconSize = CurrentIconSize()
+        'stop the built in control from rendering the background
+        Using sb As New SolidBrush(lvFiles.BackColor)
+            e.Graphics.FillRectangle(sb, e.Bounds)
+        End Using
 
-        If lvFiles.View = View.LargeIcon Then
-            Dim IconRectangle = New Rectangle(Bounds.X + ((Bounds.Width - IconSize) \ 2), Bounds.Y + 2, IconSize, IconSize)
-            DrawEntryIcon(Canvas, Entry, IconRectangle)
-            Dim LabelArea = Rectangle.FromLTRB(Bounds.Left, IconRectangle.Bottom + 2, Bounds.Right, Bounds.Bottom)
-            DrawIconViewLabel(Canvas, EventArgs.Item, LabelArea,
-                              TextFormatFlags.HorizontalCenter Or TextFormatFlags.WordEllipsis Or TextFormatFlags.NoPrefix)
-        Else
-            Dim IconRectangle = New Rectangle(Bounds.X + 1, Bounds.Y + ((Bounds.Height - IconSize) \ 2), IconSize, IconSize)
-            DrawEntryIcon(Canvas, Entry, IconRectangle)
-            Dim LabelArea = Rectangle.FromLTRB(IconRectangle.Right + 3, Bounds.Top, Bounds.Right - 2, Bounds.Bottom)
-            DrawIconViewLabel(Canvas, EventArgs.Item, LabelArea,
-                              TextFormatFlags.Left Or TextFormatFlags.VerticalCenter Or TextFormatFlags.EndEllipsis Or TextFormatFlags.NoPrefix)
+        Dim Bounds = e.Bounds
+
+        If e.State.HasFlag(TreeNodeStates.Selected) Then
+            Using Fill As New SolidBrush(Color.FromArgb(48, SystemColors.Highlight))
+                e.Graphics.FillRectangle(Fill, Bounds)
+            End Using
         End If
 
-        If EventArgs.Item.Focused Then EventArgs.DrawFocusRectangle()
+        Dim Flags = TextFormatFlags.VerticalCenter Or TextFormatFlags.NoPrefix
+        TextRenderer.DrawText(e.Graphics, e.Node.Text, e.Node.NodeFont, e.Bounds, e.Node.ForeColor, Flags)
+
+        If e.State.HasFlag(TreeNodeStates.Focused) Then
+            'EventArgs.DrawFocusRectangle()
+            Using Border As New Pen(SystemColors.Highlight)
+                e.Graphics.DrawRectangle(Border, Bounds.X + 1, Bounds.Y + 1, Bounds.Width - 2, Bounds.Height - 2)
+            End Using
+        End If
     End Sub
+
+    'Private Sub DrawIconViewItem(e As DrawListViewItemEventArgs)
+    '    Dim Canvas = e.Graphics
+    '    Canvas.InterpolationMode = InterpolationMode.HighQualityBicubic
+    '    e.DrawBackground()
+
+    '    Dim Bounds = e.Bounds
+    '    Dim Entry = TryCast(e.Item.Tag, EmbeddedFileSystem.ContentListEntry)
+    '    Dim IconSize = CurrentIconSize()
+
+    '    If lvFiles.View = View.LargeIcon Then
+    '        Dim IconRectangle = New Rectangle(Bounds.X + ((Bounds.Width - IconSize) \ 2), Bounds.Y + 2, IconSize, IconSize)
+    '        DrawEntryIcon(Canvas, Entry, IconRectangle)
+    '        Dim LabelArea = Rectangle.FromLTRB(Bounds.Left, IconRectangle.Bottom + 2, Bounds.Right, Bounds.Bottom)
+    '        DrawIconViewLabel(Canvas, e.Item, LabelArea,
+    '                          TextFormatFlags.HorizontalCenter Or TextFormatFlags.WordEllipsis Or TextFormatFlags.NoPrefix)
+    '    Else
+    '        Dim IconRectangle = New Rectangle(Bounds.X + 1, Bounds.Y + ((Bounds.Height - IconSize) \ 2), IconSize, IconSize)
+    '        DrawEntryIcon(Canvas, Entry, IconRectangle)
+    '        Dim LabelArea = Rectangle.FromLTRB(IconRectangle.Right + 3, Bounds.Top, Bounds.Right - 2, Bounds.Bottom)
+    '        DrawIconViewLabel(Canvas, e.Item, LabelArea,
+    '                          TextFormatFlags.Left Or TextFormatFlags.VerticalCenter Or TextFormatFlags.EndEllipsis Or TextFormatFlags.NoPrefix)
+    '    End If
+
+    '    If e.Item.Focused Then e.DrawFocusRectangle()
+    'End Sub
 
     ''' <summary>True while the native rename box is open over this row, so owner-draw leaves its label alone.</summary>
     Private Function IsListItemBeingEdited(Item As ListViewItem) As Boolean
@@ -1917,46 +2203,80 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Canvas.DrawImage(Icon, Destination)
     End Sub
 
-    Private Sub DrawThumbnailItem(EventArgs As DrawListViewItemEventArgs)
-        Dim Canvas = EventArgs.Graphics
+    Private Sub DrawThumbnailItem(e As DrawListViewItemEventArgs)
+        Dim Canvas = e.Graphics
         Canvas.InterpolationMode = InterpolationMode.HighQualityBicubic
         Canvas.PixelOffsetMode = PixelOffsetMode.HighQuality
-        EventArgs.DrawBackground()
+        e.DrawBackground()
 
-        Dim Bounds = EventArgs.Bounds
-        If EventArgs.Item.Selected Then
+        Dim Bounds = e.Bounds
+        If e.Item.Selected Then
             Using Fill As New SolidBrush(Color.FromArgb(48, SystemColors.Highlight))
                 Canvas.FillRectangle(Fill, Bounds)
             End Using
-            Using Border As New Pen(SystemColors.Highlight)
-                Canvas.DrawRectangle(Border, Bounds.X + 1, Bounds.Y + 1, Bounds.Width - 2, Bounds.Height - 2)
-            End Using
+            'Using Border As New Pen(SystemColors.Highlight)
+            '    Canvas.DrawRectangle(Border, Bounds.X + 1, Bounds.Y + 1, Bounds.Width - 2, Bounds.Height - 2)
+            'End Using
         End If
 
+        Dim IconView = _ThumbnailCellSize = 0
+        Dim IconSize = FileIconProvider.JumboIconSize
+
         Dim CellSize = _ThumbnailCellSize
+        Dim IconToCellSizeRatio = 0.82
+        If IconView Then
+            If lvFiles.View = View.LargeIcon Then
+                CellSize = lvFiles.LargeImageList.ImageSize.Height
+                IconSize = FileIconProvider.LargeIconSize
+            Else
+                CellSize = lvFiles.SmallImageList.ImageSize.Height
+                IconSize = FileIconProvider.SmallIconSize
+            End If
+            IconToCellSizeRatio = 1
+        End If
+
         Dim IconArea = New Rectangle(Bounds.X, Bounds.Y + 3, Bounds.Width, CellSize)
-        Dim Entry = TryCast(EventArgs.Item.Tag, EmbeddedFileSystem.ContentListEntry)
-        Dim Thumbnail = If(Entry IsNot Nothing AndAlso IsThumbnailableEntry(Entry), GetOrRequestThumbnail(Entry), Nothing)
+        Dim Entry = TryCast(e.Item.Tag, EmbeddedFileSystem.ContentListEntry)
+        Debug.Print(Entry.Name)
+        Dim Thumbnail = If(IconView, Nothing, If(Entry IsNot Nothing AndAlso IsThumbnailableEntry(Entry), GetOrRequestThumbnail(Entry), Nothing))
 
         If Thumbnail IsNot Nothing Then
             Dim Target = FitCentered(Thumbnail.Size, IconArea, CellSize)
-            Canvas.DrawImage(Thumbnail, Target)
-            Using Border As New Pen(Color.FromArgb(128, Color.Gray))
-                Canvas.DrawRectangle(Border, Target.X - 1, Target.Y - 1, Target.Width + 1, Target.Height + 1)
+
+            Dim mfWidth = 32
+            Dim mfHeight = 32
+            Using mf = Drawing.CreateMetafile(New Size(mfWidth, mfHeight))
+                Using g = Graphics.FromImage(mf)
+                    Using sb As New SolidBrush(Drawing.AlphaColor(SystemColors.WindowText, 15))
+                        g.FillRectangle(sb, New RectangleF(0, 0, CSng(mfWidth / 2), CSng(mfHeight / 2)))
+                        g.FillRectangle(sb, New RectangleF(CSng(mfWidth / 2), CSng(mfHeight / 2), CSng(mfWidth / 2), CSng(mfHeight / 2)))
+                    End Using
+                End Using
+                Using tb As New TextureBrush(mf, Drawing2D.WrapMode.Tile)
+                    Canvas.FillRectangle(tb, Target)
+                End Using
             End Using
-            DrawTypeBadge(Canvas, Entry, Target)
+
+            Canvas.DrawImage(Thumbnail, Target)
+
+            'Using Border As New Pen(Drawing.AlphaColor(SystemColors.WindowText, 63))
+            '    Canvas.DrawRectangle(Border, Target.X - 1, Target.Y - 1, Target.Width + 1, Target.Height + 1)
+            DrawTypeBadge(Canvas, Entry, IconArea)
+            '    Canvas.DrawRectangle(Border, IconArea.X - 1, IconArea.Y - 1, IconArea.Width + 1, IconArea.Height + 1)
+            'End Using
+
         Else
-            Dim TypeIcon = GetEntryIcon(Entry, FileIconProvider.JumboIconSize)
-            If TypeIcon IsNot Nothing Then Canvas.DrawImage(TypeIcon, FitCentered(TypeIcon.Size, IconArea, CInt(CellSize * 0.82)))
+            Dim TypeIcon = GetEntryIcon(Entry, IconSize)
+            If TypeIcon IsNot Nothing Then Canvas.DrawImage(TypeIcon, FitCentered(TypeIcon.Size, IconArea, CInt(CellSize * IconToCellSizeRatio)))
         End If
 
         Dim LabelArea = New Rectangle(Bounds.X + 2, IconArea.Bottom + 2, Bounds.Width - 4, Bounds.Bottom - IconArea.Bottom - 4)
-        If IsListItemBeingEdited(EventArgs.Item) = False Then
-            TextRenderer.DrawText(Canvas, EventArgs.Item.Text, lvFiles.Font, LabelArea, lvFiles.ForeColor,
+        If IsListItemBeingEdited(e.Item) = False Then
+            TextRenderer.DrawText(Canvas, e.Item.Text, lvFiles.Font, LabelArea, lvFiles.ForeColor,
                                   TextFormatFlags.HorizontalCenter Or TextFormatFlags.WordEllipsis Or TextFormatFlags.NoPrefix)
         End If
 
-        If EventArgs.Item.Focused Then
+        If e.Item.Focused AndAlso lvFiles.Focused Then
             'EventArgs.DrawFocusRectangle()
             Using Border As New Pen(SystemColors.Highlight)
                 Canvas.DrawRectangle(Border, Bounds.X + 1, Bounds.Y + 1, Bounds.Width - 2, Bounds.Height - 2)
@@ -2171,7 +2491,11 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                     Sizer.Start()
 
                     Try
+                        Dim sw As New Stopwatch
+                        sw.Start()
                         CopyUploadWorkList(WorkItems, TargetDirectoryAnchorId, TotalSize, Report)
+                        sw.Stop()
+                        Debug.Print($"Upload time: {sw.Elapsed}")
                     Finally
                         Cancellation.Cancel()
                         Sizer.Join()
@@ -2181,7 +2505,24 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             "One or more items could not be uploaded.")
 
         RefreshFileSystemView()
+
         OnMutatedFileSystem()
+
+        'select items just copied:
+        Dim ItemsInFolder = lvFiles.Items.OfType(Of ListViewItem).
+                                          Select(Function(x) New With {.ListViewItem = x,
+                                                                       .ContentListEntry = TryCast(x.Tag, EmbeddedFileSystem.ContentListEntry)}).
+                                          Where(Function(x) x.ContentListEntry IsNot Nothing)
+        Dim ItemsToSelect = ItemsInFolder.Join(RootPaths,
+                                               Function(x) x.ContentListEntry.Name,
+                                               Function(y) IO.Path.GetFileName(y),
+                                               Function(x, y) x.ListViewItem, StringComparer.OrdinalIgnoreCase).
+                                          ToArray()
+        For i = 0 To ItemsToSelect.Count - 1
+            Dim Item = ItemsToSelect(i)
+            Item.Selected = True
+            If i = 0 Then Item.EnsureVisible()
+        Next
     End Sub
 
     ''' <summary>
@@ -2241,7 +2582,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
             Dim ParentAnchor = EnsureUploadFolderPath(workItem.RelativeParent, TargetDirectoryAnchorId, FolderAnchors)
             Dim Existing = GetDirectoryEntries(ParentAnchor).
-                           FirstOrDefault(Function(x) String.Equals(x.Name, workItem.Name, StringComparison.OrdinalIgnoreCase))
+                                FirstOrDefault(Function(x) String.Equals(x.Name, workItem.Name, StringComparison.OrdinalIgnoreCase))
 
             Dim Replace As Boolean
             If Existing Is Nothing Then
@@ -2268,7 +2609,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                         Throw New OperationCanceledException()
                     Case ConflictChoice.Skip, ConflictChoice.SkipAll
                         CopiedBytes += SafeFileLength(workItem.SourcePath)
-                        ReportUploadProgress(Report, TotalSize, CopiedBytes, workItem.Name, LastReport, True)
+                        ReportUploadProgress(Report, TotalSize, CopiedBytes, workItem.Name, LastReport, False)
                         Continue For
                     Case Else
                         Replace = True
@@ -2276,7 +2617,6 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             End If
 
             If Replace Then _FileSystem.DeleteEntry(ParentAnchor, Existing.Name)
-
             Dim FileAnchorId = _FileSystem.CreateFile(ParentAnchor, workItem.Name)
             Using SourceStream = New FileStream(workItem.SourcePath, FileMode.Open, FileAccess.Read, FileShare.Read)
                 ' A bigger write-buffer threshold means far fewer durable (fsync) publishes for a
@@ -2288,10 +2628,10 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 ' drain, when 8 are needed. Scales with file size, capped well short of the memory
                 ' a huge file could demand, but never below the parallel-crypto floor.
                 Dim MinBufferFlushThreshold = Math.Max(CLng(EmbeddedFileSystem.FileStreamView.DefaultWriteBufferFlushThreshold),
-                                                        CLng(_FileSystem.ChunkedStream.ChunkSize) * ChunkedStream.ParallelChunkCryptoMinChunks)
+                                                            CLng(_FileSystem.ChunkedStream.ChunkSize) * ChunkedStream.ParallelChunkCryptoMinChunks)
                 Dim MaxBufferFlushThreshold = Math.Max(MinBufferFlushThreshold, 256L * 1024 * 1024)
                 Dim WriteBufferFlushThreshold = CInt(Math.Min(MaxBufferFlushThreshold,
-                                                               Math.Max(MinBufferFlushThreshold, SourceStream.Length \ 64)))
+                                                                    Math.Max(MinBufferFlushThreshold, SourceStream.Length \ 64)))
                 Using DestinationStream = _FileSystem.OpenFile(FileAnchorId, PendingOnClose:=True, WriteBufferFlushThreshold:=WriteBufferFlushThreshold)
                     Dim Buffer(1024 * 1024 - 1) As Byte
                     While True
@@ -2309,19 +2649,19 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 End Using
             End Using
 
-            ReportUploadProgress(Report, TotalSize, CopiedBytes, workItem.Name, LastReport, True)
+            ReportUploadProgress(Report, TotalSize, CopiedBytes, workItem.Name, LastReport, False)
         Next
     End Sub
 
     ''' <summary>
-    ''' Pushes the current byte progress to the progress dialog. Throttled to ~10 updates a second
+    ''' Pushes the current byte progress to the progress dialog. Throttled to ~4 updates a second
     ''' unless <paramref name="Force"/> is set (file finished, or an item was skipped).
     ''' </summary>
     Private Shared Sub ReportUploadProgress(Report As frmProgress.ProgressReport, TotalSize As TotalSizeBox,
                                             CopiedBytes As Long, Name As String,
                                             ByRef LastReport As Date, Force As Boolean)
         Dim Timestamp = Date.UtcNow
-        If Force = False AndAlso Timestamp.Subtract(LastReport).TotalMilliseconds < 100 Then Return
+        If Force = False AndAlso Timestamp.Subtract(LastReport).TotalMilliseconds < 250 Then Return
         LastReport = Timestamp
 
         Dim Total = TotalSize.Value
@@ -2921,7 +3261,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Using
     End Sub
 
-    Private Const PromptDialogFieldWidth As Integer = 320
+    Private Const PromptDialogFieldWidth As Integer = 360
     Private Const PromptDialogWrapWidth As Integer = 360
 
     ''' <summary>
@@ -2961,6 +3301,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         CancelButton = New Button With {
             .Text = "Cancel",
             .DialogResult = DialogResult.Cancel,
+            .Margin = New Padding(0, 0, 0, 0),
             .AutoSize = True
         }
 
@@ -3091,7 +3432,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         If Disposing Then
             If components IsNot Nothing Then components.Dispose()
-            _SearchTimer.Dispose()
+            '_SearchTimer.Dispose()
             _PathColumn.Dispose()
             _IconProvider.Dispose()
             For Each thumbnail In _ThumbnailCache.Values
@@ -3104,11 +3445,11 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub tsiFragmentation_Paint(sender As Object, e As PaintEventArgs) Handles tsiFragmentation.Paint
-        Struct.DrawFragmentation(e.Graphics, tsiFragmentation.ContentRectangle,
-                                 New FragmentationDrawOptions() With {
-                                    .MaxXBlockCount = 100,
-                                    .MaxYBlockCount = 1
-                                 })
+        'Struct.DrawFragmentation(e.Graphics, tsiFragmentation.ContentRectangle,
+        '                         New FragmentationDrawOptions() With {
+        '                            .MaxXBlockCount = 100,
+        '                            .MaxYBlockCount = 1
+        '                         })
         'Struct.DrawFragmentation(e.Graphics, New Rectangle(0, 0, tsiFragmentation.ContentRectangle.Width, 1))
     End Sub
 
@@ -3137,6 +3478,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                                 Dim Progress = If(TotalUnits = 0, 1.0R, ProcessedUnits / CDbl(TotalUnits))
                                 ProgressReport.SetText($"Validating ({Progress:P0})...")
                             End Sub)
+                    Catch ex As Exception When ex.getThreadAbortException IsNot Nothing
+                        Return
                     Catch ex As Exception
                         MsgBox(ProgressReport.frmProgress, $"Validation could not run.{Environment.NewLine}{ex.GetType.Name}: {ex.Message}", MsgBoxStyle.Critical)
                         Return
@@ -3198,8 +3541,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                                 End If
                                 Return EmbeddedFileSystem.PendingFileRecoveryActions.None
                             End Function)
-
-                    Catch ex As Exception When ex.getThreadAbortException Is Nothing
+                    Catch ex As Exception When ex.getThreadAbortException IsNot Nothing
+                        Return
+                    Catch ex As Exception
                         MsgBox(ProgressReport.frmProgress,
                                $"The scan could not finish.{Environment.NewLine}{ex.GetType.Name}: {ex.Message}",
                                MsgBoxStyle.Critical)
@@ -3249,16 +3593,25 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             NewEncryptionInfo = New ChunkedStream.EncryptionInfo(NewPassword, System.Text.Encoding.UTF8.GetBytes(NewPassword))
         End If
 
+        FileSystem.ChunkedStream.Options.EncryptionInfo = NewEncryptionInfo
+
+        Dim ApplyException As Exception = Nothing
         ExecuteLongBlockingActionOnThread(
             Sub()
-                FileSystem.ChunkedStream.Options.EncryptionInfo = NewEncryptionInfo
-                FileSystem.ChunkedStream.ApplyOptions(ChunkedStream.ApplyOptionTypes.Encryption)
+                Try
+                    'TODO: this should use a progress form
+                    FileSystem.ChunkedStream.ApplyOptions(ChunkedStream.ApplyOptionTypes.Encryption)
+                Catch ex As Exception
+                    ApplyException = ex
+                End Try
             End Sub,
             "The password could not be changed.")
 
         OnMutatedFileSystem()
 
-        MsgBox(Me, If(NewEncryptionInfo Is Nothing, "Password protection removed.", "Password updated."), MsgBoxStyle.Information)
+        Dim ApplyAborted = ApplyException?.getThreadAbortException() IsNot Nothing
+
+        MsgBox(Me, $"Password {If(NewEncryptionInfo Is Nothing, "removed", "updated")}.{If(ApplyException Is Nothing, "", $"{Environment.NewLine}{Environment.NewLine}However, the {If(NewEncryptionInfo Is Nothing, "decryption", "encryption")} of existing files {If(ApplyAborted, "was aborted", $"failed:{Environment.NewLine}{ApplyException.GetType.Name}: {ApplyException.Message}")}{If(NewEncryptionInfo IsNot Nothing, "", $"{Environment.NewLine}Files can still be accessed as the encryption key has been publicly wrapped.")}")}", If(ApplyException Is Nothing, MsgBoxStyle.Information, MsgBoxStyle.Exclamation))
     End Sub
 
     Private Sub Defrag()
@@ -3295,7 +3648,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                             End If
                         End Sub)
 
-                    'Dim Struct = FileSystem.ChunkedStream.GetStructure()
+                    Dim Struct = FileSystem.ChunkedStream.GetStructure()
                     'For Each rr In Struct.Regions
                     '    Debug.Print($"{rr}")
                     'Next
@@ -3317,8 +3670,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim tsam As New ToolStripAsMenu(tsMain)
     End Sub
 
-    Dim Struct As ChunkedStreamStructure
+    'Dim Struct As ChunkedStreamStructure
     Private Sub EmbeddedFileSystemBrowserForm_MutatedFileSystem(sender As Object, e As EventArgs) Handles Me.MutatedFileSystem
-        Struct = FileSystem.ChunkedStream.GetStructure()
+        'Struct = FileSystem.ChunkedStream.GetStructure()
     End Sub
+
 End Class

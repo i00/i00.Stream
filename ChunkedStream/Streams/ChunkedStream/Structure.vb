@@ -121,12 +121,12 @@ Namespace Streams
 
             Dim Snapshot As StructureSnapshot
             Using EnterStateLock()
-                Snapshot = CaptureStructureSnapshotCore()
+                Snapshot = CaptureStructureSnapshotCore(CancellationToken)
             End Using
 
             CancellationToken.ThrowIfCancellationRequested()
 
-            Return GetStructureCore(Snapshot)
+            Return GetStructureCore(Snapshot, CancellationToken)
 
         End Function
 
@@ -143,7 +143,7 @@ Namespace Streams
                 End Function, CancellationToken).ConfigureAwait(False)
         End Function
 
-        Private Function CaptureStructureSnapshotCore() As StructureSnapshot
+        Private Function CaptureStructureSnapshotCore(CancellationToken As Threading.CancellationToken) As StructureSnapshot
 
             ThrowIfDisposed()
 
@@ -169,7 +169,33 @@ Namespace Streams
                 .LivePhysicalEndOffset = GetLivePhysicalEndOffset()
             }
 
+            'Attempts to parallelise the reading of physical record headers, but they seem to be slower than just doing it sequentially. Leaving this here for now in case I want to revisit it later.
+            '----------
+            'V1:
+            'Dim LoopData = Result.PhysicalRecords.Values.Where(Function(x) x.RefCount > 0).
+            '                                             Select(Function(x) New With {.Record = x,
+            '                                                                          .Snapshot = New ChunkHeaderSnapshot()}).
+            '                                             ToArray()
+            'Parallel.ForEach(LoopData,
+            '    Sub(x)
+            '        CancellationToken.ThrowIfCancellationRequested()
+            '        x.Snapshot = ReadPhysicalRecordHeaderSnapshot(x.Record)
+            '    End Sub)
+            'Result.PhysicalRecordHeaders = LoopData.ToDictionary(Function(x) x.Record.RecordId,
+            '                                                     Function(x) x.Snapshot)
+
+            'V2:
+            'Parallel.ForEach(Result.PhysicalRecords.Values.Where(Function(x) x.RefCount > 0),
+            '    Sub(Record)
+            '        CancellationToken.ThrowIfCancellationRequested()
+            '        SyncLock Result.PhysicalRecordHeaders
+            '            Result.PhysicalRecordHeaders(Record.RecordId) = ReadPhysicalRecordHeaderSnapshot(Record)
+            '        End SyncLock
+            '    End Sub)
+
+            'TODO: Need to confirm if this is safe outside of the EnterStateLock() ... it should be
             For Each Record In Result.PhysicalRecords.Values
+                CancellationToken.ThrowIfCancellationRequested()
                 If Record.RefCount > 0 Then
                     Result.PhysicalRecordHeaders(Record.RecordId) = ReadPhysicalRecordHeaderSnapshot(Record)
                 End If
@@ -179,13 +205,14 @@ Namespace Streams
 
         End Function
 
-        Private Function GetStructureCore(Snapshot As StructureSnapshot) As ChunkedStreamStructure
+        Private Function GetStructureCore(Snapshot As StructureSnapshot, CancellationToken As Threading.CancellationToken) As ChunkedStreamStructure
 
             If Snapshot Is Nothing Then Throw New ArgumentNullException(NameOf(Snapshot))
 
             Dim PhysicalRecordBuildInfos As New List(Of PhysicalRecordStructureBuildInfo)
 
             For Each Record In Snapshot.PhysicalRecords.Values.OrderBy(Function(x) x.RecordId)
+                CancellationToken.ThrowIfCancellationRequested()
 
                 If Record.RefCount <= 0 Then Continue For
 
@@ -231,6 +258,7 @@ Namespace Streams
                 PhysicalRecordBuildInfos.Sum(Function(record) CLng(record.PayloadLength))
 
             For ExtentIndex = 0 To Snapshot.Extents.Count - 1
+                CancellationToken.ThrowIfCancellationRequested()
 
                 Dim Extent = Snapshot.Extents(ExtentIndex)
 
@@ -325,6 +353,7 @@ Namespace Streams
                 ToList()
 
             For PhysicalOrder = 0 To AllocatedRecordsInPhysicalOrder.Count - 1
+                CancellationToken.ThrowIfCancellationRequested()
 
                 Dim Current = AllocatedRecordsInPhysicalOrder(PhysicalOrder)
 
@@ -406,6 +435,7 @@ Namespace Streams
             Dim Chunks As New List(Of ChunkedStreamStructure.Chunk)(BuildInfos.Count)
 
             For Each BuildInfo In BuildInfos
+                CancellationToken.ThrowIfCancellationRequested()
 
                 Dim PhysicalOffset As Long? = Nothing
                 Dim PhysicalLength As Integer? = Nothing
@@ -486,6 +516,8 @@ Namespace Streams
                                 Function(group) DirectCast(group.OrderBy(Function(chunk) chunk.Index).ToList(), IList(Of ChunkedStreamStructure.Chunk)))
 
             For Index = 0 To PhysicalRecordBuildInfos.Count - 1
+                CancellationToken.ThrowIfCancellationRequested()
+
                 Dim BuildInfo = PhysicalRecordBuildInfos(Index)
                 Dim RecordChunks As IList(Of ChunkedStreamStructure.Chunk) = Nothing
 
@@ -751,7 +783,7 @@ Namespace Streams
 
         End Function
 
-        Private Function IsKnownMetadataMagic(Header As Byte()) As Boolean
+        Private Shared Function IsKnownMetadataMagic(Header As Byte()) As Boolean
 
             If Header Is Nothing OrElse Header.Length < 8 Then Return False
 

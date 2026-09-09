@@ -36,4 +36,22 @@
         End Using
     End Function
 
+    Public Shared Function CreateMetafile(Optional Bounds As SizeF? = Nothing, Optional EmfType As Imaging.EmfType = Imaging.EmfType.EmfPlusOnly) As System.Drawing.Imaging.Metafile
+        Using offScreenBufferGraphics = Graphics.FromHwndInternal(IntPtr.Zero)
+            Try
+                Dim deviceContextHandle As IntPtr = offScreenBufferGraphics.GetHdc()
+
+                Using stream As New IO.MemoryStream
+
+                    CreateMetafile = If(Bounds.HasValue = False,
+                                        New System.Drawing.Imaging.Metafile(stream, deviceContextHandle, EmfType),
+                                        New System.Drawing.Imaging.Metafile(stream, deviceContextHandle, New RectangleF(0, 0, Bounds.Value.Width, Bounds.Value.Height), Imaging.MetafileFrameUnit.Pixel, EmfType))
+
+                End Using
+            Finally
+                offScreenBufferGraphics.ReleaseHdc()
+            End Try
+        End Using
+    End Function
+
 End Class

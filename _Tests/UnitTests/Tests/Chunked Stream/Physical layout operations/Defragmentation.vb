@@ -1038,8 +1038,8 @@ Namespace Tests
             ' Helpers
             ' ================================================================================
 
-            Private Shared Function CreateFragmentedStream(Cs As ChunkedStream,
-                                                           Seed As Integer) As Byte()
+            Friend Shared Function CreateFragmentedStream(Cs As ChunkedStream,
+                                                          Seed As Integer) As Byte()
 
                 Dim ChunkCount = 16
 

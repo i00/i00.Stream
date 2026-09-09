@@ -232,8 +232,6 @@ Friend NotInheritable Class Autoexec
                 Dim ReclaimedBytes = Enc.Defragment(Streams.ChunkedStream.DefragTypes.Move)
                 Console.WriteLine($"Post defragmentation:  {Enc.GetFragmentation:P1}")
 
-                '▌
-
                 Dim DefragMD5 = CalcMd5(Enc)
                 Console.Write($"{NameOf(ChunkedStream)} MD5 (post defrag): ")
                 Console.ForegroundColor = If(DefragMD5 = OriginalMD5, ConsoleColor.DarkGreen, ConsoleColor.DarkRed)

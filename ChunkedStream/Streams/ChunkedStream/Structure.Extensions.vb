@@ -189,7 +189,11 @@ Namespace Streams
 
         End Class
 
-        Private NotInheritable Class RenderBlock
+        Public NotInheritable Class RenderBlock
+
+            Friend Sub New()
+
+            End Sub
 
             Public Property BlockIndex As Long
 
@@ -303,10 +307,10 @@ Namespace Streams
             Dim VerticalBlockCount = GetVerticalBlockCount(Rect.Height, Options)
 
             Dim RenderBlocks =
-                BuildRenderBlocks(ChunkedStreamStructure,
-                                  HorizontalBlockCount,
-                                  VerticalBlockCount,
-                                  Options)
+                GetFragmentationBlocks(ChunkedStreamStructure,
+                                       HorizontalBlockCount,
+                                       VerticalBlockCount,
+                                       Options)
 
             ''TODO: maybe have some callback in here in here so the user has some way for the user to do something like this to make fragmentation odvious?? ... maybe something called EvalBlocks?
             'Dim Frag = ChunkedStreamStructure.FragmentationRatio
@@ -380,10 +384,15 @@ Namespace Streams
 
         End Function
 
-        Private Function BuildRenderBlocks(ChunkedStreamStructure As Streams.ChunkedStreamStructure,
-                                           HorizontalBlockCount As Integer,
-                                           VerticalBlockCount As Integer,
-                                           Options As FragmentationDrawOptions) As List(Of RenderBlock)
+        <Extension>
+        Public Function GetFragmentationBlocks(ChunkedStreamStructure As Streams.ChunkedStreamStructure,
+                                               HorizontalBlockCount As Integer,
+                                               VerticalBlockCount As Integer,
+                                               Optional Options As FragmentationDrawOptions = Nothing) As List(Of RenderBlock)
+
+            If Options Is Nothing Then
+                Options = New FragmentationDrawOptions()
+            End If
 
             If HorizontalBlockCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(HorizontalBlockCount))
             If VerticalBlockCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(VerticalBlockCount))

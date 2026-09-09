@@ -1,3 +1,4 @@
 {
-  "includeCoAuthoredBy": false
+  "plansDirectory": "./.claude/plans",
+  "attribution.commit": false
 }

@@ -64,27 +64,36 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.FolderContextMenu = New System.Windows.Forms.ContextMenuStrip(Me.components)
         Me.tsiFolderOpen = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiFolderSep1 = New System.Windows.Forms.ToolStripSeparator()
+        Me.tsiFolderCut = New System.Windows.Forms.ToolStripMenuItem()
+        Me.tsiFolderCopy = New System.Windows.Forms.ToolStripMenuItem()
+        Me.tsiFolderPaste = New System.Windows.Forms.ToolStripMenuItem()
+        Me.ToolStripMenuItem7 = New System.Windows.Forms.ToolStripSeparator()
         Me.tsiFolderUploadFiles = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiFolderUploadFolder = New System.Windows.Forms.ToolStripMenuItem()
-        Me.tsiFolderNewFolder = New System.Windows.Forms.ToolStripMenuItem()
-        Me.tsiFolderSep2 = New System.Windows.Forms.ToolStripSeparator()
         Me.tsiSaveFolderAs = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiFolderSep3 = New System.Windows.Forms.ToolStripSeparator()
-        Me.tsiFolderRename = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiDeleteFolder = New System.Windows.Forms.ToolStripMenuItem()
-        Me.tsiFolderSep4 = New System.Windows.Forms.ToolStripSeparator()
+        Me.tsiFolderRename = New System.Windows.Forms.ToolStripMenuItem()
+        Me.ToolStripSeparator1 = New System.Windows.Forms.ToolStripSeparator()
         Me.tsiFolderRefresh = New System.Windows.Forms.ToolStripMenuItem()
+        Me.tsiFolderSep2 = New System.Windows.Forms.ToolStripSeparator()
+        Me.tsiFolderNewFolder = New System.Windows.Forms.ToolStripMenuItem()
+        Me.tsiFolderSep4 = New System.Windows.Forms.ToolStripSeparator()
+        Me.tsiFolderProperties = New System.Windows.Forms.ToolStripMenuItem()
         Me.FileContextMenu = New System.Windows.Forms.ContextMenuStrip(Me.components)
         Me.tsiOpen = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiOpenContainingFolder = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiFileSep1 = New System.Windows.Forms.ToolStripSeparator()
+        Me.tsiCut = New System.Windows.Forms.ToolStripMenuItem()
+        Me.tsiCopy = New System.Windows.Forms.ToolStripMenuItem()
+        Me.tsiPaste = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiSaveAs = New System.Windows.Forms.ToolStripMenuItem()
-        Me.tsiRename = New System.Windows.Forms.ToolStripMenuItem()
+        Me.ToolStripMenuItem3 = New System.Windows.Forms.ToolStripSeparator()
         Me.tsiDelete = New System.Windows.Forms.ToolStripMenuItem()
+        Me.tsiRename = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiFileSep2 = New System.Windows.Forms.ToolStripSeparator()
         Me.tsiUploadFiles = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiUploadFolder = New System.Windows.Forms.ToolStripMenuItem()
-        Me.tsiNewFolder = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiFileSep3 = New System.Windows.Forms.ToolStripSeparator()
         Me.tsiView = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiViewXlThumb = New System.Windows.Forms.ToolStripMenuItem()
@@ -94,7 +103,12 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.tsiViewList = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiViewDetails = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiViewTiles = New System.Windows.Forms.ToolStripMenuItem()
+        Me.tsiSortBy = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiRefresh = New System.Windows.Forms.ToolStripMenuItem()
+        Me.ToolStripMenuItem5 = New System.Windows.Forms.ToolStripSeparator()
+        Me.tsiNewFolder = New System.Windows.Forms.ToolStripMenuItem()
+        Me.ToolStripMenuItem2 = New System.Windows.Forms.ToolStripSeparator()
+        Me.tsiProperties = New System.Windows.Forms.ToolStripMenuItem()
         Me.ToolStrip1 = New System.Windows.Forms.ToolStrip()
         Me.tsiFragmentation = New System.Windows.Forms.ToolStripButton()
         Me.tsiCompression = New System.Windows.Forms.ToolStripLabel()
@@ -104,17 +118,20 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.Thumbnail128Sizer = New System.Windows.Forms.ImageList(Me.components)
         Me.Thumbnail256Sizer = New System.Windows.Forms.ImageList(Me.components)
         Me.tsMain = New System.Windows.Forms.ToolStrip()
-        Me.ToolStripDropDownButton1 = New System.Windows.Forms.ToolStripDropDownButton()
+        Me.tsiFile = New System.Windows.Forms.ToolStripDropDownButton()
+        Me.OpenToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
+        Me.ToolStripMenuItem1 = New System.Windows.Forms.ToolStripSeparator()
+        Me.tsiExit = New System.Windows.Forms.ToolStripMenuItem()
+        Me.tsiTools = New System.Windows.Forms.ToolStripDropDownButton()
         Me.MenuTextSeparator2 = New EmbeddedFileSystemSample.Controls.MenuTextSeparator()
         Me.tsiScan = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiDefrag = New System.Windows.Forms.ToolStripMenuItem()
         Me.MenuTextSeparator1 = New EmbeddedFileSystemSample.Controls.MenuTextSeparator()
         Me.tsiEncrypt = New System.Windows.Forms.ToolStripMenuItem()
-        Me.ToolStripMenuItem1 = New System.Windows.Forms.ToolStripSeparator()
-        Me.tsiExit = New System.Windows.Forms.ToolStripMenuItem()
         Me.tsiBack = New System.Windows.Forms.ToolStripButton()
         Me.tsiForward = New System.Windows.Forms.ToolStripButton()
         Me.tsiSearch = New EmbeddedFileSystemSample.Controls.ToolStripSpringTextBox()
+        Me.FileDragMenu = New System.Windows.Forms.ContextMenuStrip(Me.components)
         CType(Me.SplitExplorer, System.ComponentModel.ISupportInitialize).BeginInit()
         Me.SplitExplorer.Panel1.SuspendLayout()
         Me.SplitExplorer.Panel2.SuspendLayout()
@@ -151,6 +168,7 @@ Partial Class EmbeddedFileSystemBrowserForm
         '
         Me.tvFolders.AllowDrop = True
         Me.tvFolders.Dock = System.Windows.Forms.DockStyle.Fill
+        Me.tvFolders.DrawMode = System.Windows.Forms.TreeViewDrawMode.OwnerDrawText
         Me.tvFolders.HideSelection = False
         Me.tvFolders.Location = New System.Drawing.Point(0, 0)
         Me.tvFolders.Name = "tvFolders"
@@ -199,10 +217,9 @@ Partial Class EmbeddedFileSystemBrowserForm
         '
         'FolderContextMenu
         '
-        Me.FolderContextMenu.ImageScalingSize = New System.Drawing.Size(24, 24)
-        Me.FolderContextMenu.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.tsiFolderOpen, Me.tsiFolderSep1, Me.tsiFolderUploadFiles, Me.tsiFolderUploadFolder, Me.tsiFolderNewFolder, Me.tsiFolderSep2, Me.tsiSaveFolderAs, Me.tsiFolderSep3, Me.tsiFolderRename, Me.tsiDeleteFolder, Me.tsiFolderSep4, Me.tsiFolderRefresh})
+        Me.FolderContextMenu.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.tsiFolderOpen, Me.tsiFolderSep1, Me.tsiFolderCut, Me.tsiFolderCopy, Me.tsiFolderPaste, Me.ToolStripMenuItem7, Me.tsiFolderUploadFiles, Me.tsiFolderUploadFolder, Me.tsiSaveFolderAs, Me.tsiFolderSep3, Me.tsiDeleteFolder, Me.tsiFolderRename, Me.ToolStripSeparator1, Me.tsiFolderRefresh, Me.tsiFolderSep2, Me.tsiFolderNewFolder, Me.tsiFolderSep4, Me.tsiFolderProperties})
         Me.FolderContextMenu.Name = "FolderContextMenu"
-        Me.FolderContextMenu.Size = New System.Drawing.Size(160, 204)
+        Me.FolderContextMenu.Size = New System.Drawing.Size(160, 304)
         '
         'tsiFolderOpen
         '
@@ -215,31 +232,49 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.tsiFolderSep1.Name = "tsiFolderSep1"
         Me.tsiFolderSep1.Size = New System.Drawing.Size(156, 6)
         '
+        'tsiFolderCut
+        '
+        Me.tsiFolderCut.BackColor = System.Drawing.Color.LemonChiffon
+        Me.tsiFolderCut.Name = "tsiFolderCut"
+        Me.tsiFolderCut.Size = New System.Drawing.Size(159, 22)
+        Me.tsiFolderCut.Text = "Cut"
+        '
+        'tsiFolderCopy
+        '
+        Me.tsiFolderCopy.BackColor = System.Drawing.Color.LemonChiffon
+        Me.tsiFolderCopy.Name = "tsiFolderCopy"
+        Me.tsiFolderCopy.Size = New System.Drawing.Size(159, 22)
+        Me.tsiFolderCopy.Text = "Copy"
+        '
+        'tsiFolderPaste
+        '
+        Me.tsiFolderPaste.BackColor = System.Drawing.Color.LemonChiffon
+        Me.tsiFolderPaste.Name = "tsiFolderPaste"
+        Me.tsiFolderPaste.Size = New System.Drawing.Size(159, 22)
+        Me.tsiFolderPaste.Text = "Paste"
+        '
+        'ToolStripMenuItem7
+        '
+        Me.ToolStripMenuItem7.Name = "ToolStripMenuItem7"
+        Me.ToolStripMenuItem7.Size = New System.Drawing.Size(156, 6)
+        '
         'tsiFolderUploadFiles
         '
+        Me.tsiFolderUploadFiles.BackColor = System.Drawing.Color.LightPink
         Me.tsiFolderUploadFiles.Name = "tsiFolderUploadFiles"
         Me.tsiFolderUploadFiles.Size = New System.Drawing.Size(159, 22)
         Me.tsiFolderUploadFiles.Text = "Upload File(s)..."
         '
         'tsiFolderUploadFolder
         '
+        Me.tsiFolderUploadFolder.BackColor = System.Drawing.Color.LightPink
         Me.tsiFolderUploadFolder.Name = "tsiFolderUploadFolder"
         Me.tsiFolderUploadFolder.Size = New System.Drawing.Size(159, 22)
         Me.tsiFolderUploadFolder.Text = "Upload Folder..."
         '
-        'tsiFolderNewFolder
-        '
-        Me.tsiFolderNewFolder.Name = "tsiFolderNewFolder"
-        Me.tsiFolderNewFolder.Size = New System.Drawing.Size(159, 22)
-        Me.tsiFolderNewFolder.Text = "New Folder"
-        '
-        'tsiFolderSep2
-        '
-        Me.tsiFolderSep2.Name = "tsiFolderSep2"
-        Me.tsiFolderSep2.Size = New System.Drawing.Size(156, 6)
-        '
         'tsiSaveFolderAs
         '
+        Me.tsiSaveFolderAs.BackColor = System.Drawing.Color.LightPink
         Me.tsiSaveFolderAs.Name = "tsiSaveFolderAs"
         Me.tsiSaveFolderAs.Size = New System.Drawing.Size(159, 22)
         Me.tsiSaveFolderAs.Text = "Save Folder As..."
@@ -249,22 +284,22 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.tsiFolderSep3.Name = "tsiFolderSep3"
         Me.tsiFolderSep3.Size = New System.Drawing.Size(156, 6)
         '
+        'tsiDeleteFolder
+        '
+        Me.tsiDeleteFolder.Name = "tsiDeleteFolder"
+        Me.tsiDeleteFolder.Size = New System.Drawing.Size(159, 22)
+        Me.tsiDeleteFolder.Text = "Delete"
+        '
         'tsiFolderRename
         '
         Me.tsiFolderRename.Name = "tsiFolderRename"
         Me.tsiFolderRename.Size = New System.Drawing.Size(159, 22)
         Me.tsiFolderRename.Text = "Rename"
         '
-        'tsiDeleteFolder
+        'ToolStripSeparator1
         '
-        Me.tsiDeleteFolder.Name = "tsiDeleteFolder"
-        Me.tsiDeleteFolder.Size = New System.Drawing.Size(159, 22)
-        Me.tsiDeleteFolder.Text = "Delete Folder"
-        '
-        'tsiFolderSep4
-        '
-        Me.tsiFolderSep4.Name = "tsiFolderSep4"
-        Me.tsiFolderSep4.Size = New System.Drawing.Size(156, 6)
+        Me.ToolStripSeparator1.Name = "ToolStripSeparator1"
+        Me.ToolStripSeparator1.Size = New System.Drawing.Size(156, 6)
         '
         'tsiFolderRefresh
         '
@@ -272,12 +307,34 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.tsiFolderRefresh.Size = New System.Drawing.Size(159, 22)
         Me.tsiFolderRefresh.Text = "Refresh"
         '
+        'tsiFolderSep2
+        '
+        Me.tsiFolderSep2.Name = "tsiFolderSep2"
+        Me.tsiFolderSep2.Size = New System.Drawing.Size(156, 6)
+        '
+        'tsiFolderNewFolder
+        '
+        Me.tsiFolderNewFolder.Name = "tsiFolderNewFolder"
+        Me.tsiFolderNewFolder.Size = New System.Drawing.Size(159, 22)
+        Me.tsiFolderNewFolder.Text = "New Folder"
+        '
+        'tsiFolderSep4
+        '
+        Me.tsiFolderSep4.Name = "tsiFolderSep4"
+        Me.tsiFolderSep4.Size = New System.Drawing.Size(156, 6)
+        '
+        'tsiFolderProperties
+        '
+        Me.tsiFolderProperties.BackColor = System.Drawing.Color.LightYellow
+        Me.tsiFolderProperties.Name = "tsiFolderProperties"
+        Me.tsiFolderProperties.Size = New System.Drawing.Size(159, 22)
+        Me.tsiFolderProperties.Text = "Properties"
+        '
         'FileContextMenu
         '
-        Me.FileContextMenu.ImageScalingSize = New System.Drawing.Size(24, 24)
-        Me.FileContextMenu.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.tsiOpen, Me.tsiOpenContainingFolder, Me.tsiFileSep1, Me.tsiSaveAs, Me.tsiRename, Me.tsiDelete, Me.tsiFileSep2, Me.tsiUploadFiles, Me.tsiUploadFolder, Me.tsiNewFolder, Me.tsiFileSep3, Me.tsiView, Me.tsiRefresh})
+        Me.FileContextMenu.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.tsiOpen, Me.tsiOpenContainingFolder, Me.tsiFileSep1, Me.tsiCut, Me.tsiCopy, Me.tsiPaste, Me.tsiSaveAs, Me.ToolStripMenuItem3, Me.tsiDelete, Me.tsiRename, Me.tsiFileSep2, Me.tsiUploadFiles, Me.tsiUploadFolder, Me.tsiFileSep3, Me.tsiView, Me.tsiSortBy, Me.tsiRefresh, Me.ToolStripMenuItem5, Me.tsiNewFolder, Me.ToolStripMenuItem2, Me.tsiProperties})
         Me.FileContextMenu.Name = "FileContextMenu"
-        Me.FileContextMenu.Size = New System.Drawing.Size(202, 242)
+        Me.FileContextMenu.Size = New System.Drawing.Size(202, 370)
         '
         'tsiOpen
         '
@@ -296,23 +353,50 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.tsiFileSep1.Name = "tsiFileSep1"
         Me.tsiFileSep1.Size = New System.Drawing.Size(198, 6)
         '
+        'tsiCut
+        '
+        Me.tsiCut.BackColor = System.Drawing.Color.LightYellow
+        Me.tsiCut.Name = "tsiCut"
+        Me.tsiCut.Size = New System.Drawing.Size(201, 22)
+        Me.tsiCut.Text = "Cut"
+        '
+        'tsiCopy
+        '
+        Me.tsiCopy.BackColor = System.Drawing.Color.LightYellow
+        Me.tsiCopy.Name = "tsiCopy"
+        Me.tsiCopy.Size = New System.Drawing.Size(201, 22)
+        Me.tsiCopy.Text = "Copy"
+        '
+        'tsiPaste
+        '
+        Me.tsiPaste.BackColor = System.Drawing.Color.LightYellow
+        Me.tsiPaste.Name = "tsiPaste"
+        Me.tsiPaste.Size = New System.Drawing.Size(201, 22)
+        Me.tsiPaste.Text = "Paste"
+        '
         'tsiSaveAs
         '
+        Me.tsiSaveAs.BackColor = System.Drawing.Color.LightPink
         Me.tsiSaveAs.Name = "tsiSaveAs"
         Me.tsiSaveAs.Size = New System.Drawing.Size(201, 22)
         Me.tsiSaveAs.Text = "Save As..."
         '
-        'tsiRename
+        'ToolStripMenuItem3
         '
-        Me.tsiRename.Name = "tsiRename"
-        Me.tsiRename.Size = New System.Drawing.Size(201, 22)
-        Me.tsiRename.Text = "Rename"
+        Me.ToolStripMenuItem3.Name = "ToolStripMenuItem3"
+        Me.ToolStripMenuItem3.Size = New System.Drawing.Size(198, 6)
         '
         'tsiDelete
         '
         Me.tsiDelete.Name = "tsiDelete"
         Me.tsiDelete.Size = New System.Drawing.Size(201, 22)
         Me.tsiDelete.Text = "Delete"
+        '
+        'tsiRename
+        '
+        Me.tsiRename.Name = "tsiRename"
+        Me.tsiRename.Size = New System.Drawing.Size(201, 22)
+        Me.tsiRename.Text = "Rename"
         '
         'tsiFileSep2
         '
@@ -321,21 +405,17 @@ Partial Class EmbeddedFileSystemBrowserForm
         '
         'tsiUploadFiles
         '
+        Me.tsiUploadFiles.BackColor = System.Drawing.Color.LightPink
         Me.tsiUploadFiles.Name = "tsiUploadFiles"
         Me.tsiUploadFiles.Size = New System.Drawing.Size(201, 22)
         Me.tsiUploadFiles.Text = "Upload File(s)..."
         '
         'tsiUploadFolder
         '
+        Me.tsiUploadFolder.BackColor = System.Drawing.Color.LightPink
         Me.tsiUploadFolder.Name = "tsiUploadFolder"
         Me.tsiUploadFolder.Size = New System.Drawing.Size(201, 22)
         Me.tsiUploadFolder.Text = "Upload Folder..."
-        '
-        'tsiNewFolder
-        '
-        Me.tsiNewFolder.Name = "tsiNewFolder"
-        Me.tsiNewFolder.Size = New System.Drawing.Size(201, 22)
-        Me.tsiNewFolder.Text = "New Folder"
         '
         'tsiFileSep3
         '
@@ -391,11 +471,40 @@ Partial Class EmbeddedFileSystemBrowserForm
         Me.tsiViewTiles.Size = New System.Drawing.Size(197, 22)
         Me.tsiViewTiles.Text = "Tiles"
         '
+        'tsiSortBy
+        '
+        Me.tsiSortBy.Name = "tsiSortBy"
+        Me.tsiSortBy.Size = New System.Drawing.Size(201, 22)
+        Me.tsiSortBy.Text = "Sort By"
+        '
         'tsiRefresh
         '
         Me.tsiRefresh.Name = "tsiRefresh"
         Me.tsiRefresh.Size = New System.Drawing.Size(201, 22)
         Me.tsiRefresh.Text = "Refresh"
+        '
+        'ToolStripMenuItem5
+        '
+        Me.ToolStripMenuItem5.Name = "ToolStripMenuItem5"
+        Me.ToolStripMenuItem5.Size = New System.Drawing.Size(198, 6)
+        '
+        'tsiNewFolder
+        '
+        Me.tsiNewFolder.Name = "tsiNewFolder"
+        Me.tsiNewFolder.Size = New System.Drawing.Size(201, 22)
+        Me.tsiNewFolder.Text = "New Folder"
+        '
+        'ToolStripMenuItem2
+        '
+        Me.ToolStripMenuItem2.Name = "ToolStripMenuItem2"
+        Me.ToolStripMenuItem2.Size = New System.Drawing.Size(198, 6)
+        '
+        'tsiProperties
+        '
+        Me.tsiProperties.BackColor = System.Drawing.Color.LightYellow
+        Me.tsiProperties.Name = "tsiProperties"
+        Me.tsiProperties.Size = New System.Drawing.Size(201, 22)
+        Me.tsiProperties.Text = "Properties"
         '
         'ToolStrip1
         '
@@ -413,11 +522,10 @@ Partial Class EmbeddedFileSystemBrowserForm
         'tsiFragmentation
         '
         Me.tsiFragmentation.Alignment = System.Windows.Forms.ToolStripItemAlignment.Right
-        Me.tsiFragmentation.AutoSize = False
-        Me.tsiFragmentation.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image
         Me.tsiFragmentation.ImageTransparentColor = System.Drawing.Color.Magenta
         Me.tsiFragmentation.Name = "tsiFragmentation"
-        Me.tsiFragmentation.Size = New System.Drawing.Size(100, 16)
+        Me.tsiFragmentation.Size = New System.Drawing.Size(92, 22)
+        Me.tsiFragmentation.Text = "Fragmentation:"
         '
         'tsiCompression
         '
@@ -462,22 +570,49 @@ Partial Class EmbeddedFileSystemBrowserForm
         'tsMain
         '
         Me.tsMain.GripStyle = System.Windows.Forms.ToolStripGripStyle.Hidden
-        Me.tsMain.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.ToolStripDropDownButton1, Me.tsiBack, Me.tsiForward, Me.tsiSearch})
+        Me.tsMain.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.tsiFile, Me.tsiTools, Me.tsiBack, Me.tsiForward, Me.tsiSearch})
         Me.tsMain.Location = New System.Drawing.Point(0, 0)
         Me.tsMain.Name = "tsMain"
         Me.tsMain.Size = New System.Drawing.Size(1084, 25)
         Me.tsMain.TabIndex = 8
         Me.tsMain.Text = "ToolStrip2"
         '
-        'ToolStripDropDownButton1
+        'tsiFile
         '
-        Me.ToolStripDropDownButton1.AutoToolTip = False
-        Me.ToolStripDropDownButton1.DropDownItems.AddRange(New System.Windows.Forms.ToolStripItem() {Me.MenuTextSeparator2, Me.tsiScan, Me.tsiDefrag, Me.MenuTextSeparator1, Me.tsiEncrypt, Me.ToolStripMenuItem1, Me.tsiExit})
-        Me.ToolStripDropDownButton1.ImageTransparentColor = System.Drawing.Color.Magenta
-        Me.ToolStripDropDownButton1.Name = "ToolStripDropDownButton1"
-        Me.ToolStripDropDownButton1.ShowDropDownArrow = False
-        Me.ToolStripDropDownButton1.Size = New System.Drawing.Size(29, 22)
-        Me.ToolStripDropDownButton1.Text = "&File"
+        Me.tsiFile.AutoToolTip = False
+        Me.tsiFile.DropDownItems.AddRange(New System.Windows.Forms.ToolStripItem() {Me.OpenToolStripMenuItem, Me.ToolStripMenuItem1, Me.tsiExit})
+        Me.tsiFile.ImageTransparentColor = System.Drawing.Color.Magenta
+        Me.tsiFile.Name = "tsiFile"
+        Me.tsiFile.ShowDropDownArrow = False
+        Me.tsiFile.Size = New System.Drawing.Size(29, 22)
+        Me.tsiFile.Text = "&File"
+        '
+        'OpenToolStripMenuItem
+        '
+        Me.OpenToolStripMenuItem.Name = "OpenToolStripMenuItem"
+        Me.OpenToolStripMenuItem.Size = New System.Drawing.Size(103, 22)
+        Me.OpenToolStripMenuItem.Text = "&Open"
+        '
+        'ToolStripMenuItem1
+        '
+        Me.ToolStripMenuItem1.Name = "ToolStripMenuItem1"
+        Me.ToolStripMenuItem1.Size = New System.Drawing.Size(100, 6)
+        '
+        'tsiExit
+        '
+        Me.tsiExit.Name = "tsiExit"
+        Me.tsiExit.Size = New System.Drawing.Size(103, 22)
+        Me.tsiExit.Text = "E&xit"
+        '
+        'tsiTools
+        '
+        Me.tsiTools.AutoToolTip = False
+        Me.tsiTools.DropDownItems.AddRange(New System.Windows.Forms.ToolStripItem() {Me.MenuTextSeparator2, Me.tsiScan, Me.tsiDefrag, Me.MenuTextSeparator1, Me.tsiEncrypt})
+        Me.tsiTools.ImageTransparentColor = System.Drawing.Color.Magenta
+        Me.tsiTools.Name = "tsiTools"
+        Me.tsiTools.ShowDropDownArrow = False
+        Me.tsiTools.Size = New System.Drawing.Size(39, 22)
+        Me.tsiTools.Text = "&Tools"
         '
         'MenuTextSeparator2
         '
@@ -491,13 +626,13 @@ Partial Class EmbeddedFileSystemBrowserForm
         'tsiScan
         '
         Me.tsiScan.Name = "tsiScan"
-        Me.tsiScan.Size = New System.Drawing.Size(180, 22)
+        Me.tsiScan.Size = New System.Drawing.Size(116, 22)
         Me.tsiScan.Text = "&Scan"
         '
         'tsiDefrag
         '
         Me.tsiDefrag.Name = "tsiDefrag"
-        Me.tsiDefrag.Size = New System.Drawing.Size(180, 22)
+        Me.tsiDefrag.Size = New System.Drawing.Size(116, 22)
         Me.tsiDefrag.Text = "&Defrag"
         '
         'MenuTextSeparator1
@@ -512,19 +647,8 @@ Partial Class EmbeddedFileSystemBrowserForm
         'tsiEncrypt
         '
         Me.tsiEncrypt.Name = "tsiEncrypt"
-        Me.tsiEncrypt.Size = New System.Drawing.Size(180, 22)
+        Me.tsiEncrypt.Size = New System.Drawing.Size(116, 22)
         Me.tsiEncrypt.Text = "&Encrypt"
-        '
-        'ToolStripMenuItem1
-        '
-        Me.ToolStripMenuItem1.Name = "ToolStripMenuItem1"
-        Me.ToolStripMenuItem1.Size = New System.Drawing.Size(177, 6)
-        '
-        'tsiExit
-        '
-        Me.tsiExit.Name = "tsiExit"
-        Me.tsiExit.Size = New System.Drawing.Size(180, 22)
-        Me.tsiExit.Text = "E&xit"
         '
         'tsiBack
         '
@@ -546,10 +670,14 @@ Partial Class EmbeddedFileSystemBrowserForm
         '
         'tsiSearch
         '
-        Me.tsiSearch.Alignment = System.Windows.Forms.ToolStripItemAlignment.Right
         Me.tsiSearch.Font = New System.Drawing.Font("Segoe UI", 9.0!)
         Me.tsiSearch.Name = "tsiSearch"
         Me.tsiSearch.Size = New System.Drawing.Size(100, 25)
+        '
+        'FileDragMenu
+        '
+        Me.FileDragMenu.Name = "FileDragMenu"
+        Me.FileDragMenu.Size = New System.Drawing.Size(61, 4)
         '
         'EmbeddedFileSystemBrowserForm
         '
@@ -587,15 +715,32 @@ Partial Class EmbeddedFileSystemBrowserForm
     Friend WithEvents pnlExplorer As Panel
     Friend WithEvents tsiFragmentation As ToolStripButton
     Friend WithEvents tsMain As ToolStrip
-    Friend WithEvents ToolStripDropDownButton1 As ToolStripDropDownButton
+    Friend WithEvents tsiFile As ToolStripDropDownButton
     Friend WithEvents MenuTextSeparator2 As Controls.MenuTextSeparator
     Friend WithEvents tsiScan As ToolStripMenuItem
     Friend WithEvents tsiDefrag As ToolStripMenuItem
     Friend WithEvents MenuTextSeparator1 As Controls.MenuTextSeparator
     Friend WithEvents tsiEncrypt As ToolStripMenuItem
-    Friend WithEvents ToolStripMenuItem1 As ToolStripSeparator
     Friend WithEvents tsiExit As ToolStripMenuItem
     Friend WithEvents tsiBack As ToolStripButton
     Friend WithEvents tsiForward As ToolStripButton
     Friend WithEvents tsiSearch As Controls.ToolStripSpringTextBox
+    Friend WithEvents tsiCut As ToolStripMenuItem
+    Friend WithEvents tsiCopy As ToolStripMenuItem
+    Friend WithEvents tsiPaste As ToolStripMenuItem
+    Friend WithEvents ToolStripMenuItem3 As ToolStripSeparator
+    Friend WithEvents tsiSortBy As ToolStripMenuItem
+    Friend WithEvents ToolStripMenuItem5 As ToolStripSeparator
+    Friend WithEvents tsiFolderCut As ToolStripMenuItem
+    Friend WithEvents tsiFolderCopy As ToolStripMenuItem
+    Friend WithEvents tsiFolderPaste As ToolStripMenuItem
+    Friend WithEvents ToolStripMenuItem7 As ToolStripSeparator
+    Friend WithEvents ToolStripSeparator1 As ToolStripSeparator
+    Friend WithEvents tsiFolderProperties As ToolStripMenuItem
+    Friend WithEvents ToolStripMenuItem2 As ToolStripSeparator
+    Friend WithEvents tsiProperties As ToolStripMenuItem
+    Friend WithEvents tsiTools As ToolStripDropDownButton
+    Friend WithEvents OpenToolStripMenuItem As ToolStripMenuItem
+    Friend WithEvents ToolStripMenuItem1 As ToolStripSeparator
+    Friend WithEvents FileDragMenu As ContextMenuStrip
 End Class

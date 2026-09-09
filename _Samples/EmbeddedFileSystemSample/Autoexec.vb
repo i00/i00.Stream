@@ -10,10 +10,30 @@ Public NotInheritable Class Autoexec
         Application.EnableVisualStyles()
         Application.SetCompatibleTextRenderingDefault(False)
 
-        Using fs = New IO.FileStream("Test.efs", IO.FileMode.OpenOrCreate, IO.FileAccess.ReadWrite, IO.FileShare.Read, bufferSize:=1)
+        Dim cmd = New CommandLineParser()
+
+        Dim File = cmd.GetValue()
+        If File = "" Then
+            Using ofd As New SaveFileDialog()
+                ofd.Title = "Open"
+                ofd.OverwritePrompt = False
+                ofd.Filter = "Embedded File System|*.efs"
+                If ofd.ShowDialog() = DialogResult.OK Then
+                    File = ofd.FileName
+                Else
+                    Return
+                End If
+            End Using
+        End If
+
+        Using fs = New IO.FileStream(File, IO.FileMode.OpenOrCreate, IO.FileAccess.ReadWrite, IO.FileShare.Read, bufferSize:=1)
             Dim EncryptionInfo As ChunkedStream.EncryptionInfo = Nothing
             If ChunkedStream.IsEncrypted(fs) Then
-                Dim Password = EmbeddedFileSystemBrowserForm.PromptForText(Nothing, "Password", "Please enter the password:", True)
+                Dim Password As String = Nothing
+                Password = cmd.GetValue("password")
+                If Password = "" Then
+                    Password = EmbeddedFileSystemBrowserForm.PromptForText(Nothing, "Password", "Please enter the password:", True)
+                End If
                 If Password = "" Then Return
                 EncryptionInfo = New ChunkedStream.EncryptionInfo(Password, System.Text.Encoding.UTF8.GetBytes(Password))
             End If
@@ -26,20 +46,23 @@ Public NotInheritable Class Autoexec
                 .CompressionMethod = i00.Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
                 .AutoRecoverOnFault = True,
                 .EncryptionInfo = EncryptionInfo,
-                .ChunkSize = 4 * 1024 * 1024
+                .ChunkSize = 4 * 1024 * 1024,
+                .MaxCryptoParallelism = 8,
+                .MaxPhysicalReadParallelism = 8,
+                .MaxPhysicalWriteParallelism = 8,
+                .MaxSubBlockCryptoParallelism = 8
             }
-            Using cs = i00.Streams.ChunkedStream.Open(fs, Options)
-                'cs.Defragment(i00.Streams.ChunkedStream.DefragTypes.Rebuild,
-                '              Sub(ProcessedUnits, TotalUnits, UnitType, CancellationToken)
-                '                  Dim ZZZ = ""
-                '                  'Debug.Print($"{ProcessedUnits / TotalUnits:P0}")
-                '              End Sub)
-                Using efs = New i00.Streams.EmbeddedFileSystem(cs)
-                    Using frmEfs = New EmbeddedFileSystemBrowserForm(efs)
-                        frmEfs.ShowDialog()
+            Try
+                Using cs = i00.Streams.ChunkedStream.Open(fs, Options)
+                    Using efs = New i00.Streams.EmbeddedFileSystem(cs)
+                        Using frmEfs = New EmbeddedFileSystemBrowserForm(efs)
+                            frmEfs.ShowDialog()
+                        End Using
                     End Using
                 End Using
-            End Using
+            Catch ex As Exception
+                MsgBox(Nothing, "Error opening embedded file system: " & ex.Message, MsgBoxStyle.Critical Or MsgBoxStyle.OkOnly,,,, Function(x) x.ShowInTaskbar = True)
+            End Try
         End Using
     End Sub
 

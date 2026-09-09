@@ -158,8 +158,8 @@ Dim Test = dbml.TestData.Where(Function(x) x.DataType = RequestedType).
 - If the project sits at the solution root (e.g. `ChunkedStream`), do not put a slash in front of it.
 - If the change does not directly relate to any one project (e.g. repo-wide tooling or instructions), use `[General]` in place of a project name.
 - Changes to a project's own test project (e.g. `_Tests\UnitTests`) are folded into the main project's section rather than given their own section.
-- List every touched project as its own section, in any order, each with its own bullet list.
-- Each bullet is a single, short, plain sentence describing one thing that changed - simple enough that anyone reading it gets the gist without needing more context. Do not pack multiple ideas into one bullet or explain implementation detail.
+- List every touched project as its own section (single line break), in the most logical order, each with its own bullet list.
+- Each bullet should be in the most logical order, and is a single, short, plain sentence describing one thing that changed - simple enough that anyone reading it gets the gist without needing more context. Do not pack multiple ideas into one bullet or explain implementation detail.
 - If the user asks to commit and gives only a job number (e.g. `#12345`) as the commit comment, use that job number as the first line, followed by a single line break, then the standard message format described above.
 - If the branch being committed to has a name whose final path segment is a number (e.g. `AnyPath/1234` or `AnyPath/1234.3`), automatically prepend that job number as the first line, followed by a single line break, then the standard message format described above. The job number is the leading integer of the final path segment, ignoring any `.n` suffix, so both `AnyPath/1234` and `AnyPath/1234.3` give `#1234`.
 - Never add a co-author, "Generated with"/AI-attribution line, or any similar credit/tool footer to a commit message.

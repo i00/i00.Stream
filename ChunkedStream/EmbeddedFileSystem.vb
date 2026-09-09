@@ -220,7 +220,6 @@ Namespace Streams
             Public Property Index As Integer
         End Class
 
-        Private Const Int64Size As Integer = 8
         Private Const ParentOffset As Integer = 8
         Private Const DirectoryLengthOffset As Integer = 16
         Private Const DirectoryHeaderSize As Integer = 24

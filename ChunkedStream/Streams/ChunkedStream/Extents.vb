@@ -285,7 +285,7 @@ Namespace Streams
         ' whole batch instead of once per record.
         '
         Private Sub ApplyPendingPhysicalRecordReclaims()
-
+            'TODO: THIS IS SLOW
             If _PendingReclaimedPhysicalRecords.Count = 0 Then Return
 
             Dim PendingRecordIds = _PendingReclaimedPhysicalRecords.ToArray()
