@@ -450,6 +450,7 @@ Namespace Streams
             If Offset < DataStartOffset Then Return False
             If Length <= 0 Then Return False
             If RangeOverlapsLivePhysicalRecord(Offset, Length) Then Return False
+            If RangeOverlapsActiveMetadata(Offset, Length) Then Return False
 
             Return True
 

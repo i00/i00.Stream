@@ -1865,6 +1865,22 @@ Namespace Streams
                                   EffectiveOptions.IndexPageEntryCount,
                                   EffectiveOptions.IndexDirectoryEntryCount)
 
+            '
+            ' The paged metadata's own MACs prove it is internally self-consistent, but say
+            ' nothing about whether the chunk data it points at is actually still present -
+            ' unlike the header's own scalars (IndexOffset, checked below), a physical
+            ' record's bounds are never touched until something actually reads that record.
+            ' A truncated tail can leave this candidate's own pages fully intact while the
+            ' chunk data itself is gone; treat that as this candidate failing to load, the
+            ' same as a MAC mismatch would, so the caller falls back to the next header copy
+            ' instead of succeeding into a state that cannot actually be read.
+            '
+            For Each Record In Metadata.PhysicalRecords.Values
+                If Record.PhysicalOffset + CLng(Record.PhysicalLength) > BaseStream.Length Then
+                    Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
+                End If
+            Next
+
             Dim Repairs As New List(Of AutoRepair)()
 
             Dim ExtentSpan As Long = 0

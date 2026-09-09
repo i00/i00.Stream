@@ -188,23 +188,6 @@ Namespace Streams
             MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
         End Sub
 
-        Private Sub MarkPhysicalRecordPagesDirtyFromOrdinal(Ordinal As Integer)
-
-            If _IndexPageEntryCount <= 0 Then Return
-            If Ordinal < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Ordinal))
-            If _PhysicalRecords.Count = 0 Then Return
-
-            Dim FirstPage = Math.Max(0, Ordinal \ _IndexPageEntryCount)
-            Dim PageCount = GetIndexPageCount(_PhysicalRecords.Count, _IndexPageEntryCount)
-
-            If PageCount <= 0 Then Return
-
-            For PageNumber = FirstPage To PageCount - 1
-                _DirtyPhysicalRecordPages.Add(PageNumber)
-            Next
-
-        End Sub
-
 
         Private Sub DecrementPhysicalRecordRefCount(RecordId As Long)
 
@@ -281,17 +264,19 @@ Namespace Streams
 
         '
         ' Detaches every still-unreferenced record in _PendingReclaimedPhysicalRecords, then
-        ' rebuilds the ordinal map and marks the affected physical-record pages once for the
-        ' whole batch instead of once per record.
+        ' closes the ordinal gaps that leaves via CompactPhysicalRecordOrdinalsAfterRemoval -
+        ' see its remarks for why that is an O(records removed) operation, not O(records),
+        ' regardless of how large the table has grown.
         '
         Private Sub ApplyPendingPhysicalRecordReclaims()
-            'TODO: THIS IS SLOW
+
             If _PendingReclaimedPhysicalRecords.Count = 0 Then Return
 
             Dim PendingRecordIds = _PendingReclaimedPhysicalRecords.ToArray()
             _PendingReclaimedPhysicalRecords.Clear()
 
-            Dim LowestRemovedOrdinal = Integer.MaxValue
+            Dim OldCount = _PhysicalRecordOrdinals.Count
+            Dim RemovedOrdinals As New List(Of Integer)()
 
             For Each recordId In PendingRecordIds
 
@@ -301,26 +286,23 @@ Namespace Streams
                 If Record.RefCount <> 0 Then Continue For
 
                 Dim RemovedOrdinal = DetachReclaimedPhysicalRecord(recordId)
-
-                If RemovedOrdinal >= 0 AndAlso RemovedOrdinal < LowestRemovedOrdinal Then
-                    LowestRemovedOrdinal = RemovedOrdinal
-                End If
+                If RemovedOrdinal >= 0 Then RemovedOrdinals.Add(RemovedOrdinal)
 
             Next
 
-            If LowestRemovedOrdinal = Integer.MaxValue Then Return
+            If RemovedOrdinals.Count = 0 Then Return
 
-            RebuildPhysicalRecordOrdinals()
-            MarkPhysicalRecordPagesDirtyFromOrdinal(LowestRemovedOrdinal)
+            CompactPhysicalRecordOrdinalsAfterRemoval(OldCount, RemovedOrdinals)
 
         End Sub
 
         '
-        ' Removes one unreferenced physical record from the record table, drops its
-        ' live-offset index entry and defers its backing span. The ordinal map and the
-        ' physical-record page index are left stale: the caller rebuilds them once for the
-        ' whole batch via RebuildPhysicalRecordOrdinals and marks pages from the lowest
-        ' returned ordinal. Returns the ordinal the record held, or -1 for the sparse id.
+        ' Removes one unreferenced physical record from the record table: drops its
+        ' live-offset index entry, defers its backing span, and - unlike the stale-until-
+        ' rebuilt approach this replaced - immediately removes it from the ordinal map and
+        ' its physical-record page too, leaving a genuine gap at the ordinal it held. The
+        ' caller closes that gap for the whole batch via CompactPhysicalRecordOrdinalsAfterRemoval.
+        ' Returns the ordinal the record held, or -1 for the sparse id.
         '
         Private Function DetachReclaimedPhysicalRecord(RecordId As Long) As Integer
 
@@ -356,6 +338,16 @@ Namespace Streams
                               Record.PhysicalLength)
 
             _PhysicalRecords.Remove(RecordId)
+            _PhysicalRecordOrdinals.Remove(RecordId)
+
+            Dim PageNumber = RemovedOrdinal \ _IndexPageEntryCount
+            Dim PageRecordIds As SortedSet(Of Long) = Nothing
+
+            If _PhysicalRecordIdsByPage.TryGetValue(PageNumber, PageRecordIds) Then
+                PageRecordIds.Remove(RecordId)
+            End If
+
+            _DirtyPhysicalRecordPages.Add(PageNumber)
 
             Return RemovedOrdinal
 
@@ -367,17 +359,111 @@ Namespace Streams
         '
         Private Sub ReclaimPhysicalRecord(RecordId As Long)
 
+            Dim OldCount = _PhysicalRecordOrdinals.Count
             Dim RemovedOrdinal = DetachReclaimedPhysicalRecord(RecordId)
 
             If RemovedOrdinal < 0 Then Return
 
-            '
-            ' Removing a record shifts every later ordinal and also rebuilds the cached
-            ' physical-data end value.
-            '
-            RebuildPhysicalRecordOrdinals()
+            CompactPhysicalRecordOrdinalsAfterRemoval(OldCount, New List(Of Integer) From {RemovedOrdinal})
 
-            MarkPhysicalRecordPagesDirtyFromOrdinal(RemovedOrdinal)
+        End Sub
+
+        '
+        ' Closes the ordinal gap(s) DetachReclaimedPhysicalRecord's removals just left, by
+        ' moving whichever records currently sit at the ordinals that no longer fit (>= the
+        ' new, shrunken count) down into the freed slots - the same "swap with the tail"
+        ' trick a packed array uses to delete an element without shifting everything after
+        ' it. This is safe because nothing on disk records ordinal order: ReadPhysicalRecordPages
+        ' reads every page's entries straight into a Dictionary keyed by RecordId, so which
+        ' record ends up at which ordinal has never mattered - only that ordinals
+        ' 0..NewCount-1 stay densely occupied. Every page that gains, loses or changes an
+        ' entry is marked dirty as it happens (DetachReclaimedPhysicalRecord above, and the
+        ' moves below) - never every page after the lowest hole, which is what made the
+        ' RebuildPhysicalRecordOrdinals-based version of this cost O(records) on every
+        ' reclaim, however small.
+        '
+        ' The survivors to move are found by walking backwards from the old top ordinal, a
+        ' page at a time, skipping ordinals that were themselves just removed - a range
+        ' bounded by how many records this batch removed, not by the table's total size.
+        '
+        Private Sub CompactPhysicalRecordOrdinalsAfterRemoval(OldCount As Integer, RemovedOrdinals As List(Of Integer))
+
+            Dim NewCount = _PhysicalRecordOrdinals.Count
+
+            If NewCount + RemovedOrdinals.Count <> OldCount Then
+                Throw New InvalidDataException("Physical-record ordinal bookkeeping is inconsistent after a reclaim.")
+            End If
+
+            Dim HoleQueue As New Queue(Of Integer)(RemovedOrdinals.Where(Function(ordinal) ordinal < NewCount))
+
+            If HoleQueue.Count > 0 AndAlso _IndexPageEntryCount > 0 Then
+
+                Dim FirstTailPage = NewCount \ _IndexPageEntryCount
+                Dim LastTailPage = (OldCount - 1) \ _IndexPageEntryCount
+
+                For PageNumber = LastTailPage To FirstTailPage Step -1
+
+                    If HoleQueue.Count = 0 Then Exit For
+
+                    Dim PageRecordIds As SortedSet(Of Long) = Nothing
+                    If _PhysicalRecordIdsByPage.TryGetValue(PageNumber, PageRecordIds) = False Then Continue For
+
+                    ' Snapshot first - MovePhysicalRecordOrdinal mutates this same set as
+                    ' survivors move out of it.
+                    For Each SurvivorId In PageRecordIds.ToArray()
+
+                        If HoleQueue.Count = 0 Then Exit For
+
+                        Dim SurvivorOrdinal = _PhysicalRecordOrdinals(SurvivorId)
+                        If SurvivorOrdinal < NewCount Then Continue For ' Already inside the kept range.
+
+                        MovePhysicalRecordOrdinal(SurvivorId, SurvivorOrdinal, HoleQueue.Dequeue())
+
+                    Next
+
+                Next
+
+                If HoleQueue.Count > 0 Then
+                    Throw New InvalidDataException("Could not find enough surviving physical records to close every ordinal gap.")
+                End If
+
+            End If
+
+        End Sub
+
+        '
+        ' Reassigns RecordId from OldOrdinal to NewOrdinal, keeping _PhysicalRecordOrdinals
+        ' and _PhysicalRecordIdsByPage in sync and marking both the old and new page dirty -
+        ' the counterpart to AddPhysicalRecordToIndexes for a record changing ordinal rather
+        ' than being freshly inserted.
+        '
+        Private Sub MovePhysicalRecordOrdinal(RecordId As Long, OldOrdinal As Integer, NewOrdinal As Integer)
+
+            If OldOrdinal = NewOrdinal Then Return
+
+            _PhysicalRecordOrdinals(RecordId) = NewOrdinal
+
+            Dim OldPageNumber = OldOrdinal \ _IndexPageEntryCount
+            Dim NewPageNumber = NewOrdinal \ _IndexPageEntryCount
+
+            If OldPageNumber <> NewPageNumber Then
+
+                Dim OldPageRecordIds As SortedSet(Of Long) = Nothing
+                If _PhysicalRecordIdsByPage.TryGetValue(OldPageNumber, OldPageRecordIds) Then
+                    OldPageRecordIds.Remove(RecordId)
+                End If
+
+                Dim NewPageRecordIds As SortedSet(Of Long) = Nothing
+                If _PhysicalRecordIdsByPage.TryGetValue(NewPageNumber, NewPageRecordIds) = False Then
+                    NewPageRecordIds = New SortedSet(Of Long)()
+                    _PhysicalRecordIdsByPage.Add(NewPageNumber, NewPageRecordIds)
+                End If
+                NewPageRecordIds.Add(RecordId)
+
+            End If
+
+            _DirtyPhysicalRecordPages.Add(OldPageNumber)
+            _DirtyPhysicalRecordPages.Add(NewPageNumber)
 
         End Sub
 
@@ -670,7 +756,8 @@ Namespace Streams
                                  Where(Function(recordId) ReferencedRecordIds.Contains(recordId) = False).
                                  ToList()
 
-            Dim LowestRemovedOrdinal = Integer.MaxValue
+            Dim OldCount = _PhysicalRecordOrdinals.Count
+            Dim RemovedOrdinals As New List(Of Integer)()
 
             For Each recordId In UnreferencedRecordIds
 
@@ -687,16 +774,12 @@ Namespace Streams
                 End If
 
                 Dim RemovedOrdinal = DetachReclaimedPhysicalRecord(recordId)
-
-                If RemovedOrdinal >= 0 AndAlso RemovedOrdinal < LowestRemovedOrdinal Then
-                    LowestRemovedOrdinal = RemovedOrdinal
-                End If
+                If RemovedOrdinal >= 0 Then RemovedOrdinals.Add(RemovedOrdinal)
 
             Next
 
-            If LowestRemovedOrdinal <> Integer.MaxValue Then
-                RebuildPhysicalRecordOrdinals()
-                MarkPhysicalRecordPagesDirtyFromOrdinal(LowestRemovedOrdinal)
+            If RemovedOrdinals.Count > 0 Then
+                CompactPhysicalRecordOrdinalsAfterRemoval(OldCount, RemovedOrdinals)
             End If
 
             Return UnreferencedRecordIds.Count
