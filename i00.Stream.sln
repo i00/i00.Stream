@@ -1,9 +1,9 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 17
-VisualStudioVersion = 17.3.32929.385
+# Visual Studio Version 18
+VisualStudioVersion = 18.9.12120.119 stable
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "ChunkedStream", "ChunkedStream\ChunkedStream.vbproj", "{4D29CECB-5C0B-4DF4-B97E-90740B76544D}"
+Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "i00.Stream", "ChunkedStream\i00.Stream.vbproj", "{4D29CECB-5C0B-4DF4-B97E-90740B76544D}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tests", "Tests", "{67743B11-24B8-4C01-A687-05BDCB76E701}"
 EndProject
@@ -13,9 +13,10 @@ Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "UnitTester", "_Tests\UnitTe
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{0AED2718-765A-42BF-98B9-33CD8FD89863}"
 	ProjectSection(SolutionItems) = preProject
+		DONE.md = DONE.md
+		LICENSE = LICENSE
 		README.md = README.md
 		TODO.md = TODO.md
-		DONE.md = DONE.md
 	EndProjectSection
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Samples", "Samples", "{B271DFA5-113E-4D1B-9796-756BDC3B3780}"

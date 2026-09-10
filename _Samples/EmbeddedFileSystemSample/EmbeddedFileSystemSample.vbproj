@@ -164,9 +164,9 @@
     <None Include="App.config" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\ChunkedStream\ChunkedStream.vbproj">
+    <ProjectReference Include="..\..\ChunkedStream\i00.Stream.vbproj">
       <Project>{4d29cecb-5c0b-4df4-b97e-90740b76544d}</Project>
-      <Name>ChunkedStream</Name>
+      <Name>i00.Stream</Name>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.VisualBasic.targets" />

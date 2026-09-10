@@ -1,0 +1,38 @@
+name: Bug Report
+description: Report something in i00.Stream that behaves incorrectly.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What's wrong
+      description: What you expected to happen, and what actually happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The smallest code snippet or sequence of operations that triggers it.
+      render: vb.net
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Which release, tag, or commit of i00.Stream are you on?
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >-
+        .NET runtime and version, OS, the backing stream type, and any non-default
+        ChunkedStreamOptions in play.
+    validations:
+      required: false

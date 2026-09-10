@@ -1,4 +1,4 @@
-# ChunkedStream
+# i00.Stream
 
 **Random-access, authenticated, optionally encrypted and optionally compressed chunk
 storage layered over any caller-owned .NET `Stream`** — with stable logical anchors,
@@ -498,5 +498,7 @@ description of every model summarised here. Open work and completed history are 
 
 ## License
 
-No license has been specified for this repository yet. Until one is added, all rights are
-reserved by the author.
+See [`LICENSE`](LICENSE). It is MIT-style — use, copy, modify and distribute freely — with
+one added condition: if you ship the Software as part of a product, application, service or
+library, first open an issue at <https://github.com/i00/i00.Stream/issues> with the label
+**"Thanks"** to let the author know you are using it.

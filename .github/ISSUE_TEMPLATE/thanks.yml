@@ -1,0 +1,28 @@
+name: Thanks
+description: Let the author know you're using i00.Stream (the LICENSE asks for this before you ship it in a product).
+title: "[Thanks] "
+labels: ["Thanks"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The [LICENSE](https://github.com/i00/i00.Stream/blob/HEAD/LICENSE) asks you to open this
+        issue before shipping i00.Stream as part of a product, application, service, or library.
+
+        That's the whole requirement — you don't need to wait for a reply. This issue is
+        labelled `Thanks` and closed automatically.
+
+  - type: input
+    id: project
+    attributes:
+      label: What are you building?
+      description: A name, a link, or a one-line description — whatever you're happy to share.
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else (optional)
+    validations:
+      required: false

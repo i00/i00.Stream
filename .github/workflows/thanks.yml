@@ -1,0 +1,46 @@
+name: Thanks
+
+# Auto-acknowledge and close "Thanks" issues — the ones the LICENSE asks users to
+# open before shipping i00.Stream in a product. Fires when an issue is opened from
+# the Thanks template (label applied by the template, or "[Thanks]" title prefix as
+# a fallback for the very first one before the label exists) or when the "Thanks"
+# label is added to any issue by hand.
+
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  issues: write
+
+jobs:
+  acknowledge-and-close:
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event.action == 'labeled'
+        && github.event.label.name == 'Thanks'
+        && github.event.issue.state == 'open')
+      || (github.event.action == 'opened'
+        && (contains(github.event.issue.labels.*.name, 'Thanks')
+          || startsWith(github.event.issue.title, '[Thanks]')))
+    steps:
+      - name: Label, thank, and close
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          # Idempotent: creates the label the first time, updates it thereafter.
+          gh label create Thanks \
+            --color FFD966 \
+            --description "Usage notification — acknowledged and closed automatically" \
+            --force
+
+          gh issue edit "$ISSUE" --add-label Thanks
+
+          if [ "$(gh issue view "$ISSUE" --json state --jq .state)" = "OPEN" ]; then
+            gh issue comment "$ISSUE" --body "Thanks for letting us know you're using i00.Stream — much appreciated. 🙏 This issue is acknowledged and closes automatically; nothing more is needed."
+            gh issue close "$ISSUE" --reason completed
+          fi

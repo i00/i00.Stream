@@ -432,20 +432,19 @@ Namespace Streams
 
         End Function
 
-        Private Function IsRangeSafeForPhysicalRecord(Offset As Long,
-                                                      Length As Long) As Boolean
-
-            If Offset < DataStartOffset Then Return False
-            If Length <= 0 Then Return False
-            If RangeOverlapsLivePhysicalRecord(Offset, Length) Then Return False
-            If RangeOverlapsActiveMetadata(Offset, Length) Then Return False
-
-            Return True
-
-        End Function
-
-        Private Function IsRangeSafeForMetadata(Offset As Long,
-                                                Length As Long) As Boolean
+        '
+        ' A byte range is safe to write - whether it will hold a physical (chunk) record
+        ' or a metadata page - when it sits within the data area and collides with nothing
+        ' the current generation still points at. The rule is identical for both: a live
+        ' chunk and an active metadata page are equally destructive to overwrite.
+        '
+        ' The one place the two differ - during an open checkpoint a metadata page must
+        ' stay at or above the outermost checkpoint mark while a chunk record may fill any
+        ' safe hole below it - is a placement floor enforced by the caller
+        ' (TryAllocateSafeSpace's MinOffset), not a property of the range itself.
+        '
+        Private Function IsRangeSafeForStorage(Offset As Long,
+                                               Length As Long) As Boolean
 
             If Offset < DataStartOffset Then Return False
             If Length <= 0 Then Return False
@@ -538,7 +537,7 @@ Namespace Streams
 
             For Each Record In Records
                 If Record.SpaceType = HoleSpaceTypes.None Then Continue For
-                If IsRangeSafeForPhysicalRecord(Record.Offset, Record.Length) Then
+                If IsRangeSafeForStorage(Record.Offset, Record.Length) Then
                     _FreeSpaces.Add(Record.Offset, Record.Length)
                 End If
             Next
@@ -555,7 +554,7 @@ Namespace Streams
             Dim Offset As Long
 
             If IsMetadata AndAlso TryGetCompactMetadataWriteOffset(Length, Offset) Then
-                If IsRangeSafeForMetadata(Offset, Length) = False Then
+                If IsRangeSafeForStorage(Offset, Length) = False Then
                     Throw New InvalidOperationException($"Compact metadata allocation overlaps live physical data. Offset={Offset}, Length={Length}.")
                 End If
                 Return Offset
@@ -625,11 +624,7 @@ Namespace Streams
 
             While _FreeSpaces.TryAllocate(Length, FromStart, MinOffset, CandidateOffset)
 
-                Dim IsSafe = If(IsMetadata,
-                                IsRangeSafeForMetadata(CandidateOffset, Length),
-                                IsRangeSafeForPhysicalRecord(CandidateOffset, Length))
-
-                If IsSafe Then
+                If IsRangeSafeForStorage(CandidateOffset, Length) Then
                     Offset = CandidateOffset
                     Return True
                 End If
@@ -660,7 +655,7 @@ Namespace Streams
 
             While _FreeSpaces.TryAllocate(Length, False, 0, CLng(Length), CandidateOffset)
 
-                If IsRangeSafeForMetadata(CandidateOffset, Length) Then
+                If IsRangeSafeForStorage(CandidateOffset, Length) Then
                     Offset = CandidateOffset
                     Return True
                 End If
