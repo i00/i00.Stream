@@ -59,6 +59,8 @@
     <Reference Include="System.Xml.Linq" />
     <Reference Include="System.Data.DataSetExtensions" />
     <Reference Include="System.Net.Http" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
   </ItemGroup>
   <ItemGroup>
     <Import Include="Microsoft.VisualBasic" />
@@ -113,7 +115,7 @@
     <Compile Include="i00CodeLib\VirtualFileDragDrop.vb" />
     <Compile Include="i00CodeLib\_External\CommandLineParser.vb" />
     <Compile Include="i00CodeLib\_External\MouseNavigationButtonsMessageFilter.vb" />
-    <Compile Include="MemoizedEnumerable.vb" />
+    <Compile Include="i00CodeLib\_External\MemoizedEnumerable.vb" />
     <Compile Include="PeIconReader.vb" />
     <Compile Include="My Project\AssemblyInfo.vb" />
     <Compile Include="My Project\Application.Designer.vb">

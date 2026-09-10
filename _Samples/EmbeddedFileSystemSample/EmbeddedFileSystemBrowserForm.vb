@@ -2,6 +2,7 @@ Imports i00.Streams
 Imports System.ComponentModel
 Imports System.Drawing.Drawing2D
 Imports System.IO
+Imports System.IO.Compression
 Imports System.Threading
 Imports System.Runtime.InteropServices
 Imports System.Text.RegularExpressions
@@ -108,21 +109,199 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Cancel
     End Enum
 
-    ''' <summary>One resolved copy step produced by walking the dropped or picked paths.</summary>
-    Private NotInheritable Class UploadWorkItem
-        Public Sub New(SourcePath As String, RelativeParent As String, Name As String, IsDirectory As Boolean)
+    Private Class FileUploadWorkItem
+        Inherits UploadWorkItem
+
+        Private ReadOnly SourcePath As String
+        Public Sub New(SourcePath As String, RelativeParent As String)
+            MyBase.New(RelativeParent,
+                       IO.Path.GetFileName(SourcePath),
+                       File.GetAttributes(SourcePath).HasFlag(FileAttributes.Directory))
             Me.SourcePath = SourcePath
+        End Sub
+
+        Public Overrides ReadOnly Property LogicalSize As Long
+            Get
+                Static _LogicalSize As Long = SafeFileLength(SourcePath)
+                Return _LogicalSize
+            End Get
+        End Property
+
+        Private Shared Function SafeFileLength(FilePath As String) As Long
+            Try
+                Return New FileInfo(FilePath).Length
+            Catch
+                Return 0
+            End Try
+        End Function
+
+        Public Overrides Function CreateStream() As Stream
+            Return New FileStream(SourcePath, FileMode.Open, FileAccess.Read, FileShare.Read)
+        End Function
+    End Class
+
+    ''' <summary>One resolved copy step produced by walking the dropped or picked paths.</summary>
+    Private MustInherit Class UploadWorkItem
+        Public Sub New(RelativeParent As String, Name As String, IsDirectory As Boolean)
             Me.RelativeParent = RelativeParent
             Me.Name = Name
             Me.IsDirectory = IsDirectory
         End Sub
 
-        ''' <summary>The on-disk file to copy, or Nothing for a directory-create step.</summary>
-        Public ReadOnly Property SourcePath As String
-        ''' <summary>'/'-joined parent directories relative to the upload target, or "" for the target itself.</summary>
+        Public MustOverride ReadOnly Property LogicalSize As Long
+        Public MustOverride Function CreateStream() As Stream
+        ''' <summary>'\'-joined parent directories relative to the upload target, or "" for the target itself.</summary>
         Public ReadOnly Property RelativeParent As String
         Public ReadOnly Property Name As String
         Public ReadOnly Property IsDirectory As Boolean
+    End Class
+
+    ''' <summary>One entry snapshotted from a zip's central directory by <see cref="ReadZipDirectory"/>.</summary>
+    Private NotInheritable Class ZipDirectoryEntry
+        Public Sub New(FullName As String, Length As Long, IsDirectory As Boolean)
+            Me.FullName = FullName
+            Me.Length = Length
+            Me.IsDirectory = IsDirectory
+        End Sub
+
+        ''' <summary>The entry's path within the archive, exactly as stored ('/'-separated, may end in '/').</summary>
+        Public ReadOnly Property FullName As String
+        ''' <summary>Uncompressed size in bytes; 0 for a directory entry.</summary>
+        Public ReadOnly Property Length As Long
+        Public ReadOnly Property IsDirectory As Boolean
+    End Class
+
+    ''' <summary>
+    ''' One upload step sourced from a zip entry. A directory step just carries its target name; a file
+    ''' step remembers its archive path and entry name and reopens the archive in <see cref="CreateStream"/>
+    ''' every time its bytes are needed, so the copy pass and the background size scan never contend
+    ''' over a single archive handle.
+    ''' </summary>
+    Private NotInheritable Class ZipUploadWorkItem
+        Inherits UploadWorkItem
+
+        Private ReadOnly ArchivePath As String
+        Private ReadOnly EntryFullName As String
+        Private ReadOnly _LogicalSize As Long
+
+        ''' <summary>A directory step: create <paramref name="Name"/> under <paramref name="RelativeParent"/>.</summary>
+        Public Sub New(RelativeParent As String, Name As String)
+            MyBase.New(RelativeParent, Name, True)
+        End Sub
+
+        ''' <summary>A file step: copy the entry named <paramref name="EntryFullName"/> out of <paramref name="ArchivePath"/>.</summary>
+        Public Sub New(ArchivePath As String, EntryFullName As String, RelativeParent As String, Name As String, Length As Long)
+            MyBase.New(RelativeParent, Name, False)
+            Me.ArchivePath = ArchivePath
+            Me.EntryFullName = EntryFullName
+            Me._LogicalSize = Length
+        End Sub
+
+        Public Overrides ReadOnly Property LogicalSize As Long
+            Get
+                Return _LogicalSize
+            End Get
+        End Property
+
+        Public Overrides Function CreateStream() As Stream
+            Dim Archive = ZipFile.OpenRead(ArchivePath)
+            Try
+                Dim Entry = Archive.GetEntry(EntryFullName)
+                If Entry Is Nothing Then
+                    Throw New FileNotFoundException($"'{EntryFullName}' is no longer present in '{Path.GetFileName(ArchivePath)}'.")
+                End If
+                Return New ZipEntryReadStream(Archive, Entry.Open(), Entry.Length)
+            Catch
+                Archive.Dispose()
+                Throw
+            End Try
+        End Function
+    End Class
+
+    ''' <summary>
+    ''' Wraps the forward-only, unknown-length stream that <see cref="ZipArchiveEntry.Open"/> returns
+    ''' for a compressed entry so it reports the entry's uncompressed <see cref="Length"/> - which the
+    ''' copy loop reads to size its write buffer - and disposes the owning <see cref="ZipArchive"/> once
+    ''' the copy closes it.
+    ''' </summary>
+    Private NotInheritable Class ZipEntryReadStream
+        Inherits Stream
+
+        Private ReadOnly _Archive As ZipArchive
+        Private ReadOnly _Inner As Stream
+        Private ReadOnly _Length As Long
+        Private _Position As Long
+
+        Public Sub New(Archive As ZipArchive, Inner As Stream, Length As Long)
+            _Archive = Archive
+            _Inner = Inner
+            _Length = Length
+        End Sub
+
+        Public Overrides ReadOnly Property CanRead As Boolean
+            Get
+                Return True
+            End Get
+        End Property
+
+        Public Overrides ReadOnly Property CanSeek As Boolean
+            Get
+                Return False
+            End Get
+        End Property
+
+        Public Overrides ReadOnly Property CanWrite As Boolean
+            Get
+                Return False
+            End Get
+        End Property
+
+        Public Overrides ReadOnly Property Length As Long
+            Get
+                Return _Length
+            End Get
+        End Property
+
+        Public Overrides Property Position As Long
+            Get
+                Return _Position
+            End Get
+            Set(value As Long)
+                Throw New NotSupportedException()
+            End Set
+        End Property
+
+        Public Overrides Function Read(Buffer As Byte(), Offset As Integer, Count As Integer) As Integer
+            Dim BytesRead = _Inner.Read(Buffer, Offset, Count)
+            _Position += BytesRead
+            Return BytesRead
+        End Function
+
+        Public Overrides Sub Flush()
+        End Sub
+
+        Public Overrides Function Seek(Offset As Long, Origin As SeekOrigin) As Long
+            Throw New NotSupportedException()
+        End Function
+
+        Public Overrides Sub SetLength(Value As Long)
+            Throw New NotSupportedException()
+        End Sub
+
+        Public Overrides Sub Write(Buffer As Byte(), Offset As Integer, Count As Integer)
+            Throw New NotSupportedException()
+        End Sub
+
+        Protected Overrides Sub Dispose(disposing As Boolean)
+            Try
+                If disposing Then
+                    _Inner.Dispose()
+                    _Archive.Dispose()
+                End If
+            Finally
+                MyBase.Dispose(disposing)
+            End Try
+        End Sub
     End Class
 
     ''' <summary>
@@ -2455,8 +2634,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Using
     End Sub
 
-    Private Sub UploadPaths(Paths As IEnumerable(Of String), TargetDirectoryAnchorId As Long)
+    Private Sub UploadPaths(Paths As IEnumerable(Of String), TargetDirectoryAnchorId As Long, Optional CopyType As CopyTypes = CopyTypes.Copy)
         Dim RootPaths = Paths.Where(Function(x) String.IsNullOrWhiteSpace(x) = False).ToList()
+        Dim PostSelectionItems As New List(Of String)
         If RootPaths.Count = 0 Then Return
 
         ExecuteLongBlockingActionOnThread(
@@ -2466,7 +2646,17 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 ' The disk walk (EnumerateUploadEntries) only ever runs once no matter how many
                 ' independent passes are made over WorkItems below - the copy and the size scan each
                 ' get their own cursor, but only whichever one is further ahead actually touches disk.
-                Dim WorkItems = MemoizedEnumerable.Create(EnumerateUploadEntries(RootPaths))
+
+                Dim ieWorkItems As IEnumerable(Of UploadWorkItem)
+                Select Case CopyType
+                    Case CopyTypes.ExtractEachToOwnFolder, CopyTypes.Extract
+                        ' Non-zip paths are reported by ReadZipDirectory as they are reached rather than
+                        ' filtered out silently, so a mixed selection does not extract half and drop the rest.
+                        ieWorkItems = EnumerateZipUploadEntries(RootPaths, CopyType = CopyTypes.ExtractEachToOwnFolder)
+                    Case Else
+                        ieWorkItems = EnumerateUploadEntries(RootPaths)
+                End Select
+                Dim WorkItems = MemoizedEnumerable.Create(ieWorkItems)
                 If WorkItems.Any() = False Then Return
 
                 ' The copy starts as soon as the first item is available; the total byte count - the
@@ -2480,7 +2670,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                                 Dim Sum As Long = 0
                                 For Each workItem In WorkItems
                                     Cancellation.Token.ThrowIfCancellationRequested()
-                                    If workItem.IsDirectory = False Then Sum += New FileInfo(workItem.SourcePath).Length
+                                    If workItem.IsDirectory = False Then Sum += workItem.LogicalSize
                                 Next
                                 TotalSize.Publish(Sum)
                             Catch
@@ -2493,7 +2683,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                     Try
                         Dim sw As New Stopwatch
                         sw.Start()
-                        CopyUploadWorkList(WorkItems, TargetDirectoryAnchorId, TotalSize, Report)
+                        CopyUploadWorkList(WorkItems, TargetDirectoryAnchorId, TotalSize, Report, PostSelectionItems, CopyType)
                         sw.Stop()
                         Debug.Print($"Upload time: {sw.Elapsed}")
                     Finally
@@ -2513,7 +2703,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                                           Select(Function(x) New With {.ListViewItem = x,
                                                                        .ContentListEntry = TryCast(x.Tag, EmbeddedFileSystem.ContentListEntry)}).
                                           Where(Function(x) x.ContentListEntry IsNot Nothing)
-        Dim ItemsToSelect = ItemsInFolder.Join(RootPaths,
+        Dim ItemsToSelect = ItemsInFolder.Join(PostSelectionItems,
                                                Function(x) x.ContentListEntry.Name,
                                                Function(y) IO.Path.GetFileName(y),
                                                Function(x, y) x.ListViewItem, StringComparer.OrdinalIgnoreCase).
@@ -2526,6 +2716,67 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     ''' <summary>
+    ''' Lazily walks each zip in <paramref name="RootPaths"/>, yielding a directory-create or file-copy
+    ''' step for every entry so <see cref="CopyUploadWorkList"/> can extract the archive straight into
+    ''' the browser. When <paramref name="EachToOwnFolder"/> is set an archive's entries land under a
+    ''' folder named after the archive; otherwise they merge into the target directory. Each archive's
+    ''' central directory is read once, as the walk reaches it; file bytes are pulled per entry, on
+    ''' demand, so nothing is held open between steps. Entries that try to climb out of the target with
+    ''' a ".." segment are skipped.
+    ''' </summary>
+    Private Shared Iterator Function EnumerateZipUploadEntries(RootPaths As IEnumerable(Of String), EachToOwnFolder As Boolean) As IEnumerable(Of UploadWorkItem)
+        For Each RootPath In RootPaths
+            If File.Exists(RootPath) = False Then Continue For
+
+            Dim ArchiveRoot = String.Empty
+            If EachToOwnFolder Then
+                ArchiveRoot = MakeSafeFileName(Path.GetFileNameWithoutExtension(RootPath))
+                If ArchiveRoot = "." OrElse ArchiveRoot = ".." Then ArchiveRoot = "unnamed"
+            End If
+
+            ' Create the per-archive folder up front so an empty archive still leaves something visible.
+            If ArchiveRoot.Length > 0 Then Yield New ZipUploadWorkItem(String.Empty, ArchiveRoot)
+
+            For Each Entry In ReadZipDirectory(RootPath)
+                ' "a/b/c.txt" or "a\b\c.txt" -> ["a", "b", "c.txt"]; a bare "." segment is just noise.
+                Dim Segments = Entry.FullName.Split({"/"c, "\"c}, StringSplitOptions.RemoveEmptyEntries).
+                                    Where(Function(s) s <> ".").ToArray()
+                If Segments.Length = 0 OrElse Segments.Any(Function(s) s = "..") Then Continue For
+
+                Dim RelativeParent = String.Join("\", Segments.Take(Segments.Length - 1))
+                If ArchiveRoot.Length > 0 Then
+                    RelativeParent = If(RelativeParent.Length = 0, ArchiveRoot, $"{ArchiveRoot}\{RelativeParent}")
+                End If
+                Dim Name = Segments(Segments.Length - 1)
+
+                If Entry.IsDirectory Then
+                    Yield New ZipUploadWorkItem(RelativeParent, Name)
+                Else
+                    Yield New ZipUploadWorkItem(RootPath, Entry.FullName, RelativeParent, Name, Entry.Length)
+                End If
+            Next
+        Next
+    End Function
+
+    ''' <summary>
+    ''' Snapshots an archive's entries with the archive open only for the read, so
+    ''' <see cref="EnumerateZipUploadEntries"/> can yield without holding a file handle across steps.
+    ''' A path that is not a readable zip is surfaced as an <see cref="IOException"/> naming the file.
+    ''' </summary>
+    Private Shared Function ReadZipDirectory(ArchivePath As String) As List(Of ZipDirectoryEntry)
+        Try
+            Using Archive = ZipFile.OpenRead(ArchivePath)
+                Return Archive.Entries.
+                               Select(Function(e) New ZipDirectoryEntry(e.FullName, e.Length,
+                                                                        e.FullName.EndsWith("/") OrElse e.FullName.EndsWith("\"))).
+                               ToList()
+            End Using
+        Catch ex As Exception When TypeOf ex Is InvalidDataException OrElse TypeOf ex Is IOException OrElse TypeOf ex Is NotSupportedException
+            Throw New IOException($"'{Path.GetFileName(ArchivePath)}' could not be read as a zip archive.", ex)
+        End Try
+    End Function
+
+    ''' <summary>
     ''' Lazily walks <paramref name="RootPaths"/>, yielding every directory-create and file-copy step
     ''' one at a time, ordered so a directory always precedes its contents. Nothing is read from disk
     ''' until a consumer actually asks for the next item, so a caller can start acting on the first
@@ -2534,7 +2785,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private Shared Iterator Function EnumerateUploadEntries(RootPaths As IEnumerable(Of String)) As IEnumerable(Of UploadWorkItem)
         For Each RootPath In RootPaths
             If File.Exists(RootPath) Then
-                Yield New UploadWorkItem(RootPath, String.Empty, Path.GetFileName(RootPath), False)
+                Yield New FileUploadWorkItem(RootPath, String.Empty)
             ElseIf Directory.Exists(RootPath) Then
                 For Each WorkItem In EnumerateDirectoryEntries(RootPath, String.Empty, New DirectoryInfo(RootPath).Name)
                     Yield WorkItem
@@ -2544,11 +2795,11 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Function
 
     Private Shared Iterator Function EnumerateDirectoryEntries(DiskPath As String, RelativeParent As String, Name As String) As IEnumerable(Of UploadWorkItem)
-        Yield New UploadWorkItem(Nothing, RelativeParent, Name, True)
-        Dim ChildRelativeParent = If(RelativeParent.Length = 0, Name, $"{RelativeParent}/{Name}")
+        Yield New FileUploadWorkItem(DiskPath, RelativeParent)
+        Dim ChildRelativeParent = If(RelativeParent.Length = 0, Name, $"{RelativeParent}\{Name}")
 
         For Each FilePath In Directory.EnumerateFiles(DiskPath)
-            Yield New UploadWorkItem(FilePath, ChildRelativeParent, Path.GetFileName(FilePath), False)
+            Yield New FileUploadWorkItem(FilePath, ChildRelativeParent)
         Next
         For Each ChildPath In Directory.EnumerateDirectories(DiskPath)
             For Each WorkItem In EnumerateDirectoryEntries(ChildPath, ChildRelativeParent, New DirectoryInfo(ChildPath).Name)
@@ -2558,7 +2809,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Function
 
     Private Sub CopyUploadWorkList(WorkItems As IEnumerable(Of UploadWorkItem), TargetDirectoryAnchorId As Long,
-                                   TotalSize As TotalSizeBox, Report As frmProgress.ProgressReport)
+                                   TotalSize As TotalSizeBox, Report As frmProgress.ProgressReport, PostSelectionItems As List(Of String), Optional CopyType As CopyTypes = CopyTypes.Copy)
         Dim FolderAnchors As New Dictionary(Of String, Long)() From {{String.Empty, TargetDirectoryAnchorId}}
         Dim Resolution As ConflictChoice = ConflictChoice.Cancel
         Dim Resolved As Boolean = False
@@ -2574,9 +2825,24 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 Return DirectoryEntryCache(AnchorId)
             End Function
 
+        ' Every item that is actually written contributes the top-level entry its path starts under -
+        ' the first '\'-separated segment of RelativeParent, or the item itself when it lands directly
+        ' in the target folder - so UploadPaths can reselect exactly what this run produced. A folder
+        ' is recorded even when its own contents are skipped, because other entries beneath it may not
+        ' be; a skipped file records nothing, since it was not copied.
+        Dim SeenRoots As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim RecordRootSelection =
+            Sub(Source As UploadWorkItem)
+                Dim SeparatorIndex = Source.RelativeParent.IndexOf("\"c)
+                Dim RootName = If(Source.RelativeParent.Length = 0, Source.Name,
+                                  If(SeparatorIndex < 0, Source.RelativeParent, Source.RelativeParent.Substring(0, SeparatorIndex)))
+                If SeenRoots.Add(RootName) Then PostSelectionItems.Add(RootName)
+            End Sub
+
         For Each workItem In WorkItems
             If workItem.IsDirectory Then
                 EnsureUploadFolder(workItem.RelativeParent, workItem.Name, TargetDirectoryAnchorId, FolderAnchors)
+                RecordRootSelection(workItem)
                 Continue For
             End If
 
@@ -2608,7 +2874,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                     Case ConflictChoice.Cancel
                         Throw New OperationCanceledException()
                     Case ConflictChoice.Skip, ConflictChoice.SkipAll
-                        CopiedBytes += SafeFileLength(workItem.SourcePath)
+                        CopiedBytes += workItem.LogicalSize
                         ReportUploadProgress(Report, TotalSize, CopiedBytes, workItem.Name, LastReport, False)
                         Continue For
                     Case Else
@@ -2618,7 +2884,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
             If Replace Then _FileSystem.DeleteEntry(ParentAnchor, Existing.Name)
             Dim FileAnchorId = _FileSystem.CreateFile(ParentAnchor, workItem.Name)
-            Using SourceStream = New FileStream(workItem.SourcePath, FileMode.Open, FileAccess.Read, FileShare.Read)
+            Using SourceStream = workItem.CreateStream()
                 ' A bigger write-buffer threshold means far fewer durable (fsync) publishes for a
                 ' large sequential upload - see the comment on FileStreamView.BufferedEndPosition.
                 ' It must also stay at least ChunkSize * ParallelChunkCryptoMinChunks, or a drain
@@ -2649,6 +2915,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 End Using
             End Using
 
+            RecordRootSelection(workItem)
             ReportUploadProgress(Report, TotalSize, CopiedBytes, workItem.Name, LastReport, False)
         Next
     End Sub
@@ -2673,14 +2940,6 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End If
     End Sub
 
-    Private Shared Function SafeFileLength(FilePath As String) As Long
-        Try
-            Return New FileInfo(FilePath).Length
-        Catch
-            Return 0
-        End Try
-    End Function
-
     Private Function EnsureUploadFolderPath(RelativeParent As String, TargetDirectoryAnchorId As Long,
                                             FolderAnchors As Dictionary(Of String, Long)) As Long
         If RelativeParent.Length = 0 Then Return TargetDirectoryAnchorId
@@ -2688,7 +2947,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim CachedAnchor As Long
         If FolderAnchors.TryGetValue(RelativeParent, CachedAnchor) Then Return CachedAnchor
 
-        Dim SeparatorIndex = RelativeParent.LastIndexOf("/"c)
+        Dim SeparatorIndex = RelativeParent.LastIndexOf("\"c)
         Dim GrandParent = If(SeparatorIndex < 0, String.Empty, RelativeParent.Substring(0, SeparatorIndex))
         Dim Name = If(SeparatorIndex < 0, RelativeParent, RelativeParent.Substring(SeparatorIndex + 1))
         Return EnsureUploadFolder(GrandParent, Name, TargetDirectoryAnchorId, FolderAnchors)
@@ -2697,7 +2956,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private Function EnsureUploadFolder(RelativeParent As String, Name As String, TargetDirectoryAnchorId As Long,
                                         FolderAnchors As Dictionary(Of String, Long)) As Long
         Dim ParentAnchor = EnsureUploadFolderPath(RelativeParent, TargetDirectoryAnchorId, FolderAnchors)
-        Dim Key = If(RelativeParent.Length = 0, Name, $"{RelativeParent}/{Name}")
+        Dim Key = If(RelativeParent.Length = 0, Name, $"{RelativeParent}\{Name}")
 
         Dim CachedAnchor As Long
         If FolderAnchors.TryGetValue(Key, CachedAnchor) Then Return CachedAnchor
@@ -2893,7 +3152,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If _SearchActive Then RerunSearch() Else RefreshFileSystemView()
     End Sub
 
+    Dim DroppedMouseButtons As MouseButtons
     Private Sub FileSystemControl_DragEnter(Sender As Object, EventArgs As DragEventArgs) Handles tvFolders.DragEnter, lvFiles.DragEnter
+        DroppedMouseButtons = Control.MouseButtons
         EventArgs.Effect = GetExternalDropEffect(EventArgs.Data, EventArgs.AllowedEffect)
     End Sub
 
@@ -2911,13 +3172,18 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Shared Function GetExternalDropEffect(Data As IDataObject, AllowedEffect As DragDropEffects) As DragDropEffects
+        'TODO: allow move as well as copy?
         If Data Is Nothing OrElse Data.GetDataPresent(DataFormats.FileDrop) = False Then Return DragDropEffects.None
         If AllowedEffect.HasFlag(DragDropEffects.Copy) Then Return DragDropEffects.Copy
         Return DragDropEffects.None
     End Function
 
     Private Sub lvFiles_DragDrop(Sender As Object, EventArgs As DragEventArgs) Handles lvFiles.DragDrop
-        QueueDroppedPathUpload(EventArgs.Data, _CurrentDirectoryAnchorId)
+        If DroppedMouseButtons = MouseButtons.Right Then
+            ShowDropMenu(DirectCast(Sender, Control), EventArgs, _CurrentDirectoryAnchorId)
+        Else
+            QueueDroppedPathUpload(EventArgs.Data, _CurrentDirectoryAnchorId)
+        End If
     End Sub
 
     Private Sub tvFolders_DragDrop(Sender As Object, EventArgs As DragEventArgs) Handles tvFolders.DragDrop
@@ -2926,20 +3192,70 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If TargetNode Is Nothing Then Return
         Dim Info = TryCast(TargetNode.Tag, DirectoryNodeInfo)
         If Info Is Nothing Then Return
-        QueueDroppedPathUpload(EventArgs.Data, Info.AnchorId)
+
+        If DroppedMouseButtons = MouseButtons.Right Then
+            ShowDropMenu(DirectCast(Sender, Control), EventArgs, _CurrentDirectoryAnchorId)
+        Else
+            QueueDroppedPathUpload(EventArgs.Data, Info.AnchorId)
+        End If
+
     End Sub
+
+    Dim DroppedData As IDataObject
+    Dim DroppedAnchorId As Long
+    Private Sub ShowDropMenu(Control As Control, DragEventArgs As DragEventArgs, TargetDirectoryAnchorId As Long)
+        Dim Data = DragEventArgs.Data
+        If Data Is Nothing OrElse Data.GetDataPresent(DataFormats.FileDrop) = False Then Return
+        Dim Paths = TryCast(Data.GetData(DataFormats.FileDrop), String())
+        If Paths Is Nothing OrElse Paths.Length = 0 Then Return
+
+        DroppedData = Data
+        DroppedAnchorId = TargetDirectoryAnchorId
+
+        If Paths.All(Function(x) String.Equals(IO.Path.GetExtension(x), ".zip", StringComparison.OrdinalIgnoreCase)) Then
+            tsiDropExtract.Available = True
+            tsiDropExtractEachToOwnFolder.Available = True
+        Else
+            tsiDropExtract.Available = False
+            tsiDropExtractEachToOwnFolder.Available = False
+        End If
+
+        'TODO: make the menu item bold based on the DropEffect?
+        'show the context menu
+
+        Me.Activate()
+        Dim Point = Control.PointToClient(New Point(DragEventArgs.X, DragEventArgs.Y))
+        DropMenu.Show(Control, Point)
+    End Sub
+
+    Private Sub tsiDropCopy_Click(sender As Object, e As EventArgs) Handles tsiDropCopy.Click
+        QueueDroppedPathUpload(DroppedData, DroppedAnchorId)
+    End Sub
+
+    Private Sub tsiDropExtract_Click(sender As Object, e As EventArgs) Handles tsiDropExtract.Click
+        QueueDroppedPathUpload(DroppedData, DroppedAnchorId, CopyTypes.Extract)
+    End Sub
+
+    Private Sub tsiDropExtractEachToOwnFolder_Click(sender As Object, e As EventArgs) Handles tsiDropExtractEachToOwnFolder.Click
+        QueueDroppedPathUpload(DroppedData, DroppedAnchorId, CopyTypes.ExtractEachToOwnFolder)
+    End Sub
+
+    Private Enum CopyTypes
+        Copy
+        Move
+        Extract
+        ExtractEachToOwnFolder
+    End Enum
 
     ''' <summary>
     ''' Reads the dropped paths and schedules the upload to run once this handler has returned, so the
     ''' drop finishes immediately and the source window (Explorer) is never held while files copy.
     ''' </summary>
-    Private Sub QueueDroppedPathUpload(Data As IDataObject, TargetDirectoryAnchorId As Long)
+    Private Sub QueueDroppedPathUpload(Data As IDataObject, TargetDirectoryAnchorId As Long, Optional CopyType As CopyTypes = CopyTypes.Copy)
         If Data Is Nothing OrElse Data.GetDataPresent(DataFormats.FileDrop) = False Then Return
         Dim Paths = TryCast(Data.GetData(DataFormats.FileDrop), String())
-        If Paths Is Nothing OrElse Paths.Length = 0 Then Return
 
-        Dim DroppedPaths = DirectCast(Paths.Clone(), String())
-        BeginInvoke(Sub() UploadPaths(DroppedPaths, TargetDirectoryAnchorId))
+        BeginInvoke(Sub() UploadPaths(Paths, TargetDirectoryAnchorId, CopyType))
     End Sub
 
     ' On right-click the menu is shown explicitly (a ContextMenuStrip that opens itself can be beaten by a
@@ -3465,82 +3781,91 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         SetPassword()
     End Sub
 
-    Private Sub tsiScan_Click(sender As Object, e As EventArgs) Handles tsiScan.Click
+    Private Sub tsiScanQuick_Click(sender As Object, e As EventArgs) Handles tsiScanQuick.Click
+        Scan(True)
+    End Sub
+
+    Private Sub tsiScanFull_Click(sender As Object, e As EventArgs) Handles tsiScanExtended.Click
+        Scan()
+    End Sub
+
+    Private Sub Scan(Optional Quick As Boolean = False)
         Dim Mutated = True '< because canceling the thread could mutate the file system
         Using frmProgress As New frmProgress(
                 Sub(Parameter, ProgressReport)
-                    ProgressReport.SetText("Validating...")
-
-                    Dim Report As ChunkedStream.ValidationReport
-                    Try
-                        Report = FileSystem.ChunkedStream.Validate(
-                            Sub(ProcessedUnits, TotalUnits, UnitType, CancellationToken)
-                                Dim Progress = If(TotalUnits = 0, 1.0R, ProcessedUnits / CDbl(TotalUnits))
-                                ProgressReport.SetText($"Validating ({Progress:P0})...")
-                            End Sub)
-                    Catch ex As Exception When ex.getThreadAbortException IsNot Nothing
-                        Return
-                    Catch ex As Exception
-                        MsgBox(ProgressReport.frmProgress, $"Validation could not run.{Environment.NewLine}{ex.GetType.Name}: {ex.Message}", MsgBoxStyle.Critical)
-                        Return
-                    End Try
-
                     Dim Critical = False
                     Dim ErrorStates As New Dictionary(Of String, List(Of String))
                     Dim AddErrorStates = Sub(Description As String, State As String)
                                              If ErrorStates.ContainsKey(Description) = False Then ErrorStates(Description) = New List(Of String)
                                              ErrorStates(Description).Add(State)
                                          End Sub
-
                     Try
 
-                        If Report.HasErrors Then
-                            Critical = Report.Problems.Any(Function(x) x.RepairIsLossy)
+                        If Quick = False Then
+                            ProgressReport.SetText("Validating...")
 
-                            ProgressReport.SetText("Marking affected files...")
-                            FileSystem.Mark(Report)
+                            Dim Report As ChunkedStream.ValidationReport
+                            Try
+                                Report = FileSystem.ChunkedStream.Validate(
+                                    Sub(ProcessedUnits, TotalUnits, UnitType, CancellationToken)
+                                        Dim Progress = If(TotalUnits = 0, 1.0R, ProcessedUnits / CDbl(TotalUnits))
+                                        ProgressReport.SetText($"Validating ({Progress:P0})...")
+                                    End Sub)
+                            Catch ex As Exception When ex.getThreadAbortException IsNot Nothing
+                                Return
+                            Catch ex As Exception
+                                MsgBox(ProgressReport.frmProgress, $"Validation could not run.{Environment.NewLine}{ex.GetType.Name}: {ex.Message}", MsgBoxStyle.Critical)
+                                Return
+                            End Try
 
-                            For Each problem In Report.Problems
-                                AddErrorStates("File validation failed", problem.Message)
-                            Next
+                            If Report.HasErrors Then
+                                Critical = Report.Problems.Any(Function(x) x.RepairIsLossy)
 
-                            ProgressReport.SetText("Repairing...")
-                            Dim Outcome = Report.Repair(ChunkedStream.RepairScope.IncludeDataLoss)
+                                ProgressReport.SetText("Marking affected files...")
+                                FileSystem.Mark(Report)
 
-                            AddErrorStates("Initial repair outcome", $"Repaired: {Outcome.Repaired.Count}")
-                            AddErrorStates("Initial repair outcome", $"Skipped: {Outcome.Skipped.Count}")
-                            AddErrorStates("Initial repair outcome", $"Corrupted data zeroed: {Outcome.BytesZeroed.FormatFileSizeFromBytes()}")
+                                For Each problem In Report.Problems
+                                    AddErrorStates("File validation failed", problem.Message)
+                                Next
 
-                            If FileSystem.ChunkedStream.Validate().HasErrors Then
-                                AddErrorStates("Initial repair outcome", "Residual errors found, a second check may be needed")
+                                ProgressReport.SetText("Repairing...")
+                                Dim Outcome = Report.Repair(ChunkedStream.RepairScope.IncludeDataLoss)
+
+                                AddErrorStates("Initial repair outcome", $"Repaired: {Outcome.Repaired.Count}")
+                                AddErrorStates("Initial repair outcome", $"Skipped: {Outcome.Skipped.Count}")
+                                AddErrorStates("Initial repair outcome", $"Corrupted data zeroed: {Outcome.BytesZeroed.FormatFileSizeFromBytes()}")
+
+                                If FileSystem.ChunkedStream.Validate().HasErrors Then
+                                    AddErrorStates("Initial repair outcome", "Residual errors found, a second check may be needed")
+                                End If
                             End If
                         End If
 
                         ProgressReport.SetText("Recovering unreferenced records...")
-                        FileSystem.RecoverPendingFiles(
-                            Function(x)
-                                Dim IsFile = {EmbeddedFileSystem.EntryTypes.File, EmbeddedFileSystem.EntryTypes.CorruptFile, EmbeddedFileSystem.EntryTypes.PendingFile}.Contains(x.State)
-                                If x.Conditions.HasFlag(EmbeddedFileSystem.RecoveryConditions.CorruptData) Then
-                                    If IsFile Then
-                                        Critical = True
-                                        AddErrorStates($"Corrupt files recovered", x.Path)
-                                        Return EmbeddedFileSystem.PendingFileRecoveryActions.Finalize
-                                    Else
-                                        Critical = True
-                                        AddErrorStates("Corrupt directories removed", x.Path)
-                                        Return EmbeddedFileSystem.PendingFileRecoveryActions.Remove
-                                    End If
-                                ElseIf x.Conditions.HasFlag(EmbeddedFileSystem.RecoveryConditions.Pending) Then
-                                    Critical = True
-                                    AddErrorStates("Half copied files removed", x.Path)
-                                    Return EmbeddedFileSystem.PendingFileRecoveryActions.Remove
-                                ElseIf x.Conditions.HasFlag(EmbeddedFileSystem.RecoveryConditions.Orphaned) Then
-                                    Critical = True
-                                    AddErrorStates($"Orphaned {If(IsFile, "files", "directories")} recovered", x.Path)
-                                    Return EmbeddedFileSystem.PendingFileRecoveryActions.Finalize
-                                End If
-                                Return EmbeddedFileSystem.PendingFileRecoveryActions.None
-                            End Function)
+                        FileSystem.RecoverPendingFiles(Selector:=New Func(Of EmbeddedFileSystem.PendingFileRecoveryCandidate, EmbeddedFileSystem.PendingFileRecoveryActions)(
+                                                       Function(x)
+                                                           Dim IsFile = {EmbeddedFileSystem.EntryTypes.File, EmbeddedFileSystem.EntryTypes.CorruptFile, EmbeddedFileSystem.EntryTypes.PendingFile}.Contains(x.State)
+                                                           If x.Conditions.HasFlag(EmbeddedFileSystem.RecoveryConditions.CorruptData) Then
+                                                               If IsFile Then
+                                                                   Critical = True
+                                                                   AddErrorStates($"Corrupt files recovered", x.Path)
+                                                                   Return EmbeddedFileSystem.PendingFileRecoveryActions.Finalize
+                                                               Else
+                                                                   Critical = True
+                                                                   AddErrorStates("Corrupt directories removed", x.Path)
+                                                                   Return EmbeddedFileSystem.PendingFileRecoveryActions.Remove
+                                                               End If
+                                                           ElseIf x.Conditions.HasFlag(EmbeddedFileSystem.RecoveryConditions.Pending) Then
+                                                               Critical = True
+                                                               AddErrorStates("Half copied files removed", x.Path)
+                                                               Return EmbeddedFileSystem.PendingFileRecoveryActions.Remove
+                                                           ElseIf x.Conditions.HasFlag(EmbeddedFileSystem.RecoveryConditions.Orphaned) Then
+                                                               Critical = True
+                                                               AddErrorStates($"Orphaned {If(IsFile, "files", "directories")} recovered", x.Path)
+                                                               Return EmbeddedFileSystem.PendingFileRecoveryActions.Finalize
+                                                           End If
+                                                           Return EmbeddedFileSystem.PendingFileRecoveryActions.None
+                                                       End Function))
                     Catch ex As Exception When ex.getThreadAbortException IsNot Nothing
                         Return
                     Catch ex As Exception
@@ -3551,15 +3876,16 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                     End Try
                     If ErrorStates.Any = False Then
                         Mutated = False
-                        MsgBox(ProgressReport.frmProgress, "No problems found.", MsgBoxStyle.Information)
+                        MsgBox(ProgressReport.frmProgress, "No issues found.", MsgBoxStyle.Information)
                     Else
                         MsgBox(ProgressReport.frmProgress,
-                            $"Problems were found while scanning:{Environment.NewLine}{String.Join(Environment.NewLine, ErrorStates.Select(Function(x) $"{x.Key}{Environment.NewLine}{String.Join(Environment.NewLine, x.Value.Select(Function(y) $"    • {y}"))}"))}",
+                            $"Issues were found while scanning:{Environment.NewLine}{String.Join(Environment.NewLine, ErrorStates.Select(Function(x) $"{x.Key}{Environment.NewLine}{String.Join(Environment.NewLine, x.Value.Select(Function(y) $"    • {y}"))}"))}",
                             If(Critical, MsgBoxStyle.Critical, MsgBoxStyle.Exclamation))
                     End If
 
                 End Sub, Nothing)
 
+            frmProgress.Text = $"{If(Quick, "Quick", "Extended")} Scan"
             frmProgress.ShowInTaskbar = True
             frmProgress.ShowDialog(Me)
             frmProgress.Text = "Scanning"
@@ -3569,7 +3895,6 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If Mutated Then
             OnMutatedFileSystem()
         End If
-
     End Sub
 
     Private Sub tsiFragmentation_Click(sender As Object, e As EventArgs) Handles tsiFragmentation.Click
