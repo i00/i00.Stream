@@ -46,8 +46,8 @@ true byte count. Recover the real length from the anchor geometry
 ## C2 follow-ups (fault flag shipped; these tighten it)
 
 - **C2-c — dedup.** The `Try … Catch : _Faulted = True : Throw` block is copy-pasted into
-  ~13 methods. A zero-alloc `FaultScope` value type used with `Using` (like `StateLockScope`,
-  as a struct) removes the duplication.
+  ~14 methods (now incl. `PersistPagedMetadataAsync`). A zero-alloc `FaultScope` value type
+  used with `Using` (like `StateLockScope`, as a struct) removes the duplication.
 
 ---
 
@@ -56,15 +56,34 @@ true byte count. Recover the real length from the anchor geometry
 - **a — `Publish()` is sticky.** Once Published, closing the scope *flushes* trailing edits
   rather than rolling them back. Reasonable, but the XML doc reads as if any un-Published
   edit rolls back. Tighten the wording.
-- **b — `Flush()` inside a scope commits a partial batch** (publishes + re-baselines) so the
-  batch stops being all-or-nothing. Consider making `Flush()` a no-op inside a scope, or make
-  the doc blunt.
-- **c — `EndDeferPublish`'s `HasUnpublishedWork` gate** (dirty pages only) skips the rollback
-  path — and so doesn't restore `_FreeSpaces` / `_NextAnchorId` — when no page is dirty.
-  Correct only while "no dirty pages ⇒ nothing else changed" holds. Add a comment or a cheap
-  Debug assertion.
-- **e — snapshot cost.** `DeferPublish()` deep-copies `_Extents` + `_PhysicalRecords`, same
-  as `CreateCheckpoint()`. Doc note: worth it for 3+ ops.
+- **b — `Flush()` inside a scope commits a partial batch** so the batch stops being
+  all-or-nothing. Consider making `Flush()` a no-op inside a scope, or make the doc blunt.
+- **c — done (2026-09-10).** Rollback is now `PerformImageReload` regardless of the dirty
+  set (any fault, or no Publish() call, reloads); the gate is only the clean-Publish fast
+  path. Forward-only id allocators + `BuildFreeSpaceMapCore` re-applied after the reload.
+  See [[torn-physical-record-index]] and DONE.
+- **e — done (2026-09-10).** The `_DeferPublishState` / `CheckpointState` deep-copy snapshot
+  was removed from the DeferPublish path — rollback reloads from disk instead.
+
+### torn physical-record index — residual
+The publish self-check (`AssertPhysicalRecordIndexConsistent`) now *contains* a torn
+`_PhysicalRecordIdsByPage` ⇄ `_PhysicalRecordOrdinals` (faults instead of serialising it),
+and Open salvages an already-torn file. The underlying bug — how an interrupted
+`MovePhysicalRecordOrdinal` / `CompactPhysicalRecordOrdinalsAfterRemoval` produces the
+duplicate in the first place — was not root-caused; if the self-check ever fires without a
+thread-abort in play, that's a real compaction logic bug to hunt.
+
+Follow-ups on the 2026-09-10 recovery work:
+- **Eager salvage write-on-open.** A tolerant (salvage) open of a writable stream now
+  writes the cleaned table straight back inside `OpenCore`
+  (`PersistSalvagedPhysicalRecordTable`). Opening a damaged file in a *read-only tool*
+  won't (it's `CanWrite`-gated), but opening it in anything writable silently rewrites it.
+  If that's surprising, add `Options.PersistStartupRepairs` (default True) to opt out.
+- **Flat forwarders.** `RecoveryStateAtOpen` / `AutoRecoveryState` / `AutoRecoveryException`
+  / `AutoRepairs` are now one-line forwarders to `StartupRecovery.*`. Drop them once the
+  ~26 test call sites are migrated.
+- **`AutoRecoveryStates` enum name** now reads oddly next to `StartupRecovery.JournalReplay`
+  — consider `JournalReplayStates` (churns 6 `ChunkedStream.AutoRecoveryStates.*` sites).
 
 ---
 

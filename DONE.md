@@ -6,6 +6,84 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ## 2026-09-10
 
+### Torn physical-record index could be persisted, bricking the reopen — DONE
+`_Samples/EmbeddedFileSystemSample/bin/Debug/Test.efs` became unopenable
+(`InvalidDataException "Loaded physical-record count does not match metadata root."` from
+`ReadPhysicalRecordPages`) after cancelling file copies mid-operation. The sample's
+`frmProgress` cancels with `thread.Abort()`; a `ThreadAbortException` between the two halves
+of a `MovePhysicalRecordOrdinal` (or inside `CompactPhysicalRecordOrdinalsAfterRemoval`)
+left `_PhysicalRecordIdsByPage` disagreeing with `_PhysicalRecordOrdinals` — a record filed
+onto two pages, another onto none. Because the metadata-publish spine had no
+`Catch: _Faulted=True` guard (every public mutator has one) and `EndDeferPublish`'s
+dirty-pages-only gate could skip the rollback, that torn index was serialised onto both
+header generations. On reopen the per-id `Dictionary` collapsed the duplicates and the count
+check threw, with no clean generation to fall back to.
+
+Fix (branch Test2):
+- **Contain.** `AssertPhysicalRecordIndexConsistent()` (`Extents.vb`) runs at the top of
+  every `PersistPagedMetadataAsync`, and its whole body is now wrapped in
+  `Try … Catch: _Faulted=True: Throw`. A torn index (id on the wrong page or two pages, a
+  page/ordinal/record count mismatch) throws *before any byte is written*, so the last
+  durably published generation stays intact and openable. O(records) per publish.
+- **Recover in place.** `EndDeferPublish` now rolls back by `PerformImageReload()` — reload
+  the last durable generation straight from the backing store — instead of
+  `RestoreCheckpointState`; an in-memory restore cannot be trusted after a killed thread.
+  The `_DeferPublishState` / `CheckpointState` snapshot is gone from the DeferPublish path.
+  After the reload it re-applies the forward-only `_NextAnchorId` / `_NextPhysicalRecordId`
+  (`Math.Max` with the pre-rollback values, so an id handed out in the abandoned window is
+  never reissued) and rebuilds `_FreeSpaces` with `BuildFreeSpaceMapCore()` (Open only
+  seeds it from the persisted hole directory, which the window's non-durable publishes may
+  not have written). This also closes DeferPublish follow-ups **c** and **e**.
+- **Salvage an already-torn file.** `ReadPhysicalRecordPages` throws a new
+  `InconsistentPhysicalRecordPagesException` (`Inherits IOException`) for a duplicate id or
+  a short count. `OpenCore` tries every header copy strictly first; only if they *all* fail
+  that exact way does it retry newest-first with tolerance — keep the first copy of each
+  duplicate, record an `AutoRepair`, and run `DropUnrecoverablePhysicalRecords`
+  (`ReadPagedMetadata`) to drop records past the backing stream or overlapping another
+  live record's span. A tolerant open of a *writable* stream then eagerly writes the
+  cleaned table straight back (`PersistSalvagedPhysicalRecordTable` — `MarkAllMetadataPages­
+  Dirty` + a durable publish), so every later open is an ordinary strict open with no
+  AutoRepairs instead of repeating the retry. Best-effort: a failed write-back leaves the
+  correct in-memory image and the next open just retries. The extents that reference
+  records the corruption genuinely lost stay as `MissingPhysicalRecord` in `Validate()`
+  until an explicit `Repair(RepairScope.IncludeDataLoss)` / the sample's Extended Scan —
+  auto-zeroing data on open would defeat the point of `RepairScope`.
+
+Verified on a copy of the real Test.efs: opens with 2 AutoRepairs, `EFS.Mark` flags 3
+entries, `Repair(IncludeDataLoss)` → 13 repaired / 6.9 KB zeroed, re-validate clean,
+`RecoverPendingFiles` re-homes 3, reopen fully clean (one casualty: the `Dune 2` directory
+→ `CorruptDirectory`). New tests
+`Recovery.TornPhysicalRecordIndexIsRefusedByThePublishAndTheFileStaysOpenable` and
+`Recovery.PhysicalRecordPagesWithACrossPageDuplicateOpenTolerantlyAndRepair`, plus two
+`Debug_*` helpers in `Unit Test Helpers.vb`. 327/327.
+
+The sample still uses `Thread.Abort`; the library is now robust to it regardless — worst
+case is a faulted stream, and `Autoexec.vb` already sets `AutoRecoverOnFault = True` so the
+next call reloads.
+
+### `ChunkedStream.StartupRecovery` — grouped open-time diagnostics — DONE
+The open-time recovery state was spread across four flat properties (`RecoveryStateAtOpen`,
+`AutoRecoveryState`, `AutoRecoveryException`, `AutoRepairs`) with no single "was this file
+damaged?" signal — so `AutoRecoveryState = NotRequired` on a file that clearly needed
+salvage (the journal only covers *protected operations*; a `DeferPublish` window writes
+none). New `Public ReadOnly Property StartupRecovery As StartupRecoveryReport` groups them:
+`.JournalStateAtOpen` / `.JournalReplay` / `.RecoveryException` / `.Repairs` /
+`.RepairsApplied` / `.RepairsPersisted` (was the salvage written back) /
+`.UnrecoverableExtentCount` (extents that reference physical records the corruption
+destroyed — counted in `OpenFromHeaderCandidate`), plus the rollups `.NeedsScan`,
+`.IsClean`, `.State` (`StartupRecoveryOutcome`: `Clean` / `RepairsApplied` /
+`UnrecoverableData` / `JournalRecovered` / `RecoveryFailed`) and a ready-made `.Summary`
+string. `.NeedsScan` stays True after a structural salvage has been persisted clean if
+`UnrecoverableExtentCount > 0`, so the "run a scan" prompt survives the eager write-back.
+The four flat properties stay as thin forwarders (26 call sites).
+`PersistSalvagedPhysicalRecordTable` sets `_StartupSalvagePersisted`; `AdoptLoadedImage`
+carries all the startup fields across a fault reload.
+
+Sample: `EmbeddedFileSystemBrowserForm_Load` checks `StartupRecovery.NeedsScan` and, if set,
+shows `StartupRecovery.Summary` once the window is up and offers to run the Extended Scan
+there and then — Info style for a clean repair, Exclamation when data was actually lost
+(`UnrecoverableData` / `RecoveryFailed`).
+
 ### `Validate()` buffered every live physical record into memory at once — DONE
 `Validate()` captured its diagnostics snapshot under the state lock and, in the same pass,
 read the full bytes of *every* live physical record into `DiagnosticsSnapshot.StoredRecords`

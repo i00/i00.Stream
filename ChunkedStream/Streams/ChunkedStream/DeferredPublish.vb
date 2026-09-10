@@ -9,24 +9,27 @@
 ' Design
 '   - DeferPublish returns a scope. Scopes are reference-counted, not stacked, so
 '     independent callers may hold one at the same time and dispose them in any
-'     order. Only the outermost scope owns the publish and the rollback baseline.
-'   - The outermost scope captures a CheckpointState snapshot when it opens.
-'   - Scope.Publish() persists the accumulated metadata durably and re-baselines the
-'     snapshot. It acts only at the outermost level; a nested Publish() is ignored,
-'     so if any operation in the batch throws before the outermost Publish() the
-'     whole batch is rolled back.
-'   - Disposing the outermost scope WITHOUT a preceding Publish() rolls the metadata
-'     tables back to the snapshot (RestoreCheckpointState), truncating any physical
-'     records written in the window and leaving the stream usable - it is NOT
-'     faulted. Disposing it after a clean Publish() does nothing.
+'     order. Only the outermost scope owns the publish and the rollback.
+'   - Scope.Publish() persists the accumulated metadata durably. It acts only at the
+'     outermost level; a nested Publish() is ignored, so if any operation in the batch
+'     throws before the outermost Publish() the whole batch is rolled back.
+'   - Disposing the outermost scope WITHOUT a preceding Publish() - or after any fault
+'     in the window or its publish - rolls back by reloading the last durably published
+'     generation straight from the backing store (PerformImageReload), NOT by restoring
+'     an in-memory snapshot. The on-disk generation is atomic by construction (dual
+'     header + append-only), so the reloaded image is always self-consistent even when
+'     the in-memory tables were left torn by a killed thread or an aborted publish. Any
+'     physical records written in the window become orphans. If the reload cannot
+'     produce a consistent image the stream stays faulted. Disposing after a clean
+'     Publish() with no trailing edit does nothing.
 '   - Physical records are written to the backing stream as operations run; only the
 '     index / physical-record table / header publish is held back.
 '
 ' Difference from a checkpoint
 '   - No per-operation recovery-state header write.
-'   - The published close path does no work: it does not run RestoreCheckpointState
-'     and does not mark every metadata page dirty. This is what keeps a burst of
-'     small operations from bloating and fragmenting the file.
+'   - The published close path does no work: it does not reload and does not mark every
+'     metadata page dirty. This is what keeps a burst of small operations from bloating
+'     and fragmenting the file.
 '   - A crash during a checkpoint truncates back to the recovery length on reopen; a
 '     crash during a DeferPublish window does not, so its records are left as orphans.
 '
@@ -59,7 +62,6 @@ Namespace Streams
     Partial Class ChunkedStream
 
         Private _DeferPublishDepth As Integer
-        Private _DeferPublishState As CheckpointState
         Private _DeferPublishRequested As Boolean
 
         '
@@ -82,21 +84,26 @@ Namespace Streams
         ''' changes back and leaves the stream usable.
         ''' </summary>
         ''' <remarks>
-        ''' The outermost scope keeps an in-memory rollback snapshot but, unlike a
-        ''' checkpoint, writes no recovery-state header and does no work on a published
-        ''' close. Physical records are written to the backing stream as operations run,
-        ''' so a crash before <see cref="DeferPublishScope.Publish" /> reopens the stream
-        ''' at the last published generation and leaves the window's records as orphans
-        ''' for <see cref="Defragment" /> or a later edit to reclaim.
+        ''' Unlike a checkpoint the scope writes no recovery-state header and does no work
+        ''' on a published close. Physical records are written to the backing stream as
+        ''' operations run, so a crash before <see cref="DeferPublishScope.Publish" />
+        ''' reopens the stream at the last published generation and leaves the window's
+        ''' records as orphans for <see cref="Defragment" /> or a later edit to reclaim.
+        '''
+        ''' Rolling the scope back (disposing without a preceding Publish(), or any fault in
+        ''' the window) reloads the last durably published generation from the backing store
+        ''' rather than restoring an in-memory snapshot, so an interruption that left the
+        ''' in-memory tables torn - a killed thread, an aborted publish - still recovers to a
+        ''' self-consistent state.
         '''
         ''' Scopes are reference-counted rather than stacked. Only the outermost scope
         ''' publishes or rolls back; a nested <see cref="DeferPublishScope.Publish" /> is
         ''' ignored, so if any operation in the batch throws before the outermost
         ''' Publish() the whole batch is rolled back.
         '''
-        ''' <see cref="Flush" /> publishes the pending metadata and re-baselines the
-        ''' rollback snapshot without ending the suspension. <see cref="Defragment" />
-        ''' and ApplyOptions cannot run while a scope is open.
+        ''' <see cref="Flush" /> publishes the pending metadata without ending the
+        ''' suspension. <see cref="Defragment" /> and ApplyOptions cannot run while a scope
+        ''' is open.
         ''' </remarks>
         Public Function DeferPublish() As DeferPublishScope
 
@@ -106,8 +113,6 @@ Namespace Streams
                 ThrowIfFaulted()
 
                 If _DeferPublishDepth = 0 Then
-                    _DeferPublishState = New CheckpointState()
-                    _DeferPublishState.Capture(Me)
                     _DeferPublishRequested = False
                 End If
 
@@ -153,7 +158,6 @@ Namespace Streams
 
                 If HasOpenCheckpoint = False AndAlso _Faulted = False AndAlso BaseStream.CanWrite Then
                     PersistIndexAndHeader(_IndexOffset, True)
-                    _DeferPublishState.Capture(Me)
                 End If
 
             End Using
@@ -169,31 +173,81 @@ Namespace Streams
                 _DeferPublishDepth -= 1
                 If _DeferPublishDepth > 0 Then Return
 
-                Dim State = _DeferPublishState
                 Dim Requested = _DeferPublishRequested
-                _DeferPublishState = Nothing
                 _DeferPublishRequested = False
 
-                If State Is Nothing Then Return
                 If _Disposed Then Return
                 If BaseStream Is Nothing OrElse BaseStream.CanWrite = False Then Return
                 If HasOpenCheckpoint Then Return
 
-                '
-                ' Nothing to do unless the window left the in-memory metadata ahead of
-                ' the last durable publish. After a clean Publish() with no later edit
-                ' this is the common path, and it must not touch the metadata pages.
-                '
-                Dim HasUnpublishedWork = _Faulted OrElse
-                                         _DirtyExtentPages.Count > 0 OrElse
-                                         _DirtyPhysicalRecordPages.Count > 0
+                Dim DirtyWork = _DirtyExtentPages.Count > 0 OrElse
+                                _DirtyPhysicalRecordPages.Count > 0
 
-                If HasUnpublishedWork = False Then Return
+                '
+                ' Nothing happened, or a clean Publish() already flushed everything and no
+                ' later edit dirtied a page. The common path - it must not touch the
+                ' metadata pages or the backing store.
+                '
+                If _Faulted = False AndAlso DirtyWork = False Then Return
 
                 If Requested AndAlso _Faulted = False Then
-                    PersistIndexAndHeader(_IndexOffset, True)
-                Else
-                    RestoreCheckpointState(State)
+
+                    '
+                    ' Publish() was called and a trailing edit (after a sticky Publish)
+                    ' still needs persisting. A failure here faults and drops through to
+                    ' the reload below.
+                    '
+                    Try
+                        PersistIndexAndHeader(_IndexOffset, True)
+                    Catch
+                        _Faulted = True
+                    End Try
+
+                    If _Faulted = False Then Return
+
+                End If
+
+                '
+                ' Rollback intent, or a fault anywhere in the window or its publish. Do NOT
+                ' trust the in-memory image - an interruption (a killed thread, an aborted
+                ' publish) can leave the metadata tables torn in ways an in-memory restore
+                ' cannot reliably undo. Reload the last durably published generation straight
+                ' from the backing store; it is atomic by construction (dual header +
+                ' append-only). Physical records written in this window become orphans,
+                ' reclaimed by Defragment or the unreferenced-record sweep - the documented
+                ' DeferPublish crash contract. If the reload cannot produce a consistent
+                ' image the stream stays faulted and the next operation (or
+                ' AutoRecoverOnFault) retries.
+                '
+                Dim SavedNextAnchorId = _NextAnchorId
+                Dim SavedNextPhysicalRecordId = _NextPhysicalRecordId
+
+                Try
+                    PerformImageReload()
+                Catch
+                    _Faulted = True
+                End Try
+
+                If _Faulted = False Then
+
+                    '
+                    ' The id allocators only move forward. An id handed out inside the
+                    ' abandoned window must never be reissued - an anchor id is a stable
+                    ' external handle - so keep the higher of the reloaded and pre-rollback
+                    ' values; the reload otherwise winds them back to the on-disk generation.
+                    '
+                    _NextAnchorId = Math.Max(_NextAnchorId, SavedNextAnchorId)
+                    _NextPhysicalRecordId = Math.Max(_NextPhysicalRecordId, SavedNextPhysicalRecordId)
+
+                    '
+                    ' Open only seeds _FreeSpaces from the persisted hole directory, which the
+                    ' non-durable publishes in this window's run-up may not have written. Rebuild
+                    ' it authoritatively from the reloaded live layout so a hole matured before
+                    ' the scope opened is immediately reusable again, as the in-memory rollback
+                    ' this replaced left it.
+                    '
+                    BuildFreeSpaceMapCore()
+
                 End If
 
             End Using

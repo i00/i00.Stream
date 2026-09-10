@@ -1252,6 +1252,150 @@ Namespace Tests
 
             End Sub
 
+            ' ================================================================================
+            ' Torn physical-record index - containment and salvage
+            ' ================================================================================
+
+            ''' <summary>
+            ''' A physical-record page index left torn in memory (one record filed onto two
+            ''' pages - the state an interrupted MovePhysicalRecordOrdinal leaves) must be
+            ''' refused by the next metadata publish, before a byte is written, and fault the
+            ''' stream. The backing store keeps the last good generation and reopens clean.
+            ''' Without this guard the torn index serialises and bricks the reopen with
+            ''' "Loaded physical-record count does not match metadata root".
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub TornPhysicalRecordIndexIsRefusedByThePublishAndTheFileStaysOpenable()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 256,
+                        .IndexPageEntryCount = 4,
+                        .IndexDirectoryEntryCount = 4
+                    }
+
+                    Dim Expected = GenerateRandomData(Options.ChunkSize * 6, 51001)
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, Expected)
+                        Cs.Flush()
+                        Cs.Validate().ThrowIfErrors()
+
+                        AssertTrue(Cs.Debug_GetPhysicalRecordCount() >= 5,
+                                   "Test needs the records to span at least two physical-record pages.")
+
+                        Cs.Debug_DuplicateFirstPhysicalRecordOntoTheNextPage()
+
+                        AssertThrows(Of InvalidDataException)(
+                            Sub() Cs.Write(Cs.Length, New Byte(0) {}),
+                            "The publish should have refused the torn physical-record index.")
+
+                        AssertThrows(Of InvalidOperationException)(
+                            Sub() Cs.Write(0, New Byte(0) {}),
+                            "Refusing the torn index should have faulted the stream.")
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                        AssertEqual(0, Reopened.AutoRepairs.Count,
+                                    "The torn index must never have reached disk, so the reopen is clean.")
+
+                        Reopened.Validate().ThrowIfErrors()
+
+                        AssertBytesEqual(Expected, Reopened.ToArray(),
+                                         "The last good generation's data did not survive.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' A file whose only header generation already carries a torn physical-record
+            ''' index - one record on two pages, another gone - still opens: Open retries
+            ''' tolerating the inconsistency, keeps the first copy of the duplicate, reports
+            ''' the shortfall as an <see cref="ChunkedStream.AutoRepair" />, and writes the
+            ''' cleaned table straight back so the *next* open is an ordinary strict open with
+            ''' no repairs. The records that were genuinely lost still surface as
+            ''' MissingPhysicalRecord in Validate() until an explicit data-loss Repair().
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub PhysicalRecordPagesWithACrossPageDuplicateOpenTolerantlyAndRepair()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 256,
+                        .IndexPageEntryCount = 4,
+                        .IndexDirectoryEntryCount = 4
+                    }
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, GenerateRandomData(Options.ChunkSize * 6, 52050))
+                        Cs.Flush()
+
+                        AssertTrue(Cs.Debug_GetPhysicalRecordCount() >= 5,
+                                   "Test needs the records to span at least two physical-record pages.")
+
+                        ' Plant the torn index straight onto the persisted pages, MACs and all.
+                        Cs.Debug_CorruptPersistedPhysicalRecordPagesWithCrossPageDuplicate()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                        Dim Startup = Reopened.StartupRecovery
+
+                        AssertTrue(Startup.NeedsScan, "A tolerant open needs attention.")
+                        AssertEqual(ChunkedStream.StartupRecoveryOutcome.UnrecoverableData, Startup.State,
+                                    "A record was lost, so the startup state is UnrecoverableData.")
+                        AssertTrue(Startup.RepairsApplied AndAlso Startup.RepairsPersisted,
+                                   "The salvaged table should have been written straight back.")
+                        AssertTrue(Startup.UnrecoverableExtentCount > 0, "The lost record's extents should be counted.")
+                        AssertTrue(Startup.Repairs.Any(Function(repair) repair.Field = "PhysicalRecordCount"),
+                                   "The first open should record a PhysicalRecordCount auto-repair.")
+                        AssertTrue(Startup.Summary.Length > 0, "A non-clean startup should have a summary.")
+
+                        AssertTrue(Reopened.Validate().Problems.Any(Function(problem) problem.Kind = ChunkedStream.ValidationProblemKind.MissingPhysicalRecord),
+                                   "The lost record's extents should report as MissingPhysicalRecord.")
+
+                    End Using
+
+                    Using Second = ChunkedStream.Open(Ms, Options)
+
+                        AssertEqual(0, Second.AutoRepairs.Count,
+                                    "The tolerant open wrote the cleaned table back, so the strict open finds no repairs.")
+                        AssertEqual(ChunkedStream.StartupRecoveryOutcome.UnrecoverableData, Second.StartupRecovery.State,
+                                    "The lost data still needs a scan even after the structural salvage persisted.")
+                        AssertTrue(Second.StartupRecovery.NeedsScan, "Still needs a scan.")
+
+                        Dim Report = Second.Validate()
+
+                        AssertTrue(Report.Problems.Any(Function(problem) problem.Kind = ChunkedStream.ValidationProblemKind.MissingPhysicalRecord),
+                                   "The data actually lost still needs an explicit data-loss repair.")
+
+                        Report.Repair(ChunkedStream.RepairScope.IncludeDataLoss)
+                        Second.Validate().ThrowIfErrors()
+
+                    End Using
+
+                    Using Again = ChunkedStream.Open(Ms, Options)
+
+                        AssertTrue(Again.StartupRecovery.IsClean,
+                                   "After the data-loss repair the file opens completely clean.")
+                        Again.Validate().ThrowIfErrors()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

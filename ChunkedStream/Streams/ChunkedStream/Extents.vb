@@ -675,6 +675,65 @@ Namespace Streams
 
         End Sub
 
+        '
+        ' Structural self-check run at the top of every metadata publish. The physical-record
+        ' page index (_PhysicalRecordIdsByPage) and the ordinal map (_PhysicalRecordOrdinals)
+        ' must both agree with _PhysicalRecords, and every record id must appear on exactly
+        ' one physical-record page - the one its ordinal selects.
+        '
+        ' A violation means an earlier in-memory mutation was left torn - e.g. a process
+        ' interrupted between the two steps of a MovePhysicalRecordOrdinal, or a killed
+        ' worker thread. Throwing here (the caller turns it into a fault) stops the publish
+        ' before a single byte is written, so the last durably published generation stays
+        ' intact and openable. Serialising a torn index instead is exactly what bricks a
+        ' reopen with "Loaded physical-record count does not match metadata root".
+        '
+        ' Cost is O(records) dictionary lookups, once per publish - cheap next to the page
+        ' writes the publish is about to do.
+        '
+        Private Sub AssertPhysicalRecordIndexConsistent()
+
+            If _PhysicalRecordOrdinals.Count <> _PhysicalRecords.Count Then
+                Throw New InvalidDataException(
+                    $"Physical-record ordinal map holds {_PhysicalRecordOrdinals.Count} entries but the record table holds {_PhysicalRecords.Count}.")
+            End If
+
+            Dim PagedRecordCount As Integer = 0
+
+            For Each Pair In _PhysicalRecordIdsByPage
+
+                For Each RecordId In Pair.Value
+
+                    PagedRecordCount += 1
+
+                    If _PhysicalRecords.ContainsKey(RecordId) = False Then
+                        Throw New InvalidDataException(
+                            $"Physical record {RecordId} is on physical-record page {Pair.Key} but is not in the record table.")
+                    End If
+
+                    Dim Ordinal As Integer
+
+                    If _PhysicalRecordOrdinals.TryGetValue(RecordId, Ordinal) = False Then
+                        Throw New InvalidDataException(
+                            $"Physical record {RecordId} is on physical-record page {Pair.Key} but is not in the ordinal map.")
+                    End If
+
+                    If _IndexPageEntryCount > 0 AndAlso Ordinal \ _IndexPageEntryCount <> Pair.Key Then
+                        Throw New InvalidDataException(
+                            $"Physical record {RecordId} is on physical-record page {Pair.Key} but its ordinal {Ordinal} belongs to page {Ordinal \ _IndexPageEntryCount}.")
+                    End If
+
+                Next
+
+            Next
+
+            If PagedRecordCount <> _PhysicalRecords.Count Then
+                Throw New InvalidDataException(
+                    $"Physical-record pages hold {PagedRecordCount} entries but the record table holds {_PhysicalRecords.Count}.")
+            End If
+
+        End Sub
+
         Private Sub ReclaimPendingPhysicalRecords()
 
             '

@@ -1608,6 +1608,8 @@ Namespace Streams
 
             _Rng = RandomNumberGenerator.Create()
 
+            _StartupRecovery = New StartupRecoveryReport(Me)
+
         End Sub
 
         Private Sub InvalidateChunkCache()
@@ -1698,6 +1700,7 @@ Namespace Streams
 
             Dim FirstFailure As Exception = Nothing
             Dim Result As ChunkedStream = Nothing
+            Dim SawInconsistentPhysicalRecordPages = False
 
             For Each Candidate In Candidates
 
@@ -1705,12 +1708,14 @@ Namespace Streams
                     Result = OpenFromHeaderCandidate(BaseStream,
                                                      Candidate,
                                                      EffectiveOptions,
-                                                     AdaptedFlushDurableAction)
+                                                     AdaptedFlushDurableAction,
+                                                     TolerateInconsistentPhysicalRecordPages:=False)
                     Exit For
 
                 Catch ex As Exception When TypeOf ex Is InvalidDataException OrElse
                                            TypeOf ex Is CryptographicException OrElse
-                                           TypeOf ex Is EndOfStreamException
+                                           TypeOf ex Is EndOfStreamException OrElse
+                                           TypeOf ex Is InconsistentPhysicalRecordPagesException
 
                     '
                     ' This header copy is valid but its metadata could not be loaded - a
@@ -1720,18 +1725,93 @@ Namespace Streams
                     ' overwritten by the generation that failed here.
                     '
                     If FirstFailure Is Nothing Then FirstFailure = ex
+                    If TypeOf ex Is InconsistentPhysicalRecordPagesException Then
+                        SawInconsistentPhysicalRecordPages = True
+                    End If
 
                 End Try
 
             Next
 
+            '
+            ' Last resort: no header copy loaded cleanly and at least one got far enough to
+            ' prove its physical-record pages are internally inconsistent (a duplicate or
+            ' missing record entry - an interrupted process re-persisted a torn in-memory
+            ' index). There is no clean generation to fall back to, so re-try newest-first
+            ' tolerating the inconsistency: keep the first entry for each duplicated record
+            ' and record an AutoRepair for whatever the root over-counts. A copy that failed
+            ' for any other reason (bad MAC, truncated pages) still fails this pass and is
+            ' skipped, so this picks the newest copy whose only fault is the torn index.
+            ' Validate()/Repair() then salvages the readable records.
+            '
+            Dim OpenedTolerantly = False
+
+            If Result Is Nothing AndAlso SawInconsistentPhysicalRecordPages Then
+
+                For Each Candidate In Candidates
+                    Try
+                        Result = OpenFromHeaderCandidate(BaseStream,
+                                                         Candidate,
+                                                         EffectiveOptions,
+                                                         AdaptedFlushDurableAction,
+                                                         TolerateInconsistentPhysicalRecordPages:=True)
+                        OpenedTolerantly = True
+                        Exit For
+                    Catch ex As Exception When TypeOf ex Is InvalidDataException OrElse
+                                               TypeOf ex Is CryptographicException OrElse
+                                               TypeOf ex Is EndOfStreamException OrElse
+                                               TypeOf ex Is InconsistentPhysicalRecordPagesException
+                    End Try
+                Next
+
+            End If
+
             If Result Is Nothing Then Throw FirstFailure
 
             RunOpenRecovery(Result, BaseStream, AllowOpeningWhenRecoveryFails)
 
+            '
+            ' The tolerant retry above rebuilt a clean physical-record table in memory
+            ' (duplicate / overlapping entries dropped, count corrected) but the corrupt
+            ' pages are still what is on disk. Write the clean table back now, so every
+            ' later open is an ordinary strict open instead of repeating the retry and
+            ' re-reporting the same AutoRepairs. Best-effort: if the write fails the
+            ' in-memory image is still correct and the next open just retries.
+            '
+            ' This does NOT touch the extents that still reference records the corruption
+            ' genuinely lost - those remain as MissingPhysicalRecord for an explicit
+            ' Validate().Repair(RepairScope.IncludeDataLoss).
+            '
+            If OpenedTolerantly AndAlso BaseStream.CanWrite AndAlso Result._Faulted = False Then
+                Try
+                    Result.PersistSalvagedPhysicalRecordTable()
+                Catch
+                    Result._Faulted = False
+                End Try
+            End If
+
             Return Result
 
         End Function
+
+        '
+        ' Rewrites every metadata page and the root from the current in-memory tables, so a
+        ' tolerant open's in-memory-only salvage becomes the newest on-disk generation. The
+        ' publish self-check runs first (the tables were rebuilt clean by the constructor),
+        ' and the dual-header + append-only rules keep the generation we just opened intact
+        ' if this write is interrupted.
+        '
+        Private Sub PersistSalvagedPhysicalRecordTable()
+
+            Using EnterStateLock()
+                ThrowIfDisposed()
+                ThrowIfFaulted()
+                MarkAllMetadataPagesDirty()
+                PersistIndexAndHeader(_IndexOffset, True)
+                _StartupSalvagePersisted = True
+            End Using
+
+        End Sub
 
         ''' <summary>
         ''' Asynchronously opens an existing ChunkedStream or creates a new one if the
@@ -1783,7 +1863,8 @@ Namespace Streams
         Private Shared Function OpenFromHeaderCandidate(BaseStream As Stream,
                                                        Candidate As HeaderCandidate,
                                                        EffectiveOptions As ChunkedStreamOptions,
-                                                       AdaptedFlushDurableAction As Action) As ChunkedStream
+                                                       AdaptedFlushDurableAction As Action,
+                                                       TolerateInconsistentPhysicalRecordPages As Boolean) As ChunkedStream
 
             Dim Header = Candidate.Header
             Dim WrapMode = CType(BitConverter.ToInt32(Header, MasterKeyWrapModeOffset), MasterKeyWrapModes)
@@ -1862,6 +1943,7 @@ Namespace Streams
                                   MetadataRootOffset,
                                   MetadataRootLength,
                                   RootMac,
+                                  TolerateInconsistentPhysicalRecordPages,
                                   EffectiveOptions.IndexPageEntryCount,
                                   EffectiveOptions.IndexDirectoryEntryCount)
 
@@ -1881,7 +1963,7 @@ Namespace Streams
                 End If
             Next
 
-            Dim Repairs As New List(Of AutoRepair)()
+            Dim Repairs As New List(Of AutoRepair)(Metadata.Repairs)
 
             Dim ExtentSpan As Long = 0
             If Metadata.Extents.Count > 0 Then
@@ -1931,6 +2013,18 @@ Namespace Streams
             Result._FlushDurableAction = AdaptedFlushDurableAction
 
             If Repairs.Count > 0 Then Result._AutoRepairs = Repairs.AsReadOnly()
+
+            '
+            ' Extents that point at a physical record the table no longer holds - the data
+            ' that record carried is gone. Open cannot fix this (zero-filling is a data-loss
+            ' repair the caller has to choose), but count it so StartupRecovery.NeedsScan
+            ' stays set even after a structural salvage has been written back clean.
+            '
+            Result._UnrecoverableExtentCount =
+                Metadata.Extents.
+                    Where(Function(extent) extent.PhysicalRecordId <> SparsePhysicalRecordId AndAlso
+                                           Metadata.PhysicalRecords.ContainsKey(extent.PhysicalRecordId) = False).
+                    Count()
 
             If MetadataRootLength > 0 Then
                 Result._MetadataRootMac = RootMac
@@ -2047,11 +2141,12 @@ Namespace Streams
         Dim _RecoveryStateAtOpen As RecoveryStates
         ''' <summary>
         ''' Gets the recovery state that was recorded in the header when the stream was
-        ''' opened, before any automatic recovery was performed.
+        ''' opened, before any automatic recovery was performed. Grouped with the other
+        ''' open-time diagnostics on <see cref="StartupRecovery" /> - prefer that.
         ''' </summary>
         Public ReadOnly Property RecoveryStateAtOpen As RecoveryStates
             Get
-                Return _RecoveryStateAtOpen
+                Return _StartupRecovery.JournalStateAtOpen
             End Get
         End Property
 
@@ -2084,22 +2179,24 @@ Namespace Streams
         Private Property _AutoRecoveryState As AutoRecoveryStates
         ''' <summary>
         ''' Gets the outcome of the automatic recovery attempt performed while the stream
-        ''' was opened.
+        ''' was opened. Grouped with the other open-time diagnostics on
+        ''' <see cref="StartupRecovery" /> - prefer that.
         ''' </summary>
         Public ReadOnly Property AutoRecoveryState As AutoRecoveryStates
             Get
-                Return _AutoRecoveryState
+                Return _StartupRecovery.JournalReplay
             End Get
         End Property
 
         Private Property _AutoRecoveryException As Exception
         ''' <summary>
         ''' Gets the exception captured when automatic recovery failed and the stream was
-        ''' opened for diagnostic access, or Nothing when recovery did not fail.
+        ''' opened for diagnostic access, or Nothing when recovery did not fail. Grouped with
+        ''' the other open-time diagnostics on <see cref="StartupRecovery" /> - prefer that.
         ''' </summary>
         Public ReadOnly Property AutoRecoveryException As Exception
             Get
-                Return _AutoRecoveryException
+                Return _StartupRecovery.RecoveryException
             End Get
         End Property
 
@@ -2130,19 +2227,211 @@ Namespace Streams
         End Class
 
         Private _AutoRepairs As IReadOnlyList(Of AutoRepair) = Array.Empty(Of AutoRepair)()
+        Private _StartupSalvagePersisted As Boolean
+        Private _UnrecoverableExtentCount As Integer
+        Private ReadOnly _StartupRecovery As StartupRecoveryReport
+
         ''' <summary>
-        ''' Non-authoritative header fields (the index-offset allocation hint, the logical
-        ''' length, the extent count) that were found inconsistent and recomputed from the
-        ''' metadata while opening. Empty on a clean open. The corrected values are held in
-        ''' memory and written back by the next durable persist; the metadata itself was not
-        ''' in question. A non-empty list means an earlier write left the header stale -
-        ''' usually a process that faulted mid-operation - and is worth logging.
+        ''' Non-authoritative values that <see cref="Open" /> found inconsistent and
+        ''' reconciled against the authoritative (MAC-verified) metadata: the cached header
+        ''' scalars (index-offset hint, logical length, extent count), and - when a header
+        ''' generation's physical-record pages were internally inconsistent - the salvaged
+        ''' record table. Empty on a clean open. Grouped with the other open-time diagnostics
+        ''' on <see cref="StartupRecovery" /> - prefer that.
         ''' </summary>
         Public ReadOnly Property AutoRepairs As IReadOnlyList(Of AutoRepair)
             Get
-                Return _AutoRepairs
+                Return _StartupRecovery.Repairs
             End Get
         End Property
+
+        ''' <summary>
+        ''' What <see cref="Open" /> had to do to bring this backing store up - replaying a
+        ''' crash-recovery journal, and reconciling or salvaging metadata that did not match
+        ''' the authoritative tables - as a single grouped report. Check
+        ''' <see cref="StartupRecoveryReport.NeedsScan" /> to decide whether to prompt the
+        ''' user or run a repair scan; <see cref="StartupRecoveryReport.Summary" /> is a
+        ''' ready-made message for a log line or a dialog.
+        ''' </summary>
+        Public ReadOnly Property StartupRecovery As StartupRecoveryReport
+            Get
+                Return _StartupRecovery
+            End Get
+        End Property
+
+        ''' <summary>A single classification of what <see cref="Open" /> did - see
+        ''' <see cref="StartupRecoveryReport.State" />.</summary>
+        Public Enum StartupRecoveryOutcome
+            ''' <summary><see cref="Open" /> was completely clean.</summary>
+            Clean
+            ''' <summary><see cref="Open" /> reconciled cached fields or salvaged a damaged
+            ''' metadata table; the stream is fully usable and no data was lost.</summary>
+            RepairsApplied
+            ''' <summary>The stream opened, but some extents point at physical records that are
+            ''' gone - that data cannot be recovered. Run <see cref="Validate" /> and a
+            ''' data-loss <c>Repair</c> to zero those ranges.</summary>
+            UnrecoverableData
+            ''' <summary>An interrupted protected operation (a checkpoint commit,
+            ''' <see cref="Defragment" />(<see cref="DefragTypes.Move" />) or a chunk-size
+            ''' <c>ApplyOptions</c>) was rolled back or completed while opening.</summary>
+            JournalRecovered
+            ''' <summary>An interrupted protected operation could not be recovered; the stream
+            ''' was opened for inspection only and may be missing that operation's effect.</summary>
+            RecoveryFailed
+        End Enum
+
+        ''' <summary>
+        ''' Everything <see cref="ChunkedStream.Open" /> had to do to bring the backing store
+        ''' up, grouped so one check - <see cref="NeedsScan" /> - stands in for consulting the
+        ''' journal state, the replay outcome and the reconciled-field list separately.
+        ''' </summary>
+        Public NotInheritable Class StartupRecoveryReport
+
+            Private ReadOnly _Owner As ChunkedStream
+
+            Friend Sub New(Owner As ChunkedStream)
+                _Owner = Owner
+            End Sub
+
+            ''' <summary>The crash-recovery journal state read from the header when the stream
+            ''' opened. <see cref="RecoveryStates.None" /> unless a protected operation was
+            ''' interrupted.</summary>
+            Public ReadOnly Property JournalStateAtOpen As RecoveryStates
+                Get
+                    Return _Owner._RecoveryStateAtOpen
+                End Get
+            End Property
+
+            ''' <summary>Outcome of replaying that journal:
+            ''' <see cref="AutoRecoveryStates.NotRequired" /> when there was none,
+            ''' <see cref="AutoRecoveryStates.Repaired" /> on success, or
+            ''' <see cref="AutoRecoveryStates.Failed" /> when it could not run.</summary>
+            Public ReadOnly Property JournalReplay As AutoRecoveryStates
+                Get
+                    Return _Owner._AutoRecoveryState
+                End Get
+            End Property
+
+            ''' <summary>The exception captured when <see cref="JournalReplay" /> is
+            ''' <see cref="AutoRecoveryStates.Failed" />; otherwise Nothing.</summary>
+            Public ReadOnly Property RecoveryException As Exception
+                Get
+                    Return _Owner._AutoRecoveryException
+                End Get
+            End Property
+
+            ''' <summary>Cached header scalars and, when a header generation's physical-record
+            ''' pages were internally inconsistent, the salvaged record table - the values
+            ''' <see cref="ChunkedStream.Open" /> reconciled against the MAC-verified metadata.
+            ''' Empty on a clean open.</summary>
+            Public ReadOnly Property Repairs As IReadOnlyList(Of AutoRepair)
+                Get
+                    Return _Owner._AutoRepairs
+                End Get
+            End Property
+
+            ''' <summary>True when <see cref="Repairs" /> is non-empty.</summary>
+            Public ReadOnly Property RepairsApplied As Boolean
+                Get
+                    Return Repairs.Count > 0
+                End Get
+            End Property
+
+            ''' <summary>True when a salvaged record table was written straight back to the
+            ''' backing store during <see cref="ChunkedStream.Open" />, so the next open is an
+            ''' ordinary strict open. False when nothing needed salvaging, when the only
+            ''' repairs were the lazy header-scalar reconciles (they persist on the next
+            ''' durable write), or when the write-back itself failed.</summary>
+            Public ReadOnly Property RepairsPersisted As Boolean
+                Get
+                    Return _Owner._StartupSalvagePersisted
+                End Get
+            End Property
+
+            ''' <summary>Number of extents that reference a physical record no longer in the
+            ''' table - data the corruption destroyed. <see cref="ChunkedStream.Open" /> cannot
+            ''' fix this; <see cref="ChunkedStream.Validate" /> reports each as a
+            ''' <see cref="ValidationProblemKind.MissingPhysicalRecord" /> and a data-loss
+            ''' <c>Repair</c> zero-fills the ranges.</summary>
+            Public ReadOnly Property UnrecoverableExtentCount As Integer
+                Get
+                    Return _Owner._UnrecoverableExtentCount
+                End Get
+            End Property
+
+            ''' <summary>One rolled-up flag: True when <see cref="ChunkedStream.Open" /> was
+            ''' anything other than completely clean, so the caller should consider running
+            ''' <see cref="ChunkedStream.Validate" /> or a repair scan. Stays True after a
+            ''' structural salvage has been written back if data was actually lost.</summary>
+            Public ReadOnly Property NeedsScan As Boolean
+                Get
+                    Return RepairsApplied OrElse
+                           UnrecoverableExtentCount > 0 OrElse
+                           JournalStateAtOpen <> RecoveryStates.None
+                End Get
+            End Property
+
+            ''' <summary>True when <see cref="ChunkedStream.Open" /> was completely clean.</summary>
+            Public ReadOnly Property IsClean As Boolean
+                Get
+                    Return Not NeedsScan
+                End Get
+            End Property
+
+            ''' <summary>A single classification of what happened at open.</summary>
+            Public ReadOnly Property State As StartupRecoveryOutcome
+                Get
+                    If JournalReplay = AutoRecoveryStates.Failed Then Return StartupRecoveryOutcome.RecoveryFailed
+                    If JournalStateAtOpen <> RecoveryStates.None Then Return StartupRecoveryOutcome.JournalRecovered
+                    If UnrecoverableExtentCount > 0 Then Return StartupRecoveryOutcome.UnrecoverableData
+                    If RepairsApplied Then Return StartupRecoveryOutcome.RepairsApplied
+                    Return StartupRecoveryOutcome.Clean
+                End Get
+            End Property
+
+            ''' <summary>A short human-readable description of what happened at open, for a
+            ''' log line or a message box. Empty when <see cref="IsClean" />.</summary>
+            Public ReadOnly Property Summary As String
+                Get
+                    Dim RepairDetail =
+                        If(RepairsApplied,
+                           "The stream was repaired while opening:" & Environment.NewLine &
+                           String.Join(Environment.NewLine,
+                                       Repairs.Select(Function(repair) "  " & ChrW(&H2022) & " " & repair.ToString())) &
+                           Environment.NewLine &
+                           If(RepairsPersisted,
+                              "The repaired metadata has been saved.",
+                              "The fix is held in memory and will be saved on the next change.") &
+                           Environment.NewLine & Environment.NewLine,
+                           "")
+
+                    Select Case State
+
+                        Case StartupRecoveryOutcome.RecoveryFailed
+                            Return $"An interrupted {JournalStateAtOpen} operation could not be recovered; " &
+                                   "the stream was opened for inspection only" &
+                                   If(RecoveryException Is Nothing, ".", $": {RecoveryException.Message}")
+
+                        Case StartupRecoveryOutcome.JournalRecovered
+                            Return $"An interrupted {JournalStateAtOpen} operation was recovered while opening."
+
+                        Case StartupRecoveryOutcome.UnrecoverableData
+                            Return RepairDetail &
+                                   $"{UnrecoverableExtentCount} extent{If(UnrecoverableExtentCount = 1, "", "s")} " &
+                                   $"reference{If(UnrecoverableExtentCount = 1, "s", "")} data that could not be recovered. " &
+                                   "Run Validate and a data-loss Repair to zero those ranges."
+
+                        Case StartupRecoveryOutcome.RepairsApplied
+                            Return RepairDetail.TrimEnd()
+
+                        Case Else
+                            Return ""
+
+                    End Select
+                End Get
+            End Property
+
+        End Class
 
         Private Shared Function CreateNew(BaseStream As Stream,
                                           Options As ChunkedStreamOptions,
@@ -4267,14 +4556,12 @@ Namespace Streams
                _Faulted = False AndAlso
                BaseStream.CanWrite Then
 
+                '
+                ' The batch so far is now durable. A later abandon of the scope reloads the
+                ' last durably published generation from the backing store, so it reverts to
+                ' this Flush, not to where the scope opened. A Flush cannot be undone.
+                '
                 Await PersistIndexAndHeaderAsync(_IndexOffset, True, RunAsync, CancellationToken).ConfigureAwait(False)
-
-                '
-                ' The batch is now durable, so it becomes the rollback baseline: a later
-                ' abandon of the scope reverts to this Flush, not to where the scope
-                ' opened. A Flush cannot be undone.
-                '
-                If _DeferPublishState IsNot Nothing Then _DeferPublishState.Capture(Me)
 
             End If
 
@@ -4691,7 +4978,18 @@ Namespace Streams
             RebuildAnchorIndex()
             InvalidateChunkCache()
 
+            '
+            ' A fault reload is a fresh open of the backing store, so the startup-recovery
+            ' report reflects what THAT open had to do (usually nothing - the reload targets
+            ' the last durable generation - but it may itself have gone through the tolerant
+            ' salvage path if that generation is torn).
+            '
             _AutoRepairs = Source._AutoRepairs
+            _RecoveryStateAtOpen = Source._RecoveryStateAtOpen
+            _AutoRecoveryState = Source._AutoRecoveryState
+            _AutoRecoveryException = Source._AutoRecoveryException
+            _StartupSalvagePersisted = Source._StartupSalvagePersisted
+            _UnrecoverableExtentCount = Source._UnrecoverableExtentCount
 
         End Sub
 

@@ -17,6 +17,25 @@ Namespace Streams
             Public Property PhysicalRecordDirectoryPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)
             Public Property HoleDirectoryPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)
             Public Property HoleRecords As List(Of HoleDirectoryRecord)
+            Public ReadOnly Property Repairs As New List(Of AutoRepair)()
+        End Class
+
+        '
+        ' Thrown by ReadPhysicalRecordPages when a header copy's physical-record pages are
+        ' structurally valid (every page MAC-verifies) but their contents disagree with the
+        ' metadata root - a duplicate record id across two pages, or fewer distinct records
+        ' than the root counts. This means an interrupted process re-persisted a torn
+        ' in-memory physical-record index. OpenCore tries every header copy strictly first;
+        ' only if they all fail this exact way does it retry with tolerance so the readable
+        ' records can still be salvaged by Validate()/Repair().
+        '
+        Private NotInheritable Class InconsistentPhysicalRecordPagesException
+            Inherits IOException
+
+            Public Sub New(Message As String)
+                MyBase.New(Message)
+            End Sub
+
         End Class
 
         Private NotInheritable Class MetadataRootReadResult
@@ -667,262 +686,286 @@ Namespace Streams
                                                         RunAsync As Boolean,
                                                         CancellationToken As Threading.CancellationToken) As Task
 
-            If IndexOffset < DataStartOffset Then Throw New InvalidDataException("Invalid index offset.")
+            Try
 
-            _IndexOffset = IndexOffset
+                If IndexOffset < DataStartOffset Then Throw New InvalidDataException("Invalid index offset.")
 
-            If _IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid metadata page entry count.")
-            If _IndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid metadata directory entry count.")
+                _IndexOffset = IndexOffset
 
-            Dim RequiredExtentPageCount =
+                If _IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid metadata page entry count.")
+                If _IndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid metadata directory entry count.")
+
+                '
+                ' Never serialise a torn in-memory physical-record index. If an earlier mutation
+                ' was interrupted part way (a killed thread, an aborted operation) this throws
+                ' before any byte is written; the Catch faults the stream and the caller reloads
+                ' the last good on-disk generation. The alternative - writing the torn index -
+                ' produces a file that cannot be reopened at all.
+                '
+                AssertPhysicalRecordIndexConsistent()
+
+                Dim RequiredExtentPageCount =
                 GetIndexPageCount(_Extents.Count,
                                     _IndexPageEntryCount)
 
-            Dim RemovedExtentPages =
+                Dim RemovedExtentPages =
                 _ExtentPageDescriptors.Keys.
                                         Where(Function(pageNumber) pageNumber >= RequiredExtentPageCount).
                                         ToArray()
 
-            For Each PageNumber In RemovedExtentPages
+                For Each PageNumber In RemovedExtentPages
 
-                Dim Descriptor = _ExtentPageDescriptors(PageNumber)
+                    Dim Descriptor = _ExtentPageDescriptors(PageNumber)
 
-                DeferFreeSpace(Descriptor.Offset,
+                    DeferFreeSpace(Descriptor.Offset,
                                         Descriptor.Length)
 
-                _ExtentPageDescriptors.Remove(PageNumber)
+                    _ExtentPageDescriptors.Remove(PageNumber)
 
-            Next
+                Next
 
-            Dim RequiredPhysicalRecordPageCount =
+                Dim RequiredPhysicalRecordPageCount =
                 GetIndexPageCount(_PhysicalRecords.Count,
                                     _IndexPageEntryCount)
 
-            If CanElidePhysicalRecordPaging() Then RequiredPhysicalRecordPageCount = 0
+                If CanElidePhysicalRecordPaging() Then RequiredPhysicalRecordPageCount = 0
 
-            Dim RemovedPhysicalRecordPages =
+                Dim RemovedPhysicalRecordPages =
                 _PhysicalRecordPageDescriptors.Keys.
                                                 Where(Function(pageNumber) pageNumber >= RequiredPhysicalRecordPageCount).
                                                 ToArray()
 
-            For Each PageNumber In RemovedPhysicalRecordPages
+                For Each PageNumber In RemovedPhysicalRecordPages
 
-                Dim Descriptor =
+                    Dim Descriptor =
                     _PhysicalRecordPageDescriptors(PageNumber)
 
-                DeferFreeSpace(Descriptor.Offset,
+                    DeferFreeSpace(Descriptor.Offset,
                                         Descriptor.Length)
 
-                _PhysicalRecordPageDescriptors.Remove(PageNumber)
+                    _PhysicalRecordPageDescriptors.Remove(PageNumber)
 
-            Next
+                Next
 
-            For Each PageNumber In _DirtyExtentPages.ToArray()
+                For Each PageNumber In _DirtyExtentPages.ToArray()
 
-                If PageNumber < RequiredExtentPageCount Then
-                    Await WriteExtentPageAsync(PageNumber, RunAsync, CancellationToken).ConfigureAwait(False)
-                End If
+                    If PageNumber < RequiredExtentPageCount Then
+                        Await WriteExtentPageAsync(PageNumber, RunAsync, CancellationToken).ConfigureAwait(False)
+                    End If
 
-            Next
+                Next
 
-            For Each PageNumber In _DirtyPhysicalRecordPages.ToArray()
+                For Each PageNumber In _DirtyPhysicalRecordPages.ToArray()
 
-                If PageNumber < RequiredPhysicalRecordPageCount Then
-                    Await WritePhysicalRecordPageAsync(PageNumber, RunAsync, CancellationToken).ConfigureAwait(False)
-                End If
+                    If PageNumber < RequiredPhysicalRecordPageCount Then
+                        Await WritePhysicalRecordPageAsync(PageNumber, RunAsync, CancellationToken).ConfigureAwait(False)
+                    End If
 
-            Next
+                Next
 
-            _DirtyExtentPages.Clear()
-            _DirtyPhysicalRecordPages.Clear()
+                _DirtyExtentPages.Clear()
+                _DirtyPhysicalRecordPages.Clear()
 
-            Dim DirectExtentPageDescriptors =
+                Dim DirectExtentPageDescriptors =
                 _ExtentPageDescriptors.Values.
                                         OrderBy(Function(descriptor) descriptor.PageNumber).
                                         ToArray()
 
-            Dim ExtentDirectoryDescriptors =
+                Dim ExtentDirectoryDescriptors =
                 Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
 
-            If _ExtentPageDescriptors.Count > _IndexDirectoryEntryCount Then
+                If _ExtentPageDescriptors.Count > _IndexDirectoryEntryCount Then
 
-                Dim NewExtentDirectoryDescriptors =
+                    Dim NewExtentDirectoryDescriptors =
                     Await WriteDirectoryPagesAsync(DirectoryTypes.ExtentPages,
                                                    _ExtentPageDescriptors.Values,
                                                    _ExtentDirectoryPageDescriptors,
                                                    RunAsync,
                                                    CancellationToken).ConfigureAwait(False)
 
-                _ExtentDirectoryPageDescriptors.Clear()
+                    _ExtentDirectoryPageDescriptors.Clear()
 
-                For Each Pair In NewExtentDirectoryDescriptors
-                    _ExtentDirectoryPageDescriptors(Pair.Key) = Pair.Value
-                Next
+                    For Each Pair In NewExtentDirectoryDescriptors
+                        _ExtentDirectoryPageDescriptors(Pair.Key) = Pair.Value
+                    Next
 
-                DirectExtentPageDescriptors =
+                    DirectExtentPageDescriptors =
                     Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
 
-                ExtentDirectoryDescriptors =
+                    ExtentDirectoryDescriptors =
                     _ExtentDirectoryPageDescriptors.Values.
                                                     OrderBy(Function(descriptor) descriptor.PageNumber).
                                                     ToArray()
 
-            Else
+                Else
 
-                For Each Descriptor In _ExtentDirectoryPageDescriptors.Values.ToArray()
+                    For Each Descriptor In _ExtentDirectoryPageDescriptors.Values.ToArray()
 
-                    If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                        DeferFreeSpace(Descriptor.Offset,
+                        If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                            DeferFreeSpace(Descriptor.Offset,
                                                         Descriptor.Length)
-                    End If
+                        End If
 
-                Next
+                    Next
 
-                _ExtentDirectoryPageDescriptors.Clear()
+                    _ExtentDirectoryPageDescriptors.Clear()
 
-            End If
+                End If
 
-            Dim DirectPhysicalRecordPageDescriptors =
+                Dim DirectPhysicalRecordPageDescriptors =
                 _PhysicalRecordPageDescriptors.Values.
                                                 OrderBy(Function(descriptor) descriptor.PageNumber).
                                                 ToArray()
 
-            Dim PhysicalRecordDirectoryDescriptors =
+                Dim PhysicalRecordDirectoryDescriptors =
                 Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
 
-            If _PhysicalRecordPageDescriptors.Count > _IndexDirectoryEntryCount Then
+                If _PhysicalRecordPageDescriptors.Count > _IndexDirectoryEntryCount Then
 
-                Dim NewPhysicalRecordDirectoryDescriptors =
+                    Dim NewPhysicalRecordDirectoryDescriptors =
                     Await WriteDirectoryPagesAsync(DirectoryTypes.PhysicalRecordPages,
                                                    _PhysicalRecordPageDescriptors.Values,
                                                    _PhysicalRecordDirectoryPageDescriptors,
                                                    RunAsync,
                                                    CancellationToken).ConfigureAwait(False)
 
-                _PhysicalRecordDirectoryPageDescriptors.Clear()
+                    _PhysicalRecordDirectoryPageDescriptors.Clear()
 
-                For Each Pair In NewPhysicalRecordDirectoryDescriptors
-                    _PhysicalRecordDirectoryPageDescriptors(Pair.Key) = Pair.Value
-                Next
+                    For Each Pair In NewPhysicalRecordDirectoryDescriptors
+                        _PhysicalRecordDirectoryPageDescriptors(Pair.Key) = Pair.Value
+                    Next
 
-                DirectPhysicalRecordPageDescriptors =
+                    DirectPhysicalRecordPageDescriptors =
                     Enumerable.Empty(Of MetadataPageDescriptor)().ToArray()
 
-                PhysicalRecordDirectoryDescriptors =
+                    PhysicalRecordDirectoryDescriptors =
                     _PhysicalRecordDirectoryPageDescriptors.Values.
                                                             OrderBy(Function(descriptor) descriptor.PageNumber).
                                                             ToArray()
 
-            Else
+                Else
 
-                For Each Descriptor In _PhysicalRecordDirectoryPageDescriptors.Values.ToArray()
+                    For Each Descriptor In _PhysicalRecordDirectoryPageDescriptors.Values.ToArray()
 
-                    If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                        DeferFreeSpace(Descriptor.Offset,
+                        If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                            DeferFreeSpace(Descriptor.Offset,
                                                         Descriptor.Length)
+                        End If
+
+                    Next
+
+                    _PhysicalRecordDirectoryPageDescriptors.Clear()
+
+                End If
+
+                Dim NewHoleDirectoryDescriptors =
+                New Dictionary(Of Integer, MetadataPageDescriptor)()
+
+                If ShouldPersistHoleDirectory(Durable) Then
+                    NewHoleDirectoryDescriptors =
+                    Await WriteHoleDirectoryPagesAsync(GetKnownHoleRecords(), RunAsync, CancellationToken).ConfigureAwait(False)
+                End If
+
+                For Each Descriptor In _HoleDirectoryPageDescriptors.Values.ToArray()
+
+                    If NewHoleDirectoryDescriptors.ContainsKey(Descriptor.PageNumber) = False Then
+
+                        If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                            DeferFreeSpace(Descriptor.Offset,
+                                                        Descriptor.Length)
+                        End If
+
                     End If
 
                 Next
 
-                _PhysicalRecordDirectoryPageDescriptors.Clear()
+                _HoleDirectoryPageDescriptors.Clear()
 
-            End If
+                For Each Pair In NewHoleDirectoryDescriptors
+                    _HoleDirectoryPageDescriptors(Pair.Key) = Pair.Value
+                Next
 
-            Dim NewHoleDirectoryDescriptors =
-                New Dictionary(Of Integer, MetadataPageDescriptor)()
-
-            If ShouldPersistHoleDirectory(Durable) Then
-                NewHoleDirectoryDescriptors =
-                    Await WriteHoleDirectoryPagesAsync(GetKnownHoleRecords(), RunAsync, CancellationToken).ConfigureAwait(False)
-            End If
-
-            For Each Descriptor In _HoleDirectoryPageDescriptors.Values.ToArray()
-
-                If NewHoleDirectoryDescriptors.ContainsKey(Descriptor.PageNumber) = False Then
-
-                    If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
-                        DeferFreeSpace(Descriptor.Offset,
-                                                        Descriptor.Length)
-                    End If
-
-                End If
-
-            Next
-
-            _HoleDirectoryPageDescriptors.Clear()
-
-            For Each Pair In NewHoleDirectoryDescriptors
-                _HoleDirectoryPageDescriptors(Pair.Key) = Pair.Value
-            Next
-
-            Dim HoleDirectoryDescriptors =
+                Dim HoleDirectoryDescriptors =
                 _HoleDirectoryPageDescriptors.Values.
                                                 OrderBy(Function(descriptor) descriptor.PageNumber).
                                                 ToArray()
 
-            Dim Root =
+                Dim Root =
                 BuildMetadataRoot(DirectExtentPageDescriptors,
                                     ExtentDirectoryDescriptors,
                                     DirectPhysicalRecordPageDescriptors,
                                     PhysicalRecordDirectoryDescriptors,
                                     HoleDirectoryDescriptors)
 
-            Dim NewRootMac(MacSize - 1) As Byte
-            Buffer.BlockCopy(Root, Root.Length - MacSize, NewRootMac, 0, MacSize)
+                Dim NewRootMac(MacSize - 1) As Byte
+                Buffer.BlockCopy(Root, Root.Length - MacSize, NewRootMac, 0, MacSize)
 
-            '
-            ' Only republish the root when it actually changed. When every metadata page
-            ' descriptor, count, and next-id is unchanged the rebuilt root is byte-for-byte
-            ' identical to the one already persisted, so rewriting it would only churn free
-            ' space (the old copy deferred, an identical copy appended) on every persist.
-            '
-            Dim RootChanged =
+                '
+                ' Only republish the root when it actually changed. When every metadata page
+                ' descriptor, count, and next-id is unchanged the rebuilt root is byte-for-byte
+                ' identical to the one already persisted, so rewriting it would only churn free
+                ' space (the old copy deferred, an identical copy appended) on every persist.
+                '
+                Dim RootChanged =
                 _MetadataRootOffset <= 0 OrElse
                 _MetadataRootLength <> Root.Length OrElse
                 _MetadataRootMac Is Nothing OrElse
                 _MetadataRootOffset + CLng(_MetadataRootLength) > BaseStream.Length OrElse
                 FixedTimeEquals(_MetadataRootMac, 0, NewRootMac, 0, MacSize) = False
 
-            If RootChanged Then
+                If RootChanged Then
 
-                Dim OldRootOffset = _MetadataRootOffset
-                Dim OldRootLength = _MetadataRootLength
-                Dim CompactRootOffset As Long
-                Dim RecycledRootOffset As Long
+                    Dim OldRootOffset = _MetadataRootOffset
+                    Dim OldRootLength = _MetadataRootLength
+                    Dim CompactRootOffset As Long
+                    Dim RecycledRootOffset As Long
 
-                If TryGetCompactMetadataWriteOffset(Root.Length, CompactRootOffset) Then
-                    _MetadataRootOffset = CompactRootOffset
-                ElseIf TryAllocateSnugMetadataRootHole(Root.Length, RecycledRootOffset) Then
-                    '
-                    ' Reuse a freed hole the root nearly fills. Appending unconditionally
-                    ' (the previous behaviour) meant every durable publish that rebuilt the
-                    ' hole directory on a stream large enough to persist it grew the file by
-                    ' one root length, so a repeated open / edit / close - or a repeated
-                    ' Defragment - never reached a fixed size. The snug fit keeps this from
-                    ' carving a chunk-sized data hole into an unusable sliver.
-                    '
-                    _MetadataRootOffset = RecycledRootOffset
-                Else
-                    _MetadataRootOffset = Math.Max(BaseStream.Length, GetDataEndFromIndex())
+                    If TryGetCompactMetadataWriteOffset(Root.Length, CompactRootOffset) Then
+                        _MetadataRootOffset = CompactRootOffset
+                    ElseIf TryAllocateSnugMetadataRootHole(Root.Length, RecycledRootOffset) Then
+                        '
+                        ' Reuse a freed hole the root nearly fills. Appending unconditionally
+                        ' (the previous behaviour) meant every durable publish that rebuilt the
+                        ' hole directory on a stream large enough to persist it grew the file by
+                        ' one root length, so a repeated open / edit / close - or a repeated
+                        ' Defragment - never reached a fixed size. The snug fit keeps this from
+                        ' carving a chunk-sized data hole into an unusable sliver.
+                        '
+                        _MetadataRootOffset = RecycledRootOffset
+                    Else
+                        _MetadataRootOffset = Math.Max(BaseStream.Length, GetDataEndFromIndex())
+                    End If
+
+                    _MetadataRootLength = Root.Length
+
+                    Await WriteAtEitherAsync(RunAsync, _MetadataRootOffset, Root, 0, Root.Length, CancellationToken).ConfigureAwait(False)
+
+                    If OldRootOffset > 0 AndAlso OldRootLength > 0 Then
+                        DeferFreeSpace(OldRootOffset, OldRootLength)
+                    End If
+
+                    _MetadataRootMac = NewRootMac
+
                 End If
 
-                _MetadataRootLength = Root.Length
+                If Durable Then Await FlushDurableEitherAsync(RunAsync).ConfigureAwait(False)
 
-                Await WriteAtEitherAsync(RunAsync, _MetadataRootOffset, Root, 0, Root.Length, CancellationToken).ConfigureAwait(False)
+                Await UpdateHeaderAsync(Durable, RunAsync, CancellationToken).ConfigureAwait(False)
 
-                If OldRootOffset > 0 AndAlso OldRootLength > 0 Then
-                    DeferFreeSpace(OldRootOffset, OldRootLength)
-                End If
+                If Durable Then Await FlushDurableEitherAsync(RunAsync).ConfigureAwait(False)
 
-                _MetadataRootMac = NewRootMac
+            Catch
 
-            End If
+                '
+                ' A publish that fails part way has left the in-memory metadata bookkeeping
+                ' (header sequence, active copy, descriptors, deferred-free list) in an
+                ' indeterminate state. Fault so nothing else can publish; recovery reloads
+                ' the last durably published generation straight from the backing store.
+                '
+                _Faulted = True
+                Throw
 
-            If Durable Then Await FlushDurableEitherAsync(RunAsync).ConfigureAwait(False)
-
-            Await UpdateHeaderAsync(Durable, RunAsync, CancellationToken).ConfigureAwait(False)
-
-            If Durable Then Await FlushDurableEitherAsync(RunAsync).ConfigureAwait(False)
+            End Try
 
         End Function
 
@@ -995,6 +1038,7 @@ Namespace Streams
                                                   RootOffset As Long,
                                                   RootLength As Integer,
                                                   ExpectedMac As Byte(),
+                                                  Tolerate As Boolean,
                                                   ByRef IndexPageEntryCount As Integer,
                                                   ByRef IndexDirectoryEntryCount As Integer) As MetadataReadResult
 
@@ -1002,6 +1046,8 @@ Namespace Streams
 
             IndexPageEntryCount = Root.IndexPageEntryCount
             IndexDirectoryEntryCount = Root.IndexDirectoryEntryCount
+
+            Dim Repairs As New List(Of AutoRepair)()
 
             Dim ExtentPageDescriptors =
                 If(Root.DirectExtentPageDescriptors.Count > 0,
@@ -1014,7 +1060,7 @@ Namespace Streams
                    ReadDirectoryPages(BaseStream, Root.PhysicalRecordDirectoryPageDescriptors, DirectoryTypes.PhysicalRecordPages))
 
             Dim Extents = ReadExtentPages(BaseStream, ExtentPageDescriptors, Root.ExtentCount, IndexPageEntryCount)
-            Dim PhysicalRecords = ReadPhysicalRecordPages(BaseStream, PhysicalRecordPageDescriptors, Root.PhysicalRecordCount, IndexPageEntryCount)
+            Dim PhysicalRecords = ReadPhysicalRecordPages(BaseStream, PhysicalRecordPageDescriptors, Root.PhysicalRecordCount, IndexPageEntryCount, Tolerate, Repairs)
             Dim HoleRecords = ReadHoleDirectoryPages(BaseStream, Root.HoleDirectoryPageDescriptors)
 
             If PhysicalRecords.Count = 0 AndAlso
@@ -1048,7 +1094,11 @@ Namespace Streams
 
             End If
 
-            Return New MetadataReadResult With {
+            If Tolerate Then
+                DropUnrecoverablePhysicalRecords(PhysicalRecords, BaseStream.Length, Repairs)
+            End If
+
+            Dim Metadata = New MetadataReadResult With {
                 .IndexPageEntryCount = Root.IndexPageEntryCount,
                 .IndexDirectoryEntryCount = Root.IndexDirectoryEntryCount,
                 .Extents = Extents,
@@ -1063,7 +1113,71 @@ Namespace Streams
                 .HoleRecords = HoleRecords
             }
 
+            Metadata.Repairs.AddRange(Repairs)
+
+            Return Metadata
+
         End Function
+
+        '
+        ' Recovery-only (Tolerate) cleanup for a physical-record table an interrupted process
+        ' left self-contradictory: drop any record whose span runs past the backing stream,
+        ' and, among referenced records taken in offset order, drop any whose span overlaps a
+        ' lower-offset record already kept. Torn ordinal compaction can leave two table
+        ' entries claiming the same storage - neither can be trusted, so the earliest is kept
+        ' and the rest dropped. Every extent that pointed at a dropped record then surfaces as
+        ' a MissingPhysicalRecord problem in Validate() and is zero-filled by Repair().
+        '
+        Private Shared Sub DropUnrecoverablePhysicalRecords(Records As Dictionary(Of Long, PhysicalRecordEntry),
+                                                            BaseStreamLength As Long,
+                                                            Repairs As List(Of AutoRepair))
+
+            Dim BeyondEnd =
+                Records.Values.
+                    Where(Function(record) record.PhysicalOffset + CLng(record.PhysicalLength) > BaseStreamLength).
+                    Select(Function(record) record.RecordId).
+                    ToList()
+
+            For Each RecordId In BeyondEnd
+                Records.Remove(RecordId)
+            Next
+
+            If BeyondEnd.Count > 0 Then
+                Repairs.Add(New AutoRepair("PhysicalRecords", BeyondEnd.Count, 0,
+                                           $"{BeyondEnd.Count} physical record" &
+                                           $"{If(BeyondEnd.Count = 1, "", "s")} ran past the end of the backing " &
+                                           "stream and could not be loaded"))
+            End If
+
+            Dim Referenced =
+                Records.Values.
+                    Where(Function(record) record.RefCount > 0).
+                    OrderBy(Function(record) record.PhysicalOffset).
+                    ThenBy(Function(record) record.RecordId).
+                    ToList()
+
+            Dim OverlapDropped As Integer = 0
+            Dim KeptEnd As Long = -1
+
+            For Each Record In Referenced
+
+                If Record.PhysicalOffset < KeptEnd Then
+                    Records.Remove(Record.RecordId)
+                    OverlapDropped += 1
+                Else
+                    KeptEnd = Record.PhysicalOffset + CLng(Record.PhysicalLength)
+                End If
+
+            Next
+
+            If OverlapDropped > 0 Then
+                Repairs.Add(New AutoRepair("PhysicalRecords", OverlapDropped, 0,
+                                           $"{OverlapDropped} physical record" &
+                                           $"{If(OverlapDropped = 1, "", "s")} overlapped the storage of another " &
+                                           "record and could not be loaded"))
+            End If
+
+        End Sub
 
         'TODO: Check
         Private Shared Function ReadMetadataRoot(BaseStream As Stream,
@@ -1327,12 +1441,15 @@ Namespace Streams
         Private Shared Function ReadPhysicalRecordPages(BaseStream As Stream,
                                                         Descriptors As IEnumerable(Of MetadataPageDescriptor),
                                                         PhysicalRecordCount As Integer,
-                                                        PageEntryCount As Integer) As Dictionary(Of Long, PhysicalRecordEntry)
+                                                        PageEntryCount As Integer,
+                                                        Tolerate As Boolean,
+                                                        Repairs As List(Of AutoRepair)) As Dictionary(Of Long, PhysicalRecordEntry)
 
             If PhysicalRecordCount < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PhysicalRecordCount))
             If PageEntryCount <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageEntryCount))
 
             Dim Result As New Dictionary(Of Long, PhysicalRecordEntry)()
+            Dim DuplicateEntryCount As Integer = 0
 
             For Each Descriptor In Descriptors.OrderBy(Function(x) x.PageNumber)
                 Dim Page = ReadMetadataPageBytes(BaseStream, Descriptor)
@@ -1372,13 +1489,62 @@ Namespace Streams
                         Throw New InvalidDataException("Invalid physical record id.")
                     End If
 
-                    Result(Entry.RecordId) = Entry
+                    '
+                    ' A record id must appear on exactly one page. A duplicate means an
+                    ' interrupted process re-persisted a torn in-memory physical-record
+                    ' index. Both entries are byte-for-byte identical (each is built from
+                    ' the one _PhysicalRecords entry), so keeping the first is lossless for
+                    ' this record; the count reconciliation below records that a repair is
+                    ' owed for whatever the root over-counts.
+                    '
+                    If Result.ContainsKey(Entry.RecordId) Then
+                        If Tolerate = False Then
+                            Throw New InconsistentPhysicalRecordPagesException(
+                                $"Physical record {Entry.RecordId} appears on more than one physical-record page.")
+                        End If
+                        DuplicateEntryCount += 1
+                    Else
+                        Result(Entry.RecordId) = Entry
+                    End If
+
                     EntryOffset += PhysicalRecordEntrySize
                 Next
             Next
 
             If Result.Count <> PhysicalRecordCount Then
-                Throw New InvalidDataException("Loaded physical-record count does not match metadata root.")
+
+                If Tolerate AndAlso Result.Count < PhysicalRecordCount AndAlso Repairs IsNot Nothing Then
+
+                    Dim Lost = PhysicalRecordCount - Result.Count
+
+                    Repairs.Add(New AutoRepair("PhysicalRecordCount",
+                                               PhysicalRecordCount,
+                                               Result.Count,
+                                               $"the physical-record pages held {DuplicateEntryCount} duplicate " &
+                                               $"entr{If(DuplicateEntryCount = 1, "y", "ies")}; " &
+                                               $"{Lost} record{If(Lost = 1, "", "s")} the root counts " &
+                                               "could not be loaded and their data is lost"))
+
+                Else
+
+                    Throw New InconsistentPhysicalRecordPagesException(
+                        "Loaded physical-record count does not match metadata root.")
+
+                End If
+
+            ElseIf DuplicateEntryCount > 0 AndAlso Tolerate AndAlso Repairs IsNot Nothing Then
+
+                '
+                ' Duplicates that happened to net out against the root count (the same number
+                ' of records over-counted as duplicated) - still a torn index, still worth
+                ' surfacing even though no record was actually lost.
+                '
+                Repairs.Add(New AutoRepair("PhysicalRecordPages",
+                                           DuplicateEntryCount,
+                                           0,
+                                           $"{DuplicateEntryCount} duplicate physical-record page " &
+                                           $"entr{If(DuplicateEntryCount = 1, "y was", "ies were")} skipped"))
+
             End If
 
             Return Result
