@@ -2,9 +2,11 @@
 Imports i00.Streams
 Imports i00
 Imports UnitTester
+Imports System.ComponentModel
 
 Namespace Tests
-    Partial Public NotInheritable Class StreamChunked
+    <DisplayName("Benchmarks")>
+    Partial Public NotInheritable Class zBenchmarks '< we have the z here to make it appear last
 
         <UnitTester.SimpleBenchmark()>
         Public Shared Function GraphicalDefragTest() As SimpleTest.BenchmarkResult
@@ -88,7 +90,7 @@ Namespace Tests
 
             Dim Tests = {
                 New With {.Test = "No Data",
-                          .MaxSizeBytes = 1024,
+                          .MaxSizeBytes = 1280,
                           .Action = Sub(Cs As ChunkedStream)
                                     End Sub},
                 New With {.Test = "Single Sparse Byte",

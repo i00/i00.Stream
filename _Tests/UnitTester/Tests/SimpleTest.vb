@@ -14,24 +14,37 @@
     Public Shared Property TestTypesToRun As TestTypes = TestTypes.Test
 
     Protected Overrides Sub GetTestsInternal(Tests As TestCreator)
-        Dim TestMethods = GetAllTestMethods().Select(Function(x) New With {.Method = x,
-                                                                           .UnitTests = x.GetCustomAttributes(False).OfType(Of SimpleTestAttribute).
-                                                                                          Where(Function(y) TestTypesToRun.HasFlag(y.TestType)).
-                                                                                          ToArray()}).
-                                            Where(Function(x) x.UnitTests.Any()).
-                                            Select(Function(x) New With {x.Method,
-                                                                         x.UnitTests,
-                                                                         .TypeNames = x.Method.DeclaringType.Recurse(Function(y) {y.DeclaringType}, True).Select(Function(y) y.Name).Reverse().ToArray(),
-                                                                         .TypeName = Join(.TypeNames, ".")}).
-                                            OrderBy(Function(x) x.TypeName).
-                                            ThenBy(Function(x) x.Method.Name).
-                                            ToArray()
+        Dim TestMethods =
+            GetAllTestMethods().
+            Select(Function(x) New With {.Method = x,
+                                         .UnitTests = x.GetCustomAttributes(False).OfType(Of SimpleTestAttribute).
+                                                        Where(Function(y) TestTypesToRun.HasFlag(y.TestType)).
+                                                        ToArray()}).
+            Where(Function(x) x.UnitTests.Any()).
+            Select(Function(x) New With {x.Method,
+                                         x.UnitTests,
+                                         .Types = x.Method.DeclaringType.Recurse(Function(y) {y.DeclaringType}, True).Reverse().ToArray()}).
+            OrderBy(Function(x) x.Types,
+                    New Misc.LambdaComparable(Of Type())(
+                        Function(x, y)
+                            If x Is y Then Return 0
+                            If x Is Nothing Then Return -1
+                            If y Is Nothing Then Return 1
+                            Dim count = Math.Min(x.Length, y.Length)
+                            For i As Integer = 0 To count - 1
+                                Dim result = String.Compare(x(i).Name, y(i).Name, StringComparison.Ordinal)
+                                If result <> 0 Then Return result
+                            Next
+                            Return x.Length.CompareTo(y.Length)
+                        End Function)).
+            ThenBy(Function(x) x.Method.Name).
+            ToArray()
 
         For Each testMethod In TestMethods
             Dim MethodParameters = testMethod.Method.GetParameters()
 
             Dim ThisTree As New List(Of String) From {testMethod.Method.DeclaringType.Assembly.GetName.Name}
-            ThisTree.AddRange(testMethod.TypeNames)
+            ThisTree.AddRange(testMethod.Types.Select(Function(x) x.DisplayName()).ToArray())
             ThisTree.Add($"{testMethod.Method.Name}({Join(MethodParameters.Select(Function(x) $"{x.Name} As {x.ParameterType.Name}").ToArray, ", ")})")
 
             Dim ReturnsData = testMethod.Method.ReturnType IsNot GetType(Void)

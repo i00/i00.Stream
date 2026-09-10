@@ -6,6 +6,20 @@ Friend NotInheritable Class Misc
 
     End Sub
 
+    Friend NotInheritable Class LambdaComparable(Of T)
+        Implements IComparer(Of T)
+
+        Dim Comparer As Func(Of T, T, Integer)
+
+        Friend Sub New(Comparer As Func(Of T, T, Integer))
+            Me.Comparer = Comparer
+        End Sub
+
+        Public Function Compare(x As T, y As T) As Integer Implements IComparer(Of T).Compare
+            Return Comparer.Invoke(x, y)
+        End Function
+    End Class
+
     Public Shared Function getValueFromString(ByVal theString As String, ByVal theField As String, Optional ByVal DelimiterMajor As String = ";", Optional ByVal DelimiterMinor As String = ":") As String
         Dim escDelimiterMinor = Regex.Escape(DelimiterMinor)
         Dim escDelimiterMajor = Regex.Escape(DelimiterMajor)

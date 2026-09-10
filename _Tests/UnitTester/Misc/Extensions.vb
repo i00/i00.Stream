@@ -1,4 +1,15 @@
-﻿Friend Module Extensions
+﻿Imports System.Reflection
+
+Friend Module Extensions
+
+    <System.Runtime.CompilerServices.Extension>
+    Public Function DisplayName(type As Type) As String
+        Dim DisplayNameAttribute = type.GetCustomAttribute(Of System.ComponentModel.DisplayNameAttribute)
+        If DisplayNameAttribute IsNot Nothing Then
+            Return DisplayNameAttribute.DisplayName
+        End If
+        Return type.Name
+    End Function
 
     <System.Runtime.CompilerServices.Extension>
     Public Function RegexEscape(Text As String) As String

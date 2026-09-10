@@ -1,4 +1,4 @@
 {
   "plansDirectory": "./.claude/plans",
-  "attribution.commit": false
+  "includeCoAuthoredBy": false
 }
