@@ -3993,6 +3993,31 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
     Private Sub EmbeddedFileSystemBrowserForm_Load(sender As Object, e As EventArgs) Handles Me.Load
         Dim tsam As New ToolStripAsMenu(tsMain)
+
+        ' If opening the archive had to recover a journal or reconcile / salvage damaged
+        ' metadata, tell the user once the window is up and offer to finish with a scan.
+        Dim Startup = FileSystem.ChunkedStream.StartupRecovery
+        If Startup.NeedsScan Then
+            BeginInvoke(Sub() NotifyStartupRecovery(Startup))
+        End If
+    End Sub
+
+    Private Sub NotifyStartupRecovery(Startup As ChunkedStream.StartupRecoveryReport)
+
+        Dim DataLost = Startup.State = ChunkedStream.StartupRecoveryOutcome.UnrecoverableData OrElse
+                       Startup.State = ChunkedStream.StartupRecoveryOutcome.RecoveryFailed
+
+        Dim Prompt = Startup.Summary & Environment.NewLine & Environment.NewLine &
+                     If(DataLost,
+                        "Run an Extended Scan now to zero the affected ranges and recover the rest?",
+                        "The archive opened successfully. Run an Extended Scan now to check the file contents?")
+
+        Dim Answer = MsgBox(Me, Prompt,
+                            MsgBoxStyle.YesNo Or If(DataLost, MsgBoxStyle.Exclamation, MsgBoxStyle.Information),
+                            "Archive recovered while opening")
+
+        If Answer = MsgBoxResult.Yes Then Scan()
+
     End Sub
 
     'Dim Struct As ChunkedStreamStructure
