@@ -131,7 +131,7 @@ Namespace Streams
                 End Set
             End Property
 
-            Private _ChunkSizeVariance As Double = 0.25R
+            Private _ChunkSizeVariance As Double = 0
 
             ''' <summary>
             ''' How far a content-defined chunk boundary may vary from <see cref="ChunkSize"/>, expressed

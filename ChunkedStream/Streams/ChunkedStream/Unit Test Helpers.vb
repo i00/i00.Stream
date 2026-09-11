@@ -2,6 +2,46 @@
 
     Partial Class ChunkedStream
 
+        ''' <summary>Computes a deduplication hash, generating the key on first use if needed - see ComputeDedupHash.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_ComputeDedupHash(Plain As Byte()) As Byte()
+
+            Return ComputeDedupHash(Plain, Plain.Length)
+
+        End Function
+
+        ''' <summary>True once the deduplication key has been established (lazily, on first Debug_ComputeDedupHash/ComputeDedupHash call).</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_HasDedupKey() As Boolean
+
+            Return _DedupKey IsNot Nothing
+
+        End Function
+
+        ''' <summary>Raw dedup key bytes, for verifying the key's value stays stable across encryption toggles and only changes on RegenerateDedupKey.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_GetDedupKey() As Byte()
+
+            Return _DedupKey
+
+        End Function
+
+        ''' <summary>Forces a fresh deduplication key, discarding any existing one - the effect DedupRebuild(Soft:=False) will have on the key.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Sub Debug_RegenerateDedupKey()
+
+            RegenerateDedupKey()
+
+        End Sub
+
+        ''' <summary>Flips a byte in the on-disk wrapped-dedup-key MAC, so the next unwrap attempt (e.g. on reopen) fails its integrity check.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Sub Debug_CorruptDedupKeyWrapMac()
+
+            _Header(WrappedDedupKeyMacOffset) = CByte(_Header(WrappedDedupKeyMacOffset) Xor &HFF)
+
+        End Sub
+
         <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
         Friend Sub Debug_CorruptPhysicalRecordMetadataRefCount(RecordId As Long,
                                                                NewRefCount As Integer)

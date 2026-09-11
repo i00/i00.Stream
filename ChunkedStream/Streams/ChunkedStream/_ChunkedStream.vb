@@ -586,8 +586,41 @@ Namespace Streams
         '
         Private Const ChunkSizeVarianceOffset As Integer = 268
 
-        Private Const MetadataReservedOffset As Integer = 276
-        Private Const MetadataReservedLength As Integer = 204
+        '
+        ' Deduplication key wrap area - same shape as MasterKeyWrapArea (mode/salt/wrapped
+        ' key/mac), a separate key so it survives the file master key being removed (see
+        ' RemoveUnusedFileMasterKeyIfPossible) and so it never needs regenerating just because
+        ' encryption toggled - only its wrapping does, tracked the same way the master key's is.
+        '
+        Private Const DedupKeyWrapModeOffset As Integer = 276
+        Private Const DedupKeyWrapSaltOffset As Integer = 280
+        Private Const WrappedDedupKeyOffset As Integer = 296
+        Private Const WrappedDedupKeyMacOffset As Integer = 328
+        Private Const DedupKeyWrapAreaOffset As Integer = 276
+        Private Const DedupKeyWrapAreaLength As Integer = 84
+
+        '
+        ' Deduplication index addressing - how many entries a bucket page holds, how many
+        ' bucket-page descriptors a directory page holds, and the extendible hash table's
+        ' current directory size. The index's own bucket/directory pages live in the metadata
+        ' root's page-descriptor list (a new DirectoryTypes kind), not here - these are just
+        ' the small scalars needed to interpret that list.
+        '
+        Private Const DedupBucketCountOffset As Integer = 360
+        Private Const DedupIndexPageEntryCountOffset As Integer = 368
+        Private Const DedupIndexDirectoryEntryCountOffset As Integer = 372
+
+        '
+        ' Highest physical record id ever considered for deduplication - not how many records
+        ' are covered, since AllocatePhysicalRecordId never reuses ids, so "id <= this" is a
+        ' stable, O(1) answer to "has this record at least been looked at" that isn't fooled by
+        ' ordinary reclaims (which never remove a record's dedup-index entry, only rebuilding
+        ' the index from scratch does that).
+        '
+        Private Const DedupCoveredUpToRecordIdOffset As Integer = 376
+
+        Private Const MetadataReservedOffset As Integer = 384
+        Private Const MetadataReservedLength As Integer = 96
 
         Private Const MetadataRootHeaderSize As Integer = 72
         Private Const MetadataRootMagicSize As Integer = 8
@@ -1449,6 +1482,12 @@ Namespace Streams
         Private _ChunkMacKey As Byte()
         Private _CurrentWriteEncryptionEnabled As Boolean
 
+        Private _DedupKey As Byte()
+        Private _DedupCoveredUpToRecordId As Long
+        Private _DedupBucketCount As Long
+        Private _DedupIndexPageEntryCount As Integer
+        Private _DedupIndexDirectoryEntryCount As Integer
+
         Private _HeaderFlags As HeaderFlags
         Private _HeaderSequence As Long
         Private _ActiveHeaderCopy As Integer
@@ -2225,6 +2264,22 @@ Namespace Streams
 
             If Not Result.TryUnwrapFileMasterKey(EffectiveOptions.EncryptionInfo) Then
                 Throw New EncryptionMismatchException("The supplied encryption information could not unwrap the file master key.")
+            End If
+
+            Result._DedupBucketCount = BitConverter.ToInt64(Header, DedupBucketCountOffset)
+            Result._DedupIndexPageEntryCount = BitConverter.ToInt32(Header, DedupIndexPageEntryCountOffset)
+            Result._DedupIndexDirectoryEntryCount = BitConverter.ToInt32(Header, DedupIndexDirectoryEntryCountOffset)
+            Result._DedupCoveredUpToRecordId = BitConverter.ToInt64(Header, DedupCoveredUpToRecordIdOffset)
+
+            '
+            ' Unlike the file master key, a dedup-key unwrap failure isn't fatal - the index is
+            ' explicitly not the source of truth (see the deduplication design notes), so an
+            ' unrecoverable key just leaves deduplication unavailable until
+            ' DedupRebuild(Soft:=False) establishes a fresh one, rather than refusing to open an
+            ' otherwise-healthy archive.
+            '
+            If Not Result.TryUnwrapDedupKey(EffectiveOptions.EncryptionInfo) Then
+                Result._DedupKey = Nothing
             End If
 
             Return Result
@@ -4879,6 +4934,10 @@ Namespace Streams
             Buffer.BlockCopy(BitConverter.GetBytes(_MetadataRootLength), 0, _Header, MetadataRootLengthOffset, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(_IndexPageEntryCount), 0, _Header, IndexPageEntryCountOffset, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(_IndexDirectoryEntryCount), 0, _Header, IndexDirectoryEntryCountOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(_DedupBucketCount), 0, _Header, DedupBucketCountOffset, 8)
+            Buffer.BlockCopy(BitConverter.GetBytes(_DedupIndexPageEntryCount), 0, _Header, DedupIndexPageEntryCountOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(_DedupIndexDirectoryEntryCount), 0, _Header, DedupIndexDirectoryEntryCountOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(_DedupCoveredUpToRecordId), 0, _Header, DedupCoveredUpToRecordIdOffset, 8)
 
             If _MetadataRootOffset > 0 AndAlso _MetadataRootLength > 0 Then
 
@@ -5129,6 +5188,11 @@ Namespace Streams
             _NextAnchorId = Source._NextAnchorId
             _IndexPageEntryCount = Source._IndexPageEntryCount
             _IndexDirectoryEntryCount = Source._IndexDirectoryEntryCount
+            _DedupKey = Source._DedupKey
+            _DedupBucketCount = Source._DedupBucketCount
+            _DedupIndexPageEntryCount = Source._DedupIndexPageEntryCount
+            _DedupIndexDirectoryEntryCount = Source._DedupIndexDirectoryEntryCount
+            _DedupCoveredUpToRecordId = Source._DedupCoveredUpToRecordId
 
             _Extents.Clear()
             _Extents.AddRange(Source._Extents)

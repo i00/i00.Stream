@@ -281,6 +281,12 @@ Namespace Streams
                 End If
 
                 _CurrentWriteEncryptionEnabled = False
+
+                ' Re-wrap only - an already-established dedup key's value never changes just
+                ' because encryption toggled, only how it's protected at rest. Never generate
+                ' one here: that would store a dedup key even when Deduplication is off.
+                If _DedupKey IsNot Nothing Then EnsureDedupKeyWrapped()
+
                 UpdateHeader(True)
                 Return
             End If
@@ -293,6 +299,9 @@ Namespace Streams
 
             WrapFileMasterKey(MasterKeyWrapModes.UserWrap, NewValue)
             _CurrentWriteEncryptionEnabled = True
+
+            If _DedupKey IsNot Nothing Then EnsureDedupKeyWrapped()
+
             UpdateHeader(True)
 
         End Sub
@@ -463,8 +472,56 @@ Namespace Streams
         Private Sub WrapFileMasterKey(WrapMode As MasterKeyWrapModes,
                                       EncryptionInfo As EncryptionInfo)
 
-            If _FileMasterKey Is Nothing Then
-                Array.Clear(_Header, MasterKeyWrapAreaOffset, MasterKeyWrapAreaLength)
+            WrapKeyMaterial(_FileMasterKey, WrapMode, EncryptionInfo,
+                            MasterKeyWrapModeOffset, MasterKeyWrapSaltOffset,
+                            WrappedFileMasterKeyOffset, WrappedFileMasterKeySize,
+                            WrappedFileMasterKeyMacOffset, WrappedFileMasterKeyMacSize)
+
+        End Sub
+
+        Private Function TryUnwrapFileMasterKey(EncryptionInfo As EncryptionInfo) As Boolean
+
+            Dim RecoveredKey As Byte() = Nothing
+
+            If Not TryUnwrapKeyMaterial(EncryptionInfo,
+                                        MasterKeyWrapModeOffset, MasterKeyWrapSaltOffset,
+                                        WrappedFileMasterKeyOffset, WrappedFileMasterKeySize,
+                                        WrappedFileMasterKeyMacOffset, WrappedFileMasterKeyMacSize,
+                                        RecoveredKey) Then
+                Return False
+            End If
+
+            _FileMasterKey = RecoveredKey
+            DeriveFileMasterKeys()
+            _CurrentWriteEncryptionEnabled = _FileMasterKey IsNot Nothing AndAlso EncryptionInfo IsNot Nothing
+
+            Return True
+
+        End Function
+
+        '
+        ' Shared wrap/unwrap primitive behind both the file master key and the deduplication
+        ' key: XOR the key material with a key derived (via HMAC-SHA256) from either the fixed
+        ' PublicIntegrityKey or the caller's EncryptionInfo, and authenticate the wrapped bytes
+        ' with an HMAC keyed by that same derived wrap key. Callers own any key-specific side
+        ' effects (deriving dependent keys, flipping "is encryption enabled" flags, etc.) -
+        ' this only reads and writes the wrap fields themselves.
+        '
+        Private Sub WrapKeyMaterial(KeyBytes As Byte(),
+                                    WrapMode As MasterKeyWrapModes,
+                                    EncryptionInfo As EncryptionInfo,
+                                    ModeOffset As Integer,
+                                    SaltOffset As Integer,
+                                    WrappedOffset As Integer,
+                                    WrappedSize As Integer,
+                                    MacOffset As Integer,
+                                    MacSize As Integer)
+
+            If KeyBytes Is Nothing Then
+                Array.Clear(_Header, ModeOffset, 4)
+                Array.Clear(_Header, SaltOffset, MasterKeyWrapSaltSize)
+                Array.Clear(_Header, WrappedOffset, WrappedSize)
+                Array.Clear(_Header, MacOffset, MacSize)
                 Return
             End If
 
@@ -472,31 +529,36 @@ Namespace Streams
             _Rng.GetBytes(WrapSalt)
 
             Dim WrapKey = DeriveWrapKey(WrapMode, EncryptionInfo, WrapSalt)
-            Dim WrappedKey(WrappedFileMasterKeySize - 1) As Byte
+            Dim WrappedKey(WrappedSize - 1) As Byte
 
-            For Index = 0 To _FileMasterKey.Length - 1
-                WrappedKey(Index) = CByte(CInt(_FileMasterKey(Index)) Xor CInt(WrapKey(Index)))
+            For Index = 0 To KeyBytes.Length - 1
+                WrappedKey(Index) = CByte(CInt(KeyBytes(Index)) Xor CInt(WrapKey(Index)))
             Next
 
             Using Hmac As New HMACSHA256(WrapKey)
                 Dim Mac = Hmac.ComputeHash(WrappedKey)
-                System.Buffer.BlockCopy(Mac, 0, _Header, WrappedFileMasterKeyMacOffset, WrappedFileMasterKeyMacSize)
+                System.Buffer.BlockCopy(Mac, 0, _Header, MacOffset, MacSize)
             End Using
 
-            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(WrapMode)), 0, _Header, MasterKeyWrapModeOffset, 4)
-            System.Buffer.BlockCopy(WrapSalt, 0, _Header, MasterKeyWrapSaltOffset, MasterKeyWrapSaltSize)
-            System.Buffer.BlockCopy(WrappedKey, 0, _Header, WrappedFileMasterKeyOffset, WrappedFileMasterKeySize)
+            System.Buffer.BlockCopy(BitConverter.GetBytes(CInt(WrapMode)), 0, _Header, ModeOffset, 4)
+            System.Buffer.BlockCopy(WrapSalt, 0, _Header, SaltOffset, MasterKeyWrapSaltSize)
+            System.Buffer.BlockCopy(WrappedKey, 0, _Header, WrappedOffset, WrappedSize)
 
         End Sub
 
-        Private Function TryUnwrapFileMasterKey(EncryptionInfo As EncryptionInfo) As Boolean
+        Private Function TryUnwrapKeyMaterial(EncryptionInfo As EncryptionInfo,
+                                              ModeOffset As Integer,
+                                              SaltOffset As Integer,
+                                              WrappedOffset As Integer,
+                                              WrappedSize As Integer,
+                                              MacOffset As Integer,
+                                              MacSize As Integer,
+                                              ByRef KeyBytes As Byte()) As Boolean
 
-            Dim WrapMode = CType(BitConverter.ToInt32(_Header, MasterKeyWrapModeOffset), MasterKeyWrapModes)
+            Dim WrapMode = CType(BitConverter.ToInt32(_Header, ModeOffset), MasterKeyWrapModes)
 
             If WrapMode = MasterKeyWrapModes.None Then
-                _FileMasterKey = Nothing
-                DeriveFileMasterKeys()
-                _CurrentWriteEncryptionEnabled = False
+                KeyBytes = Nothing
                 Return True
             End If
 
@@ -504,12 +566,12 @@ Namespace Streams
             If WrapMode = MasterKeyWrapModes.PublicWrap AndAlso EncryptionInfo IsNot Nothing Then Return False
 
             Dim WrapSalt(MasterKeyWrapSaltSize - 1) As Byte
-            Dim WrappedKey(WrappedFileMasterKeySize - 1) As Byte
-            Dim StoredMac(WrappedFileMasterKeyMacSize - 1) As Byte
+            Dim WrappedKey(WrappedSize - 1) As Byte
+            Dim StoredMac(MacSize - 1) As Byte
 
-            System.Buffer.BlockCopy(_Header, MasterKeyWrapSaltOffset, WrapSalt, 0, WrapSalt.Length)
-            System.Buffer.BlockCopy(_Header, WrappedFileMasterKeyOffset, WrappedKey, 0, WrappedKey.Length)
-            System.Buffer.BlockCopy(_Header, WrappedFileMasterKeyMacOffset, StoredMac, 0, StoredMac.Length)
+            System.Buffer.BlockCopy(_Header, SaltOffset, WrapSalt, 0, WrapSalt.Length)
+            System.Buffer.BlockCopy(_Header, WrappedOffset, WrappedKey, 0, WrappedKey.Length)
+            System.Buffer.BlockCopy(_Header, MacOffset, StoredMac, 0, StoredMac.Length)
 
             Dim WrapKey = DeriveWrapKey(WrapMode, EncryptionInfo, WrapSalt)
 
@@ -521,17 +583,97 @@ Namespace Streams
                 End If
             End Using
 
-            _FileMasterKey = New Byte(WrappedFileMasterKeySize - 1) {}
+            Dim Recovered(WrappedSize - 1) As Byte
 
-            For Index = 0 To _FileMasterKey.Length - 1
-                _FileMasterKey(Index) = CByte(CInt(WrappedKey(Index)) Xor CInt(WrapKey(Index)))
+            For Index = 0 To Recovered.Length - 1
+                Recovered(Index) = CByte(CInt(WrappedKey(Index)) Xor CInt(WrapKey(Index)))
             Next
 
-            DeriveFileMasterKeys()
-
-            _CurrentWriteEncryptionEnabled = EncryptionInfo IsNot Nothing
+            KeyBytes = Recovered
 
             Return True
+
+        End Function
+
+        ''' <summary>
+        ''' Generates the deduplication key if it doesn't already exist, then (re)wraps it to
+        ''' match the archive's current encryption state - PublicWrap when unencrypted,
+        ''' UserWrap (against the current EncryptionInfo) otherwise. The key's own value never
+        ''' changes once generated; only its wrapping tracks encryption state, so toggling
+        ''' encryption on or off never invalidates an existing deduplication index. Only
+        ''' DedupRebuild(Soft:=False) ever generates a new value.
+        ''' </summary>
+        Private Sub EnsureDedupKeyWrapped()
+
+            If _DedupKey Is Nothing Then
+                _DedupKey = New Byte(WrappedFileMasterKeySize - 1) {}
+                _Rng.GetBytes(_DedupKey)
+            End If
+
+            Dim WrapMode = If(_CurrentWriteEncryptionEnabled, MasterKeyWrapModes.UserWrap, MasterKeyWrapModes.PublicWrap)
+            Dim EffectiveEncryptionInfo = If(_CurrentWriteEncryptionEnabled, Options.EncryptionInfo, Nothing)
+
+            WrapKeyMaterial(_DedupKey, WrapMode, EffectiveEncryptionInfo,
+                            DedupKeyWrapModeOffset, DedupKeyWrapSaltOffset,
+                            WrappedDedupKeyOffset, WrappedFileMasterKeySize,
+                            WrappedDedupKeyMacOffset, WrappedFileMasterKeyMacSize)
+
+        End Sub
+
+        ''' <summary>
+        ''' Replaces the deduplication key with a freshly generated one and (re)wraps it for
+        ''' the current encryption state. Only called by DedupRebuild(Soft:=False) - every
+        ''' existing entry hashed under the old key becomes meaningless the moment this runs.
+        ''' </summary>
+        Private Sub RegenerateDedupKey()
+
+            _DedupKey = New Byte(WrappedFileMasterKeySize - 1) {}
+            _Rng.GetBytes(_DedupKey)
+
+            EnsureDedupKeyWrapped()
+
+        End Sub
+
+        Private Function TryUnwrapDedupKey(EncryptionInfo As EncryptionInfo) As Boolean
+
+            Dim RecoveredKey As Byte() = Nothing
+
+            If Not TryUnwrapKeyMaterial(EncryptionInfo,
+                                        DedupKeyWrapModeOffset, DedupKeyWrapSaltOffset,
+                                        WrappedDedupKeyOffset, WrappedFileMasterKeySize,
+                                        WrappedDedupKeyMacOffset, WrappedFileMasterKeyMacSize,
+                                        RecoveredKey) Then
+                Return False
+            End If
+
+            _DedupKey = RecoveredKey
+
+            Return True
+
+        End Function
+
+        ''' <summary>
+        ''' Computes the keyed hash used to look up or record a chunk's plaintext in the
+        ''' deduplication index. A proper HMAC construction, not a hand-rolled prepend-then-hash
+        ''' - SHA-256 is a Merkle-Damgard hash, and H(key || message) is a known-weak MAC
+        ''' construction (susceptible to length-extension) that HMAC exists specifically to
+        ''' avoid. Keying the hash at all (rather than a plain SHA-256) is what stops someone
+        ''' without the archive's own decryption capability from running a dictionary attack
+        ''' against known file content using the index alone.
+        ''' </summary>
+        Private Function ComputeDedupHash(Plain As Byte(), PlainLength As Integer) As Byte()
+
+            '
+            ' Lazy, on-first-use creation: nothing calls this unless Options.Deduplication is
+            ' actually on, so the key only ever comes into existence - and only ever gets
+            ' persisted - when deduplication is genuinely in use, never as a side effect of
+            ' merely setting the option.
+            '
+            EnsureDedupKeyWrapped()
+
+            Using Hmac As New HMACSHA256(_DedupKey)
+                Return Hmac.ComputeHash(Plain, 0, PlainLength)
+            End Using
 
         End Function
 
