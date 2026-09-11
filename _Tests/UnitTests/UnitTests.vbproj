@@ -120,6 +120,7 @@
     <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\CopyOnWrite.vb" />
     <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\ExtentOperations.vb" />
     <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\Transactions.vb" />
+    <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\WriteCoalescing.vb" />
     <Compile Include="Tests\Chunked Stream\Physical layout operations\Defragmentation.vb" />
     <Compile Include="Tests\Chunked Stream\Storage representation policies\Compression.vb" />
     <Compile Include="Tests\Chunked Stream\Storage representation policies\CompressionCodecs.vb" />

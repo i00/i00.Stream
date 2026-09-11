@@ -244,6 +244,82 @@ Namespace Streams
 
         End Sub
 
+        ''' <summary>
+        ''' Tries to absorb a genuine end-of-stream append into the physical record the stream's
+        ''' current last extent already references, instead of always creating a brand-new
+        ''' (possibly tiny) chunk for every Write() call - see the write-coalescing plan notes.
+        ''' Unconditional: this is not gated behind an option, since every Write() call still
+        ''' fully commits before returning either way, exactly as before this existed.
+        ''' </summary>
+        ''' <returns>
+        ''' The number of leading bytes of Input (starting at DataOffset) actually absorbed into
+        ''' the extended chunk - 0 if nothing was eligible to extend (an empty stream, a sparse or
+        ''' shared or already-full last chunk, or one only partially referenced by its extent).
+        ''' Never more than Count, and never more than the room remaining up to Options.ChunkSize.
+        ''' </returns>
+        Private Async Function TryExtendLastChunkAsync(Input As Byte(),
+                                                       DataOffset As Integer,
+                                                       Count As Integer,
+                                                       RunAsync As Boolean,
+                                                       CancellationToken As Threading.CancellationToken) As Task(Of Integer)
+
+            If Count <= 0 Then Return 0
+            If _Extents.Count = 0 Then Return 0
+
+            Dim LastIndex = _Extents.Count - 1
+            Dim LastExtent = _Extents(LastIndex)
+
+            If LastExtent.PhysicalRecordId = SparsePhysicalRecordId Then Return 0
+            If LastExtent.PhysicalRecordOffset <> 0 Then Return 0
+
+            Dim Record = GetPhysicalRecord(LastExtent.PhysicalRecordId)
+
+            ' Only a whole, unshared record - one extent referencing it, covering all of it from
+            ' its own start - can be safely grown in place. A shared or dedup-matched record has
+            ' other extents relying on its exact current content; a sub-range reference isn't
+            ' "the whole chunk" to begin with.
+            If Record.RefCount <> 1 Then Return 0
+            If Record.PlainLength <> LastExtent.LogicalLength Then Return 0
+
+            Dim RoomLeft = Options.ChunkSize - Record.PlainLength
+            If RoomLeft <= 0 Then Return 0
+
+            Dim AbsorbCount = Math.Min(RoomLeft, Count)
+
+            Dim OldPlain As Byte()
+
+            If RunAsync Then
+                OldPlain = Await ReadPhysicalRecordPlainAsync(Record, CancellationToken).ConfigureAwait(False)
+            Else
+                OldPlain = ReadPhysicalRecordPlain(Record)
+            End If
+
+            Dim Combined(OldPlain.Length + AbsorbCount - 1) As Byte
+            Buffer.BlockCopy(OldPlain, 0, Combined, 0, OldPlain.Length)
+            Buffer.BlockCopy(Input, DataOffset, Combined, OldPlain.Length, AbsorbCount)
+
+            ' Goes through the ordinary write pipeline - including the deduplication hook, if
+            ' the grown content happens to already match something else in the index.
+            Dim NewRecord = Await WritePhysicalRecordAsync(Combined, Combined.Length, RunAsync, CancellationToken).ConfigureAwait(False)
+
+            Dim OldRecordId = LastExtent.PhysicalRecordId
+
+            LastExtent.PhysicalRecordId = NewRecord.RecordId
+            LastExtent.PhysicalRecordOffset = 0
+            LastExtent.LogicalLength = Combined.Length
+            _Extents(LastIndex) = LastExtent
+
+            _Length += AbsorbCount
+
+            MarkExtentPageDirty(LastIndex)
+
+            DecrementPhysicalRecordRefCount(OldRecordId)
+            SettleDeferredPhysicalRecordReclaims()
+
+            Return AbsorbCount
+
+        End Function
+
         '
         ' Applies every physical-record reclaim deferred during an extent mutation. In Scan
         ' mode the unreferenced records are found by scanning the rebuilt extent table;

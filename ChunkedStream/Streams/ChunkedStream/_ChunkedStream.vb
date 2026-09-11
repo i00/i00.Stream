@@ -3779,9 +3779,18 @@ Namespace Streams
                     Dim AppendOffset = LogicalOffset + ExistingLength
                     Dim AppendDataOffset = DataOffset + CInt(ExistingLength)
                     Dim AppendCount = EffectiveCount - CInt(ExistingLength)
-                    Dim AppendExtents = Await BuildExtentsFromBufferAsync(Input, AppendDataOffset, AppendCount, RunAsync, CancellationToken).ConfigureAwait(False)
 
-                    InsertExtentsCore(AppendOffset, AppendExtents)
+                    Dim ExtendedCount = Await TryExtendLastChunkAsync(Input, AppendDataOffset, AppendCount, RunAsync, CancellationToken).ConfigureAwait(False)
+
+                    If ExtendedCount < AppendCount Then
+
+                        Dim RemainingDataOffset = AppendDataOffset + ExtendedCount
+                        Dim RemainingCount = AppendCount - ExtendedCount
+                        Dim AppendExtents = Await BuildExtentsFromBufferAsync(Input, RemainingDataOffset, RemainingCount, RunAsync, CancellationToken).ConfigureAwait(False)
+
+                        InsertExtentsCore(AppendOffset + ExtendedCount, AppendExtents)
+
+                    End If
 
                 End If
 
