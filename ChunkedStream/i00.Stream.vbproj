@@ -85,6 +85,7 @@
     <Compile Include="Streams\ChunkedStream\Checkpoints.vb" />
     <Compile Include="Streams\ChunkedStream\Compression.vb" />
     <Compile Include="Streams\ChunkedStream\DeferredPublish.vb" />
+    <Compile Include="Streams\ChunkedStream\Deduplication.vb" />
     <Compile Include="Streams\ChunkedStream\Diagnostics.vb" />
     <Compile Include="Streams\ChunkedStream\Extents.vb" />
     <Compile Include="Streams\ChunkedStream\Options.vb" />
