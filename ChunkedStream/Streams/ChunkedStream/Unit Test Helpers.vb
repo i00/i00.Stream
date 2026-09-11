@@ -42,6 +42,35 @@
 
         End Sub
 
+        ''' <summary>Inserts a raw (Key, Value) entry into the dedup index, creating it if this is the first entry - exercises index persistence directly, without going through the write-path hook that isn't wired up yet.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Sub Debug_DedupInsert(Key As Byte(), Value As Long)
+
+            EnsureDedupHashTable().Insert(Key, Value)
+
+        End Sub
+
+        ''' <summary>Looks up a raw key in the dedup index. False (with Value unset) both when the index doesn't exist yet and when the key is simply missing.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_DedupTryGetValue(Key As Byte(), ByRef Value As Long) As Boolean
+
+            If _DedupHashTable Is Nothing Then
+                Value = 0
+                Return False
+            End If
+
+            Return _DedupHashTable.TryGetValue(Key, Value)
+
+        End Function
+
+        ''' <summary>Number of entries in the dedup index, or 0 if it doesn't exist yet.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_DedupIndexCount() As Integer
+
+            Return If(_DedupHashTable IsNot Nothing, _DedupHashTable.Count, 0)
+
+        End Function
+
         <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
         Friend Sub Debug_CorruptPhysicalRecordMetadataRefCount(RecordId As Long,
                                                                NewRefCount As Integer)

@@ -677,6 +677,25 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Lazily creates the in-memory dedup index on first real use, the same way
+        ''' <see cref="EnsureDedupKeyWrapped"/> lazily creates the dedup key - so a stream that
+        ''' never uses deduplication never pays for the table. <see cref="_DedupIndexPageEntryCount"/>
+        ''' is fixed from <see cref="ChunkedStreamOptions.DedupIndexPageEntryCount"/> at that moment,
+        ''' the same way <see cref="_IndexPageEntryCount"/> is fixed at file creation - changing the
+        ''' option afterwards has no effect on an index that already exists.
+        ''' </summary>
+        Private Function EnsureDedupHashTable() As ExtendibleHashTable
+
+            If _DedupHashTable Is Nothing Then
+                _DedupIndexPageEntryCount = Options.DedupIndexPageEntryCount
+                _DedupHashTable = New ExtendibleHashTable(_DedupIndexPageEntryCount)
+            End If
+
+            Return _DedupHashTable
+
+        End Function
+
         Private Shared Function DeriveWrapKey(WrapMode As MasterKeyWrapModes,
                                               EncryptionInfo As EncryptionInfo,
                                               WrapSalt As Byte()) As Byte()

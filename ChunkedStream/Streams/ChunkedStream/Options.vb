@@ -276,6 +276,7 @@ Namespace Streams
 
             Private _IndexPageEntryCount As Integer = 256
             Private _IndexDirectoryEntryCount As Integer = 256
+            Private _DedupIndexPageEntryCount As Integer = 256
 
             ''' <summary>
             ''' Controls where newly written storage records are placed.
@@ -368,6 +369,23 @@ Namespace Streams
                 Set
                     If Value <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(IndexDirectoryEntryCount))
                     _IndexDirectoryEntryCount = Value
+                End Set
+            End Property
+
+            ''' <summary>
+            ''' Number of entries stored in each authenticated deduplication-index page, and the
+            ''' bucket capacity of the in-memory extendible hash table backing it. Fixed for a given
+            ''' index the first time deduplication is actually used (the first hash computed or
+            ''' entry inserted) - changing this afterwards has no effect until the index is rebuilt
+            ''' (see <see cref="Deduplication"/> and its planned rebuild API).
+            ''' </summary>
+            Public Property DedupIndexPageEntryCount As Integer
+                Get
+                    Return _DedupIndexPageEntryCount
+                End Get
+                Set
+                    If Value <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(DedupIndexPageEntryCount))
+                    _DedupIndexPageEntryCount = Value
                 End Set
             End Property
 

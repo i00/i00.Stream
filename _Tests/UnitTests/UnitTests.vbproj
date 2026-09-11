@@ -105,6 +105,7 @@
     <Compile Include="Tests\Chunked Stream\Correctness and survival\Durability.vb" />
     <Compile Include="Tests\Chunked Stream\Correctness and survival\Recovery.vb" />
     <Compile Include="Tests\Chunked Stream\Correctness and survival\Validation.vb" />
+    <Compile Include="Tests\Chunked Stream\Deduplication\DedupIndexPersistence.vb" />
     <Compile Include="Tests\Chunked Stream\Deduplication\DedupKeyLifecycle.vb" />
     <Compile Include="Tests\Chunked Stream\Deduplication\ExtendibleHashTable.vb" />
     <Compile Include="Tests\Chunked Stream\Developer confidence\Concurrency.vb" />

@@ -17,6 +17,8 @@ Namespace Streams
             Public Property PhysicalRecordDirectoryPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)
             Public Property HoleDirectoryPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)
             Public Property HoleRecords As List(Of HoleDirectoryRecord)
+            Public Property DedupPageDescriptors As Dictionary(Of Integer, MetadataPageDescriptor)
+            Public Property DedupEntries As List(Of (Key As Byte(), Value As Long))
             Public ReadOnly Property Repairs As New List(Of AutoRepair)()
         End Class
 
@@ -50,6 +52,7 @@ Namespace Streams
             Public Property DirectPhysicalRecordPageDescriptors As List(Of MetadataPageDescriptor)
             Public Property PhysicalRecordDirectoryPageDescriptors As List(Of MetadataPageDescriptor)
             Public Property HoleDirectoryPageDescriptors As List(Of MetadataPageDescriptor)
+            Public Property DedupPageDescriptors As List(Of MetadataPageDescriptor)
         End Class
 
         Private Shared Function ComputeMac(Buffer As Byte(), Count As Integer, MacKey As Byte()) As Byte()
@@ -530,6 +533,113 @@ Namespace Streams
 
         End Function
 
+        Private Function BuildDedupEntryPage(PageNumber As Integer,
+                                             Entries As IList(Of (Key As Byte(), Value As Long))) As Byte()
+
+            If PageNumber < 0 Then Throw New ArgumentOutOfRangeException(NameOf(PageNumber))
+            If Entries Is Nothing Then Throw New ArgumentNullException(NameOf(Entries))
+            If _DedupIndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid dedup index page entry count.")
+
+            Dim PageLengthWithoutMac = DirectoryPageHeaderSize + (_DedupIndexPageEntryCount * DedupEntrySize)
+            Dim Page(PageLengthWithoutMac + MacSize - 1) As Byte
+            Dim FirstEntryIndex = PageNumber * _DedupIndexPageEntryCount
+            Dim EntryCount = Math.Max(0, Math.Min(_DedupIndexPageEntryCount, Entries.Count - FirstEntryIndex))
+
+            Buffer.BlockCopy(DirectoryPageMagic, 0, Page, 0, DirectoryPageMagic.Length)
+            Buffer.BlockCopy(BitConverter.GetBytes(CInt(DirectoryTypes.DedupEntryPages)), 0, Page, 8, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(PageNumber), 0, Page, 12, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(EntryCount), 0, Page, 16, 4)
+
+            Dim EntryOffset = DirectoryPageHeaderSize
+
+            For EntryIndex = 0 To _DedupIndexPageEntryCount - 1
+                Dim SourceIndex = FirstEntryIndex + EntryIndex
+
+                If SourceIndex < Entries.Count Then
+                    Dim Entry = Entries(SourceIndex)
+
+                    If Entry.Key Is Nothing OrElse Entry.Key.Length <> MacSize Then
+                        Throw New InvalidDataException("Invalid dedup index entry key.")
+                    End If
+
+                    Buffer.BlockCopy(Entry.Key, 0, Page, EntryOffset, MacSize)
+                    Buffer.BlockCopy(BitConverter.GetBytes(Entry.Value), 0, Page, EntryOffset + MacSize, 8)
+                End If
+
+                EntryOffset += DedupEntrySize
+            Next
+
+            Dim Mac = ComputeMac(Page, PageLengthWithoutMac, PublicIntegrityKey)
+            Buffer.BlockCopy(Mac, 0, Page, PageLengthWithoutMac, MacSize)
+
+            Return Page
+
+        End Function
+
+        ''' <summary>
+        ''' Persists the dedup index as a flat, unordered set of pages - the same shape as the
+        ''' hole directory, and for the same reason: the index is a rebuildable hint (see the
+        ''' deduplication design notes), not addressed by page number from anywhere else, so there
+        ''' is no per-page dirty tracking to maintain, only whole-set rebuild-and-diff on publish.
+        ''' Entries only ever accumulate between rebuilds (nothing removes a live entry), so an
+        ''' unchanged page - most of them, after the first few - is left exactly where it already
+        ''' sits rather than rewritten, the same optimisation <see cref="WriteHoleDirectoryPagesAsync"/>
+        ''' uses and for the same reason: relocating a byte-identical page would just free its old
+        ''' copy and force another rewrite next publish for no actual change.
+        ''' </summary>
+        Private Async Function WriteDedupEntryPagesAsync(Entries As IList(Of (Key As Byte(), Value As Long)),
+                                                         RunAsync As Boolean,
+                                                         CancellationToken As Threading.CancellationToken) As Task(Of Dictionary(Of Integer, MetadataPageDescriptor))
+
+            Dim Result As New Dictionary(Of Integer, MetadataPageDescriptor)()
+
+            If Entries Is Nothing OrElse Entries.Count = 0 Then
+                Return Result
+            End If
+
+            Dim PageCount = GetIndexPageCount(Entries.Count, _DedupIndexPageEntryCount)
+
+            For PageNumber = 0 To PageCount - 1
+                Dim Page = BuildDedupEntryPage(PageNumber, Entries)
+                Dim NewMac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
+
+                Dim OldDescriptor As MetadataPageDescriptor = Nothing
+                Dim HadOldDescriptor = _DedupPageDescriptors.TryGetValue(PageNumber, OldDescriptor)
+
+                If HadOldDescriptor AndAlso
+                   OldDescriptor.Offset > 0 AndAlso
+                   OldDescriptor.Length = Page.Length AndAlso
+                   OldDescriptor.Offset + CLng(OldDescriptor.Length) <= BaseStream.Length AndAlso
+                   OldDescriptor.Mac IsNot Nothing AndAlso
+                   FixedTimeEquals(OldDescriptor.Mac, 0, NewMac, 0, MacSize) Then
+
+                    Result(PageNumber) = OldDescriptor
+                    Continue For
+
+                End If
+
+                Dim Offset = GetNextWriteOffset(Page.Length, Options.NewIndexDirectoryPageWriteLocationPolicy, True)
+
+                Await WriteAtEitherAsync(RunAsync, Offset, Page, 0, Page.Length, CancellationToken).ConfigureAwait(False)
+
+                Dim NewDescriptor = New MetadataPageDescriptor With {
+                    .PageNumber = PageNumber,
+                    .Offset = Offset,
+                    .Length = Page.Length,
+                    .Mac = NewMac
+                }
+
+                If HadOldDescriptor AndAlso OldDescriptor.Offset > 0 AndAlso OldDescriptor.Length > 0 Then
+                    DeferFreeSpace(OldDescriptor.Offset, OldDescriptor.Length)
+                End If
+
+                Result(PageNumber) = NewDescriptor
+            Next
+
+            Return Result
+
+        End Function
+
         ''' <summary>
         ''' True when the entire file's physical-record state is exactly one unshared record
         ''' sitting at the deterministic start of the data area. In this state, no physical
@@ -558,7 +668,8 @@ Namespace Streams
                                            ExtentDirectoryDescriptors As IEnumerable(Of MetadataPageDescriptor),
                                            DirectPhysicalRecordPageDescriptors As IEnumerable(Of MetadataPageDescriptor),
                                            PhysicalRecordDirectoryDescriptors As IEnumerable(Of MetadataPageDescriptor),
-                                           HoleDirectoryDescriptors As IEnumerable(Of MetadataPageDescriptor)) As Byte()
+                                           HoleDirectoryDescriptors As IEnumerable(Of MetadataPageDescriptor),
+                                           DedupPageDescriptors As IEnumerable(Of MetadataPageDescriptor)) As Byte()
 
             Dim DirectExtentList =
                 If(DirectExtentPageDescriptors,
@@ -590,12 +701,19 @@ Namespace Streams
                 OrderBy(Function(descriptor) descriptor.PageNumber).
                 ToList()
 
+            Dim DedupPageList =
+                If(DedupPageDescriptors,
+                   Enumerable.Empty(Of MetadataPageDescriptor)()).
+                OrderBy(Function(descriptor) descriptor.PageNumber).
+                ToList()
+
             Dim DescriptorCount =
                 DirectExtentList.Count +
                 ExtentDirectoryList.Count +
                 DirectPhysicalRecordList.Count +
                 PhysicalRecordDirectoryList.Count +
-                HoleDirectoryList.Count
+                HoleDirectoryList.Count +
+                DedupPageList.Count
 
             Dim RootLengthWithoutMac =
                 MetadataRootHeaderSize +
@@ -617,10 +735,7 @@ Namespace Streams
             Buffer.BlockCopy(BitConverter.GetBytes(DirectPhysicalRecordList.Count), 0, Root, 48, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(PhysicalRecordDirectoryList.Count), 0, Root, 52, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(HoleDirectoryList.Count), 0, Root, 56, 4)
-
-            '
-            ' Bytes 60 through 63 are reserved.
-            '
+            Buffer.BlockCopy(BitConverter.GetBytes(DedupPageList.Count), 0, Root, 60, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(_NextAnchorId), 0, Root, 64, 8)
 
             Dim EntryOffset = MetadataRootHeaderSize
@@ -647,6 +762,11 @@ Namespace Streams
 
             For Each Descriptor In HoleDirectoryList
                 WriteMetadataRootDescriptor(Root, EntryOffset, DirectoryTypes.Holes, Descriptor)
+                EntryOffset += MetadataRootDescriptorSize
+            Next
+
+            For Each Descriptor In DedupPageList
+                WriteMetadataRootDescriptor(Root, EntryOffset, DirectoryTypes.DedupEntryPages, Descriptor)
                 EntryOffset += MetadataRootDescriptorSize
             Next
 
@@ -890,12 +1010,43 @@ Namespace Streams
                                                 OrderBy(Function(descriptor) descriptor.PageNumber).
                                                 ToArray()
 
+                Dim NewDedupPageDescriptors =
+                Await WriteDedupEntryPagesAsync(
+                    If(_DedupHashTable IsNot Nothing, _DedupHashTable.GetAllEntries().ToList(), New List(Of (Key As Byte(), Value As Long))()),
+                    RunAsync,
+                    CancellationToken).ConfigureAwait(False)
+
+                For Each Descriptor In _DedupPageDescriptors.Values.ToArray()
+
+                    If NewDedupPageDescriptors.ContainsKey(Descriptor.PageNumber) = False Then
+
+                        If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                            DeferFreeSpace(Descriptor.Offset,
+                                                        Descriptor.Length)
+                        End If
+
+                    End If
+
+                Next
+
+                _DedupPageDescriptors.Clear()
+
+                For Each Pair In NewDedupPageDescriptors
+                    _DedupPageDescriptors(Pair.Key) = Pair.Value
+                Next
+
+                Dim DedupPageDescriptors =
+                _DedupPageDescriptors.Values.
+                                        OrderBy(Function(descriptor) descriptor.PageNumber).
+                                        ToArray()
+
                 Dim Root =
                 BuildMetadataRoot(DirectExtentPageDescriptors,
                                     ExtentDirectoryDescriptors,
                                     DirectPhysicalRecordPageDescriptors,
                                     PhysicalRecordDirectoryDescriptors,
-                                    HoleDirectoryDescriptors)
+                                    HoleDirectoryDescriptors,
+                                    DedupPageDescriptors)
 
                 Dim NewRootMac(MacSize - 1) As Byte
                 Buffer.BlockCopy(Root, Root.Length - MacSize, NewRootMac, 0, MacSize)
@@ -1062,6 +1213,7 @@ Namespace Streams
             Dim Extents = ReadExtentPages(BaseStream, ExtentPageDescriptors, Root.ExtentCount, IndexPageEntryCount)
             Dim PhysicalRecords = ReadPhysicalRecordPages(BaseStream, PhysicalRecordPageDescriptors, Root.PhysicalRecordCount, IndexPageEntryCount, Tolerate, Repairs)
             Dim HoleRecords = ReadHoleDirectoryPages(BaseStream, Root.HoleDirectoryPageDescriptors)
+            Dim DedupEntries = ReadDedupEntryPages(BaseStream, Root.DedupPageDescriptors)
 
             If PhysicalRecords.Count = 0 AndAlso
                Extents.Count = 1 AndAlso
@@ -1110,7 +1262,9 @@ Namespace Streams
                 .PhysicalRecordPageDescriptors = PhysicalRecordPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
                 .PhysicalRecordDirectoryPageDescriptors = Root.PhysicalRecordDirectoryPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
                 .HoleDirectoryPageDescriptors = Root.HoleDirectoryPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
-                .HoleRecords = HoleRecords
+                .HoleRecords = HoleRecords,
+                .DedupPageDescriptors = Root.DedupPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
+                .DedupEntries = DedupEntries
             }
 
             Metadata.Repairs.AddRange(Repairs)
@@ -1197,7 +1351,8 @@ Namespace Streams
                     .ExtentDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
                     .DirectPhysicalRecordPageDescriptors = New List(Of MetadataPageDescriptor)(),
                     .PhysicalRecordDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
-                    .HoleDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)()
+                    .HoleDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
+                    .DedupPageDescriptors = New List(Of MetadataPageDescriptor)()
                 }
             End If
 
@@ -1237,7 +1392,8 @@ Namespace Streams
                 .ExtentDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
                 .DirectPhysicalRecordPageDescriptors = New List(Of MetadataPageDescriptor)(),
                 .PhysicalRecordDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
-                .HoleDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)()
+                .HoleDirectoryPageDescriptors = New List(Of MetadataPageDescriptor)(),
+                .DedupPageDescriptors = New List(Of MetadataPageDescriptor)()
             }
 
             If Result.NextAnchorId <= 0 Then
@@ -1249,6 +1405,7 @@ Namespace Streams
             Dim DirectPhysicalRecordDescriptorCount = BitConverter.ToInt32(Root, 48)
             Dim PhysicalRecordDirectoryDescriptorCount = BitConverter.ToInt32(Root, 52)
             Dim HoleDirectoryDescriptorCount = BitConverter.ToInt32(Root, 56)
+            Dim DedupPageDescriptorCount = BitConverter.ToInt32(Root, 60)
 
             If Result.IndexPageEntryCount <= 0 Then Throw New InvalidDataException("Invalid metadata page entry count.")
             If Result.IndexDirectoryEntryCount <= 0 Then Throw New InvalidDataException("Invalid metadata directory entry count.")
@@ -1264,6 +1421,7 @@ Namespace Streams
             ReadRootDescriptorGroup(Root, EntryOffset, DescriptorEndOffset, DirectPhysicalRecordDescriptorCount, DirectoryTypes.PhysicalRecordPages, Result.DirectPhysicalRecordPageDescriptors)
             ReadRootDescriptorGroup(Root, EntryOffset, DescriptorEndOffset, PhysicalRecordDirectoryDescriptorCount, DirectoryTypes.PhysicalRecordPages, Result.PhysicalRecordDirectoryPageDescriptors)
             ReadRootDescriptorGroup(Root, EntryOffset, DescriptorEndOffset, HoleDirectoryDescriptorCount, DirectoryTypes.Holes, Result.HoleDirectoryPageDescriptors)
+            ReadRootDescriptorGroup(Root, EntryOffset, DescriptorEndOffset, DedupPageDescriptorCount, DirectoryTypes.DedupEntryPages, Result.DedupPageDescriptors)
 
             Return Result
 
@@ -1596,6 +1754,53 @@ Namespace Streams
                     End If
 
                     EntryOffset += HoleDirectoryEntrySize
+                Next
+            Next
+
+            Return Result
+
+        End Function
+
+        Private Shared Function ReadDedupEntryPages(BaseStream As Stream,
+                                                    Descriptors As IEnumerable(Of MetadataPageDescriptor)) As List(Of (Key As Byte(), Value As Long))
+
+            Dim Result As New List(Of (Key As Byte(), Value As Long))()
+
+            For Each Descriptor In Descriptors.OrderBy(Function(x) x.PageNumber)
+                Dim Page = ReadMetadataPageBytes(BaseStream, Descriptor)
+
+                Dim Mac = ComputeMac(Page, Page.Length - MacSize, PublicIntegrityKey)
+
+                If FixedTimeEquals(Mac, 0, Descriptor.Mac, 0, MacSize) = False Then
+                    Throw New CryptographicException("Dedup index page MAC invalid.")
+                End If
+
+                If FixedTimeEquals(DirectoryPageMagic, 0, Page, 0, DirectoryPageMagicSize) = False Then
+                    Throw New InvalidDataException("Invalid dedup index page magic.")
+                End If
+
+                Dim DirectoryType = CType(BitConverter.ToInt32(Page, 8), DirectoryTypes)
+
+                If DirectoryType <> DirectoryTypes.DedupEntryPages Then
+                    Throw New InvalidDataException("Unexpected directory type while reading dedup index pages.")
+                End If
+
+                Dim EntryCount = BitConverter.ToInt32(Page, 16)
+
+                If EntryCount < 0 Then Throw New InvalidDataException("Invalid dedup index page entry count.")
+                If DirectoryPageHeaderSize + (EntryCount * DedupEntrySize) + MacSize > Page.Length Then Throw New InvalidDataException("Dedup index page entry area is truncated.")
+
+                Dim EntryOffset = DirectoryPageHeaderSize
+
+                For Index = 0 To EntryCount - 1
+                    Dim Key(MacSize - 1) As Byte
+                    Buffer.BlockCopy(Page, EntryOffset, Key, 0, MacSize)
+
+                    Dim Value = BitConverter.ToInt64(Page, EntryOffset + MacSize)
+
+                    Result.Add((Key, Value))
+
+                    EntryOffset += DedupEntrySize
                 Next
             Next
 

@@ -533,6 +533,14 @@ Namespace Streams
         Private Const PhysicalRecordEntrySize As Integer = 32
 
         '
+        ' A dedup index entry: a 32-byte HMAC-SHA256 of a chunk's plaintext plus the
+        ' 8-byte PhysicalRecordId it maps to. No MAC is stored per-entry (see the
+        ' deduplication design notes) - the index is a hint, not a source of truth, and a
+        ' real dedup match is always verified by decrypting and rehashing the candidate.
+        '
+        Private Const DedupEntrySize As Integer = 40
+
+        '
         ' A chunk record's plaintext is split into SubBlockCount independently compressed,
         ' encrypted and authenticated sub-blocks of at most Options.SubBlockSize bytes each -
         ' decoupling the MAC/compression/decrypt granularity from ChunkSize (the allocation /
@@ -600,13 +608,15 @@ Namespace Streams
         Private Const DedupKeyWrapAreaLength As Integer = 84
 
         '
-        ' Deduplication index addressing - how many entries a bucket page holds, how many
-        ' bucket-page descriptors a directory page holds, and the extendible hash table's
-        ' current directory size. The index's own bucket/directory pages live in the metadata
-        ' root's page-descriptor list (a new DirectoryTypes kind), not here - these are just
-        ' the small scalars needed to interpret that list.
+        ' Deduplication index addressing. The index itself is not addressed by page/bucket
+        ' number at all - like the hole directory, its entries are a flat, unordered set,
+        ' fully rebuildable by re-inserting every entry into a fresh ExtendibleHashTable, so
+        ' there is no on-disk bucket/directory structure to describe here. DedupEntryCount is
+        ' purely informational (kept in step with the in-memory table on every publish, not
+        ' relied on to validate a read-back). DedupIndexDirectoryEntryCountOffset is reserved,
+        ' unused while the index has only one page tier (see WriteDedupEntryPagesAsync).
         '
-        Private Const DedupBucketCountOffset As Integer = 360
+        Private Const DedupEntryCountOffset As Integer = 360
         Private Const DedupIndexPageEntryCountOffset As Integer = 368
         Private Const DedupIndexDirectoryEntryCountOffset As Integer = 372
 
@@ -644,6 +654,7 @@ Namespace Streams
             ExtentPages = 1
             PhysicalRecordPages = 2
             Holes = 3
+            DedupEntryPages = 4
         End Enum
 
         'TODO: IS THIS ENUM USEFUL ANYMORE ... REMOVE IT?
@@ -1484,9 +1495,19 @@ Namespace Streams
 
         Private _DedupKey As Byte()
         Private _DedupCoveredUpToRecordId As Long
-        Private _DedupBucketCount As Long
+        Private _DedupEntryCount As Long
         Private _DedupIndexPageEntryCount As Integer
         Private _DedupIndexDirectoryEntryCount As Integer
+
+        ''' <summary>
+        ''' In-memory content-addressed dedup index (HMAC-SHA256 of plaintext -&gt; PhysicalRecordId).
+        ''' Nothing until <see cref="EnsureDedupHashTable"/> creates it - lazily on first real use,
+        ''' the same way <see cref="_DedupKey"/> is. Not the source of truth: fully rebuilt from the
+        ''' flat entry list read back by <see cref="ReadDedupEntryPages"/> on every open, exactly
+        ''' like the hole directory rebuilds <see cref="_FreeSpaces"/>-adjacent bookkeeping from its
+        ''' own flat record list rather than persisting its internal structure directly.
+        ''' </summary>
+        Private _DedupHashTable As ExtendibleHashTable
 
         Private _HeaderFlags As HeaderFlags
         Private _HeaderSequence As Long
@@ -1540,6 +1561,7 @@ Namespace Streams
         Private ReadOnly _PhysicalRecordPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
         Private ReadOnly _PhysicalRecordDirectoryPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
         Private ReadOnly _HoleDirectoryPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
+        Private ReadOnly _DedupPageDescriptors As New Dictionary(Of Integer, MetadataPageDescriptor)()
 
         ''' <summary>
         ''' Flags stored in an individual physical chunk record.
@@ -2266,10 +2288,26 @@ Namespace Streams
                 Throw New EncryptionMismatchException("The supplied encryption information could not unwrap the file master key.")
             End If
 
-            Result._DedupBucketCount = BitConverter.ToInt64(Header, DedupBucketCountOffset)
+            Result._DedupEntryCount = BitConverter.ToInt64(Header, DedupEntryCountOffset)
             Result._DedupIndexPageEntryCount = BitConverter.ToInt32(Header, DedupIndexPageEntryCountOffset)
             Result._DedupIndexDirectoryEntryCount = BitConverter.ToInt32(Header, DedupIndexDirectoryEntryCountOffset)
             Result._DedupCoveredUpToRecordId = BitConverter.ToInt64(Header, DedupCoveredUpToRecordIdOffset)
+
+            For Each pair In Metadata.DedupPageDescriptors
+                Result._DedupPageDescriptors(pair.Key) = pair.Value
+            Next
+
+            If Metadata.DedupEntries IsNot Nothing AndAlso Metadata.DedupEntries.Count > 0 Then
+
+                Dim RebuiltTable As New ExtendibleHashTable(Result._DedupIndexPageEntryCount)
+
+                For Each Entry In Metadata.DedupEntries
+                    RebuiltTable.Insert(Entry.Key, Entry.Value)
+                Next
+
+                Result._DedupHashTable = RebuiltTable
+
+            End If
 
             '
             ' Unlike the file master key, a dedup-key unwrap failure isn't fatal - the index is
@@ -2305,7 +2343,8 @@ Namespace Streams
                                      Metadata.ExtentDirectoryPageDescriptors,
                                      Metadata.PhysicalRecordPageDescriptors,
                                      Metadata.PhysicalRecordDirectoryPageDescriptors,
-                                     Metadata.HoleDirectoryPageDescriptors}
+                                     Metadata.HoleDirectoryPageDescriptors,
+                                     Metadata.DedupPageDescriptors}
 
                 For Each Descriptor In Descriptors.Values
                     If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
@@ -4934,7 +4973,8 @@ Namespace Streams
             Buffer.BlockCopy(BitConverter.GetBytes(_MetadataRootLength), 0, _Header, MetadataRootLengthOffset, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(_IndexPageEntryCount), 0, _Header, IndexPageEntryCountOffset, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(_IndexDirectoryEntryCount), 0, _Header, IndexDirectoryEntryCountOffset, 4)
-            Buffer.BlockCopy(BitConverter.GetBytes(_DedupBucketCount), 0, _Header, DedupBucketCountOffset, 8)
+            _DedupEntryCount = If(_DedupHashTable IsNot Nothing, CLng(_DedupHashTable.Count), 0L)
+            Buffer.BlockCopy(BitConverter.GetBytes(_DedupEntryCount), 0, _Header, DedupEntryCountOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(_DedupIndexPageEntryCount), 0, _Header, DedupIndexPageEntryCountOffset, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(_DedupIndexDirectoryEntryCount), 0, _Header, DedupIndexDirectoryEntryCountOffset, 4)
             Buffer.BlockCopy(BitConverter.GetBytes(_DedupCoveredUpToRecordId), 0, _Header, DedupCoveredUpToRecordIdOffset, 8)
@@ -5189,10 +5229,11 @@ Namespace Streams
             _IndexPageEntryCount = Source._IndexPageEntryCount
             _IndexDirectoryEntryCount = Source._IndexDirectoryEntryCount
             _DedupKey = Source._DedupKey
-            _DedupBucketCount = Source._DedupBucketCount
+            _DedupEntryCount = Source._DedupEntryCount
             _DedupIndexPageEntryCount = Source._DedupIndexPageEntryCount
             _DedupIndexDirectoryEntryCount = Source._DedupIndexDirectoryEntryCount
             _DedupCoveredUpToRecordId = Source._DedupCoveredUpToRecordId
+            _DedupHashTable = Source._DedupHashTable
 
             _Extents.Clear()
             _Extents.AddRange(Source._Extents)
@@ -5207,6 +5248,7 @@ Namespace Streams
             AdoptPageDescriptors(Source._PhysicalRecordPageDescriptors, _PhysicalRecordPageDescriptors)
             AdoptPageDescriptors(Source._PhysicalRecordDirectoryPageDescriptors, _PhysicalRecordDirectoryPageDescriptors)
             AdoptPageDescriptors(Source._HoleDirectoryPageDescriptors, _HoleDirectoryPageDescriptors)
+            AdoptPageDescriptors(Source._DedupPageDescriptors, _DedupPageDescriptors)
 
             _DirtyExtentPages.Clear()
             _DirtyPhysicalRecordPages.Clear()
