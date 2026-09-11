@@ -1399,6 +1399,14 @@ Namespace Streams
 
             Dim OldRecord = GetPhysicalRecord(OldRecordId)
 
+            '
+            ' WritePhysicalRecordWithPolicy already credits this call with one reference to
+            ' NewRecord - whether it was just created (the common case) or is an existing record
+            ' matched via deduplication, which may already carry other live references of its
+            ' own. Either way, NewRecord.RefCount must never be overwritten outright: every extent
+            ' below is redirected onto NewRecord.RecordId, and only the ones beyond the first need
+            ' an additional increment to account for.
+            '
             Dim NewRecord = WritePhysicalRecordWithPolicy(Plain,
                                                           Plain.Length,
                                                           CompressionMethod,
@@ -1407,8 +1415,7 @@ Namespace Streams
                                                           EncryptionMethod,
                                                           EvaluateFully:=True)
 
-            NewRecord.RefCount = OldRecord.RefCount
-            _PhysicalRecords(NewRecord.RecordId) = NewRecord
+            Dim RedirectedExtentCount = 0
 
             For Index = 0 To _Extents.Count - 1
 
@@ -1418,7 +1425,12 @@ Namespace Streams
 
                 Extent.PhysicalRecordId = NewRecord.RecordId
                 _Extents(Index) = Extent
+                RedirectedExtentCount += 1
 
+            Next
+
+            For AdditionalReference = 2 To RedirectedExtentCount
+                IncrementPhysicalRecordRefCount(NewRecord.RecordId)
             Next
 
             OldRecord.RefCount = 0

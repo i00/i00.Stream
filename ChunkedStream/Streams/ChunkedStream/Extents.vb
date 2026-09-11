@@ -1057,6 +1057,8 @@ Namespace Streams
             Public IsSparse As Boolean
             Public RecordId As Long
             Public Ivs As Byte()()
+            Public IsDeduped As Boolean
+            Public DedupedRecord As PhysicalRecordEntry
         End Structure
 
         '
@@ -1096,15 +1098,32 @@ Namespace Streams
                     .IsSparse = StoreSparse AndAlso IsAllZero(Segment, SegmentLength)}
 
                 If Plan.IsSparse = False Then
-                    Plan.RecordId = AllocatePhysicalRecordId()
-                    Dim SubBlockCount = ComputeSubBlockCount(SegmentLength, Options.SubBlockSize)
-                    Dim Ivs As Byte()() = New Byte(SubBlockCount - 1)() {}
-                    For SubBlockIndex = 0 To SubBlockCount - 1
-                        Dim SubIv(IvSize - 1) As Byte
-                        _Rng.GetBytes(SubIv)
-                        Ivs(SubBlockIndex) = SubIv
-                    Next
-                    Plan.Ivs = Ivs
+
+                    Dim Deduped As PhysicalRecordEntry? = Nothing
+
+                    If Options.Deduplication Then
+                        Deduped = Await TryDeduplicateWriteAsync(Segment, SegmentLength, RunAsync, CancellationToken).ConfigureAwait(False)
+                    End If
+
+                    If Deduped.HasValue Then
+
+                        Plan.IsDeduped = True
+                        Plan.DedupedRecord = Deduped.Value
+
+                    Else
+
+                        Plan.RecordId = AllocatePhysicalRecordId()
+                        Dim SubBlockCount = ComputeSubBlockCount(SegmentLength, Options.SubBlockSize)
+                        Dim Ivs As Byte()() = New Byte(SubBlockCount - 1)() {}
+                        For SubBlockIndex = 0 To SubBlockCount - 1
+                            Dim SubIv(IvSize - 1) As Byte
+                            _Rng.GetBytes(SubIv)
+                            Ivs(SubBlockIndex) = SubIv
+                        Next
+                        Plan.Ivs = Ivs
+
+                    End If
+
                 End If
 
                 Plans.Add(Plan)
@@ -1116,7 +1135,7 @@ Namespace Streams
 
             Dim NonSparse As New List(Of Integer)()
             For Index = 0 To Plans.Count - 1
-                If Plans(Index).IsSparse = False Then NonSparse.Add(Index)
+                If Plans(Index).IsSparse = False AndAlso Plans(Index).IsDeduped = False Then NonSparse.Add(Index)
             Next
 
             Dim PreparedByIndex(Plans.Count - 1) As PreparedChunkRecord
@@ -1168,6 +1187,12 @@ Namespace Streams
                     PlacedByPlanIndex(NonSparse(BatchIndex)) = PlacedBatch(BatchIndex)
                 Next
 
+                If Options.Deduplication Then
+                    For Each PlanIndex In NonSparse
+                        RegisterWrittenRecordForDeduplication(Plans(PlanIndex).Segment, Plans(PlanIndex).Segment.Length, PlacedByPlanIndex(PlanIndex).RecordId)
+                    Next
+                End If
+
             End If
 
             Dim Result As New List(Of ExtentIndexEntry)()
@@ -1179,6 +1204,13 @@ Namespace Streams
                     Result.Add(New ExtentIndexEntry With {
                         .LogicalLength = Plans(Index).Segment.Length,
                         .PhysicalRecordId = SparsePhysicalRecordId,
+                        .PhysicalRecordOffset = 0})
+
+                ElseIf Plans(Index).IsDeduped Then
+
+                    Result.Add(New ExtentIndexEntry With {
+                        .LogicalLength = Plans(Index).Segment.Length,
+                        .PhysicalRecordId = Plans(Index).DedupedRecord.RecordId,
                         .PhysicalRecordOffset = 0})
 
                 Else

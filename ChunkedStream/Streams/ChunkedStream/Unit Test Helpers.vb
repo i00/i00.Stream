@@ -156,6 +156,28 @@
 
         End Function
 
+        ''' <summary>The PhysicalRecordId of the extent covering LogicalOffset - lets a test confirm two logical ranges share (or don't share) the exact same physical record.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_GetPhysicalRecordIdAt(LogicalOffset As Long) As Long
+
+            Dim ExtentIndex = FindExtentIndex(LogicalOffset)
+
+            If ExtentIndex < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(LogicalOffset))
+            End If
+
+            Return _Extents(ExtentIndex).PhysicalRecordId
+
+        End Function
+
+        ''' <summary>Current reference count of a physical record - lets a test confirm deduplication shares a record without over- or under-counting its references.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_GetPhysicalRecordRefCount(RecordId As Long) As Integer
+
+            Return GetPhysicalRecord(RecordId).RefCount
+
+        End Function
+
         ''' <summary>
         ''' Files the lowest-id record on the first physical-record page onto the second page
         ''' too, and marks that page dirty - the torn state a process interrupted between the

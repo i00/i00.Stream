@@ -813,6 +813,15 @@ Namespace Streams
         ' Options.CompressionEvaluation is Sampled - used by ApplyOptions so a chunk it
         ' rewrites always ends up with an exact, non-estimated evaluation.
         '
+        ' This is the one low-level choke point shared by both ordinary writes
+        ' (WritePhysicalRecordAsync) and policy-driven rewrites (ReplacePhysicalRecordWithNewRecord,
+        ' used by ApplyOptions' Compression/Encryption/ChunkSize passes) - see the deduplication
+        ' design notes on why the parallel chunk-build path needs its own, separate hook instead.
+        ' A caller always gets back a record already carrying (at least) one reference credited to
+        ' this call, whether that record was just created or is an existing one matched via
+        ' deduplication - ReplacePhysicalRecordWithNewRecord relies on that uniform contract to
+        ' redirect every extent that referenced the old record without over- or under-counting.
+        '
         Private Async Function WritePhysicalRecordWithPolicyAsync(Plain As Byte(),
                                                                   PlainLength As Integer,
                                                                   CompressionMethodToUse As ChunkedStreamOptions.CompressionMethods,
@@ -822,6 +831,14 @@ Namespace Streams
                                                                   EvaluateFully As Boolean,
                                                                   RunAsync As Boolean,
                                                                   CancellationToken As Threading.CancellationToken) As Task(Of PhysicalRecordEntry)
+
+            If Options.Deduplication Then
+
+                Dim Deduped = Await TryDeduplicateWriteAsync(Plain, PlainLength, RunAsync, CancellationToken).ConfigureAwait(False)
+
+                If Deduped.HasValue Then Return Deduped.Value
+
+            End If
 
             Dim SubBlockCount = ComputeSubBlockCount(PlainLength, Options.SubBlockSize)
             Dim Ivs As Byte()() = New Byte(SubBlockCount - 1)() {}
@@ -836,9 +853,88 @@ Namespace Streams
                                    CompressionMethodToUse, CompressionRatioThreshold, ForceCompression,
                                    EncryptionMethod, EvaluateFully, _ChunkCipher)
 
-            Return Await PlaceChunkRecordAsync(Prepared, RunAsync, CancellationToken).ConfigureAwait(False)
+            Dim Placed = Await PlaceChunkRecordAsync(Prepared, RunAsync, CancellationToken).ConfigureAwait(False)
+
+            If Options.Deduplication Then
+                RegisterWrittenRecordForDeduplication(Plain, PlainLength, Placed.RecordId)
+            End If
+
+            Return Placed
 
         End Function
+
+        ''' <summary>
+        ''' Looks up Plain's dedup hash in the index and, on a verified match, returns that
+        ''' record with its reference count already incremented for this call - so a caller can
+        ''' treat the result exactly like a freshly written record. The index is a rebuildable
+        ''' hint, never trusted blindly: a match is only used once the candidate record's own
+        ''' plaintext, read back and decrypted, is confirmed byte-for-byte identical to Plain.
+        ''' Returns Nothing on a miss, a length mismatch (cheaper than decrypting to rule out),
+        ''' content that turns out to differ (a hash collision - vanishingly unlikely with
+        ''' HMAC-SHA256, but never assumed away), or a candidate that fails to decrypt (unrelated
+        ''' corruption elsewhere in the file; deduplication just backs off rather than failing an
+        ''' otherwise-unrelated write).
+        ''' </summary>
+        Private Async Function TryDeduplicateWriteAsync(Plain As Byte(),
+                                                        PlainLength As Integer,
+                                                        RunAsync As Boolean,
+                                                        CancellationToken As Threading.CancellationToken) As Task(Of PhysicalRecordEntry?)
+
+            If PlainLength <= 0 Then Return Nothing
+
+            Dim Hash = ComputeDedupHash(Plain, PlainLength)
+            Dim CandidateRecordId As Long
+
+            If EnsureDedupHashTable().TryGetValue(Hash, CandidateRecordId) = False Then Return Nothing
+
+            Dim Candidate As PhysicalRecordEntry = Nothing
+
+            If _PhysicalRecords.TryGetValue(CandidateRecordId, Candidate) = False Then Return Nothing
+            If Candidate.RefCount <= 0 Then Return Nothing
+            If Candidate.PlainLength <> PlainLength Then Return Nothing
+
+            Dim CandidatePlain As Byte()
+
+            Try
+
+                If RunAsync Then
+                    CandidatePlain = Await ReadPhysicalRecordPlainAsync(Candidate, CancellationToken).ConfigureAwait(False)
+                Else
+                    CandidatePlain = ReadPhysicalRecordPlain(Candidate)
+                End If
+
+            Catch ex As CryptographicException
+                Return Nothing
+            Catch ex As IOException
+                Return Nothing
+            End Try
+
+            For Index = 0 To PlainLength - 1
+                If CandidatePlain(Index) <> Plain(Index) Then Return Nothing
+            Next
+
+            IncrementPhysicalRecordRefCount(CandidateRecordId)
+
+            Return GetPhysicalRecord(CandidateRecordId)
+
+        End Function
+
+        ''' <summary>
+        ''' Indexes a just-written record's plaintext so a future identical write can be
+        ''' deduplicated against it, and advances the high-water mark ApplyOptions(Deduplication)'s
+        ''' catch-up scan uses to find records that predate deduplication being turned on.
+        ''' </summary>
+        Private Sub RegisterWrittenRecordForDeduplication(Plain As Byte(), PlainLength As Integer, RecordId As Long)
+
+            If PlainLength <= 0 Then Return
+
+            Dim Hash = ComputeDedupHash(Plain, PlainLength)
+
+            EnsureDedupHashTable().Insert(Hash, RecordId)
+
+            _DedupCoveredUpToRecordId = Math.Max(_DedupCoveredUpToRecordId, RecordId)
+
+        End Sub
 
         Private Structure PreparedChunkRecord
             Public RecordId As Long
