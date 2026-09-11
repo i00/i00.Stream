@@ -404,6 +404,7 @@ Namespace Tests
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .ChunkSize = ChunkSize,
+                        .ChunkSizeVariance = 0,
                         .MaxCryptoParallelism = WriterCount,
                         .MaxPhysicalWriteParallelism = WriterCount,
                         .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(6901))
@@ -913,6 +914,7 @@ Namespace Tests
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .ChunkSize = ChunkSize,
+                        .ChunkSizeVariance = 0,
                         .MaxCryptoParallelism = RecordCount,
                         .MaxPhysicalReadParallelism = RecordCount,
                         .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(7001))

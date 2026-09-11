@@ -939,6 +939,7 @@ Namespace Streams
                                               OriginalNextPhysicalRecordId As Long,
                                               OriginalNextAnchorId As Long,
                                               OriginalChunkSize As Integer,
+                                              OriginalChunkSizeVariance As Double,
                                               OriginalIndexPageEntryCount As Integer,
                                               OriginalIndexDirectoryEntryCount As Integer,
                                               OriginalExtents As List(Of ExtentIndexEntry),
@@ -964,6 +965,7 @@ Namespace Streams
                          OriginalNextAnchorId)
 
             _ChunkSize = OriginalChunkSize
+            _ChunkSizeVariance = OriginalChunkSizeVariance
             _IndexPageEntryCount = OriginalIndexPageEntryCount
             _IndexDirectoryEntryCount = OriginalIndexDirectoryEntryCount
 
@@ -1015,6 +1017,7 @@ Namespace Streams
             Dim OriginalNextPhysicalRecordId = _NextPhysicalRecordId
             Dim OriginalNextAnchorId = _NextAnchorId
             Dim OriginalChunkSize = _ChunkSize
+            Dim OriginalChunkSizeVariance = _ChunkSizeVariance
             Dim OriginalIndexPageEntryCount = _IndexPageEntryCount
             Dim OriginalIndexDirectoryEntryCount = _IndexDirectoryEntryCount
 
@@ -1070,6 +1073,7 @@ Namespace Streams
                             OriginalNextPhysicalRecordId,
                             OriginalNextAnchorId,
                             OriginalChunkSize,
+                            OriginalChunkSizeVariance,
                             OriginalIndexPageEntryCount,
                             OriginalIndexDirectoryEntryCount,
                             OriginalExtents,
@@ -1161,6 +1165,7 @@ Namespace Streams
                 Next
 
                 _ChunkSize = TargetChunkSize
+                _ChunkSizeVariance = Options.ChunkSizeVariance
                 _IndexPageEntryCount = Options.IndexPageEntryCount
                 _IndexDirectoryEntryCount = Options.IndexDirectoryEntryCount
 
@@ -1217,6 +1222,7 @@ Namespace Streams
                         OriginalNextPhysicalRecordId,
                         OriginalNextAnchorId,
                         OriginalChunkSize,
+                        OriginalChunkSizeVariance,
                         OriginalIndexPageEntryCount,
                         OriginalIndexDirectoryEntryCount,
                         OriginalExtents,

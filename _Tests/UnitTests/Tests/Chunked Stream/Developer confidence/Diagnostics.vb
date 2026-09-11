@@ -264,6 +264,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
+                        Cs.Options.ChunkSizeVariance = 0
                         Dim ChunkSize = Cs.options.ChunkSize
 
                         Cs.Write(0, GenerateRandomData(ChunkSize * 4, 7001))
@@ -314,7 +315,8 @@ Namespace Tests
                 Using Ms As New MemoryStream()
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
-                        .ChunkReadBlockCache = 2
+                        .ChunkReadBlockCache = 2,
+                        .ChunkSizeVariance = 0
                     }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
@@ -362,6 +364,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
+                        Cs.Options.ChunkSizeVariance = 0
                         Dim ChunkSize = Cs.options.ChunkSize
 
                         Cs.Write(0, GenerateRandomData(ChunkSize * 4, 7003))
@@ -412,7 +415,8 @@ Namespace Tests
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .ChunkReadBlockCache = 64,
-                        .MaxCryptoParallelism = 4
+                        .MaxCryptoParallelism = 4,
+                        .ChunkSizeVariance = 0
                     }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)

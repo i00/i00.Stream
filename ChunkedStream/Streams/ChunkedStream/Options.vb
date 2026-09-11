@@ -25,8 +25,19 @@
 '   - Stored in the file header as the current preferred write size.
 '   - Existing streams automatically load their stored chunk size.
 '   - Changing ChunkSize does not immediately affect existing extents.
-'   - ApplyOptions(ApplyOptionTypes.ChunkSize) rewrites the logical stream using the
-'     current Options.ChunkSize.
+'   - ApplyOptions(ApplyOptionTypes.ChunkSize) is a best-effort pass: it rewrites
+'     physical records that clearly exceed the current bound and leaves undersized
+'     ones alone. Defragment(DefragTypes.Rebuild) is what fully re-derives and
+'     consolidates the logical stream under the current ChunkSize/ChunkSizeVariance.
+'
+' Content-Defined Chunking
+'   - ChunkSizeVariance lets newly written chunk boundaries be chosen by a Gear-hash
+'     scan of the data instead of always landing at a fixed ChunkSize, so identical
+'     byte runs tend to chunk identically wherever they occur. A value of 0 restores
+'     exactly today's fixed-size behaviour; the default is non-zero.
+'   - Deduplication is a separate, independent setting reserved for future use -
+'     ChunkSizeVariance only decides where chunk boundaries fall, not whether
+'     matching chunks get reused.
 '
 ' ================================================================================
 Imports System.Linq
@@ -113,11 +124,128 @@ Namespace Streams
                     If Value <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(ChunkSize))
                     If Value = _ChunkSize Then Return
                     _ChunkSize = Value
+                    RecalculateChunkSizeBounds()
 #If DEBUG Then
                     Debug.Print($"ChunkedStream chunk size changed to {Value:N0} bytes. Existing extents will not be affected until {NameOf(ApplyOptions)}({NameOf(ApplyOptionTypes.ChunkSize)}) or {NameOf(Defragment)}({NameOf(DefragTypes.Rebuild)}) is performed.")
 #End If
                 End Set
             End Property
+
+            Private _ChunkSizeVariance As Double = 0.25R
+
+            ''' <summary>
+            ''' How far a content-defined chunk boundary may vary from <see cref="ChunkSize"/>, expressed
+            ''' as a fraction of it. A chunk's logical length ranges from
+            ''' <c>ChunkSize * (1 - ChunkSizeVariance)</c> to <c>ChunkSize * (1 + ChunkSizeVariance)</c>;
+            ''' the exact boundary within that range is chosen by a content-defined (Gear hash) scan of the
+            ''' data being written, so identical byte runs tend to produce identical chunk boundaries
+            ''' regardless of what precedes them in the same write.
+            ''' </summary>
+            ''' <remarks>
+            ''' A value of <c>0</c> disables content-defined splitting entirely: chunks are produced at a
+            ''' fixed <see cref="ChunkSize"/>, exactly as before this property existed. Any value greater
+            ''' than <c>0</c> enables content-defined splitting for newly written chunks regardless of
+            ''' <see cref="Deduplication"/> - deduplication decides whether matching chunks get reused, this
+            ''' property only decides how chunk boundaries are chosen, and the two are independent.
+            '''
+            ''' Performance: whenever this is non-zero, every byte written is run through a rolling hash to
+            ''' find chunk boundaries, on top of the existing compression/encryption cost. It's a cheap
+            ''' per-byte operation (shift, table lookup, add), but it runs serially ahead of the parallel
+            ''' per-chunk work controlled by <see cref="MaxCryptoParallelism"/>, since a chunk's boundary -
+            ''' and therefore what there is to encrypt/compress in parallel - isn't known until the scan
+            ''' reaches it. Leave this at <c>0</c> to skip the scan and keep today's zero-overhead
+            ''' fixed-size splitting.
+            '''
+            ''' Changing this property does not immediately affect existing extents, the same as
+            ''' <see cref="ChunkSize"/>: the stream records the <see cref="ChunkSizeVariance"/> it was last
+            ''' rewritten with, and <see cref="ChunkedStream.ApplyOptions"/>(<see cref="ApplyOptionTypes.ChunkSize"/>)
+            ''' (or <see cref="ChunkedStream.Defragment"/>(<see cref="DefragTypes.Rebuild"/>)) is what applies
+            ''' a changed value to already-written data.
+            ''' </remarks>
+            Public Property ChunkSizeVariance As Double
+                Get
+                    Return _ChunkSizeVariance
+                End Get
+                Set
+                    If Value < 0 OrElse Value >= 1 Then Throw New ArgumentOutOfRangeException(NameOf(ChunkSizeVariance))
+                    If Value = _ChunkSizeVariance Then Return
+                    _ChunkSizeVariance = Value
+                    RecalculateChunkSizeBounds()
+                End Set
+            End Property
+
+            ''' <summary>
+            ''' Reserved for future use. Does not currently change any behaviour.
+            ''' </summary>
+            ''' <remarks>
+            ''' Whether matching chunks get reused, once deduplication is implemented. This is independent
+            ''' of <see cref="ChunkSizeVariance"/>, which only decides where chunk boundaries fall -
+            ''' content-defined splitting happens (or doesn't) based on <see cref="ChunkSizeVariance"/> alone,
+            ''' regardless of this setting.
+            ''' </remarks>
+            Public Property Deduplication As Boolean = False
+
+            Private _MinChunkSize As Integer
+            Private _MaxChunkSize As Integer
+            Private _SplitHashThreshold As ULong
+
+            ''' <summary>
+            ''' Smallest logical length a content-defined chunk boundary may produce - derived from
+            ''' <see cref="ChunkSize"/> and <see cref="ChunkSizeVariance"/>, recalculated whenever either
+            ''' changes. Not meaningful when <see cref="ChunkSizeVariance"/> is <c>0</c>.
+            ''' </summary>
+            Friend ReadOnly Property MinChunkSize As Integer
+                Get
+                    Return _MinChunkSize
+                End Get
+            End Property
+
+            ''' <summary>
+            ''' Largest logical length a content-defined chunk boundary may produce - derived from
+            ''' <see cref="ChunkSize"/> and <see cref="ChunkSizeVariance"/>, recalculated whenever either
+            ''' changes. Also the hard cap chunk splitting always enforces, even when
+            ''' <see cref="ChunkSizeVariance"/> is <c>0</c> (in which case it equals <see cref="ChunkSize"/>).
+            ''' </summary>
+            Friend ReadOnly Property MaxChunkSize As Integer
+                Get
+                    Return _MaxChunkSize
+                End Get
+            End Property
+
+            ''' <summary>
+            ''' Rolling-hash value below which a content-defined scan splits a chunk - derived from
+            ''' <see cref="ChunkSize"/>, recalculated whenever <see cref="ChunkSize"/> or
+            ''' <see cref="ChunkSizeVariance"/> changes. Zero (never matches) when
+            ''' <see cref="ChunkSizeVariance"/> is <c>0</c>.
+            ''' </summary>
+            Friend ReadOnly Property SplitHashThreshold As ULong
+                Get
+                    Return _SplitHashThreshold
+                End Get
+            End Property
+
+            Public Sub New()
+                RecalculateChunkSizeBounds()
+            End Sub
+
+            Private Sub RecalculateChunkSizeBounds()
+                _MinChunkSize = CInt(_ChunkSize * (1.0R - _ChunkSizeVariance))
+                _MaxChunkSize = CInt(_ChunkSize * (1.0R + _ChunkSizeVariance))
+                _SplitHashThreshold = If(_ChunkSizeVariance > 0, CalculateSplitHashCheck(_ChunkSize), 0UL)
+            End Sub
+
+            ''' <summary>
+            ''' Rolling-hash threshold that gives a memoryless Gear-hash scan an average chunk length of
+            ''' <paramref name="ChunkSize"/>: a split is taken whenever the rolling hash falls below this
+            ''' value, which happens with probability approximately <c>1 / ChunkSize</c> at each byte.
+            ''' </summary>
+            Private Shared Function CalculateSplitHashCheck(ChunkSize As Integer) As ULong
+                If ChunkSize <= 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(ChunkSize))
+                End If
+                Const Possibilities As ULong = ULong.MaxValue
+                Return CULng(Possibilities \ CULng(ChunkSize))
+            End Function
 
             Private _SubBlockSize As Integer = ChunkedStream.DefaultSubBlockSize
 
@@ -563,8 +691,19 @@ Namespace Streams
             Sparseness = 1 << 2
 
             ''' <summary>
-            ''' Rewrite extents into physical records using the current Options.ChunkSize.
+            ''' Rewrite physical records that clearly exceed the current chunk-size policy.
             ''' </summary>
+            ''' <remarks>
+            ''' This is a best-effort policy, the same as <see cref="ChunkedStreamOptions.BisectLimit"/>: it
+            ''' only rewrites a record once splitting it is clearly worthwhile - large enough over the
+            ''' current bound that the pieces it produces are a sensible size - and it never rewrites a
+            ''' record for being too small. Undersized chunks are expected and left alone: the last chunk of
+            ''' any write, and any chunk next to an anchor, is often smaller than <c>ChunkSize</c> by
+            ''' construction, and there's no way to enlarge one without pulling in data that either doesn't
+            ''' exist yet or belongs to a boundary that must stay fixed. Consolidating undersized chunks, or
+            ''' driving every chunk as close to the configured bounds as possible, is
+            ''' <see cref="DefragTypes.Rebuild"/>'s job, not this one's.
+            ''' </remarks>
             ChunkSize = 1 << 3
 
             All = Compression Or Encryption Or Sparseness Or ChunkSize
@@ -1020,6 +1159,7 @@ Namespace Streams
             Dim OriginalIndexOffset = _IndexOffset
             Dim OriginalPhysicalLength = BaseStream.Length
             Dim OriginalChunkSize = _ChunkSize
+            Dim OriginalChunkSizeVariance = _ChunkSizeVariance
 
             '
             ' Anchors identify logical boundaries. The rebuilt extent layout must retain
@@ -1058,7 +1198,8 @@ Namespace Streams
                             OriginalNextAnchorId,
                             OriginalIndexOffset,
                             OriginalPhysicalLength,
-                            OriginalChunkSize)
+                            OriginalChunkSize,
+                            OriginalChunkSizeVariance)
 
                         Return
 
@@ -1149,6 +1290,7 @@ Namespace Streams
                 Next
 
                 _ChunkSize = Options.ChunkSize
+                _ChunkSizeVariance = Options.ChunkSizeVariance
 
                 RebuildPhysicalRecordOrdinals()
                 RebuildAnchorIndex()
@@ -1169,7 +1311,8 @@ Namespace Streams
                     OriginalNextAnchorId,
                     OriginalIndexOffset,
                     OriginalPhysicalLength,
-                    OriginalChunkSize)
+                    OriginalChunkSize,
+                    OriginalChunkSizeVariance)
 
                 Throw
 
@@ -1183,7 +1326,8 @@ Namespace Streams
                                                     OriginalNextAnchorId As Long,
                                                     OriginalIndexOffset As Long,
                                                     OriginalPhysicalLength As Long,
-                                                    OriginalChunkSize As Integer)
+                                                    OriginalChunkSize As Integer,
+                                                    OriginalChunkSizeVariance As Double)
 
             If OriginalExtents Is Nothing Then
                 Throw New ArgumentNullException(NameOf(OriginalExtents))
@@ -1214,6 +1358,7 @@ Namespace Streams
 
                 _IndexOffset = OriginalIndexOffset
                 _ChunkSize = OriginalChunkSize
+                _ChunkSizeVariance = OriginalChunkSizeVariance
 
                 RebuildPhysicalRecordOrdinals()
                 RebuildAnchorIndex()

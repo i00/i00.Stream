@@ -650,6 +650,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
+                        Cs.Options.ChunkSizeVariance = 0
                         Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * 10, 2001))
                         Cs.Remove(Cs.Options.ChunkSize * 3L, Cs.Options.ChunkSize * 4L)
 

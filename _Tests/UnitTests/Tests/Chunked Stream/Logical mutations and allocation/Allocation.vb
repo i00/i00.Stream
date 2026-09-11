@@ -94,6 +94,7 @@ Namespace Tests
 
                         Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                             .NewChunkWriteLocationPolicy = Policy,
+                            .ChunkSizeVariance = 0,
                             .HoleDirectoryMode = If(Policy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFitScan OrElse
                                                     Policy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.FirstFitScan,
                                                     ChunkedStream.ChunkedStreamOptions.HoleDirectoryModes.Never,
@@ -462,7 +463,8 @@ Namespace Tests
                 Using Ms As New MemoryStream()
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
-                        .ChunkSize = 1024
+                        .ChunkSize = 1024,
+                        .ChunkSizeVariance = 0
                     }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
@@ -540,7 +542,8 @@ Namespace Tests
                 Using Ms As New MemoryStream()
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
-                        .ChunkSize = 1024
+                        .ChunkSize = 1024,
+                        .ChunkSizeVariance = 0
                     }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
@@ -655,6 +658,7 @@ Namespace Tests
 
                         Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                             .ChunkSize = 1024,
+                            .ChunkSizeVariance = 0,
                             .ExtentReclaimType = ReclaimType
                         }
 

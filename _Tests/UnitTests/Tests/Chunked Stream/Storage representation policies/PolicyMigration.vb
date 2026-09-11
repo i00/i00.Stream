@@ -288,6 +288,8 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
+                        Cs.Options.ChunkSizeVariance = 0
+
                         Dim Expected =
                             GenerateRandomData(
                                 Cs.Options.ChunkSize * 16,

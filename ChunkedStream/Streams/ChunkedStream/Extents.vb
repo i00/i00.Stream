@@ -1,4 +1,5 @@
 ﻿Imports System.IO
+Imports Unchecked
 
 Namespace Streams
     Partial Class ChunkedStream
@@ -948,7 +949,7 @@ Namespace Streams
 
             While Remaining > 0
 
-                Dim SegmentLength = Math.Min(Options.ChunkSize, Remaining)
+                Dim SegmentLength = DetermineNextSegmentLength(Input, CurrentInputOffset, Remaining)
                 Dim Segment(SegmentLength - 1) As Byte
 
                 Buffer.BlockCopy(Input, CurrentInputOffset, Segment, 0, SegmentLength)
@@ -984,9 +985,78 @@ Namespace Streams
 
         Private Function ShouldBuildChunksInParallel(ByteCount As Integer) As Boolean
 
+            '
+            ' The parallel path pre-splits the buffer into fixed-size pieces before
+            ' dispatching them to the crypto pool, which only works when chunk boundaries
+            ' are known up front. Content-defined boundaries aren't known until the data is
+            ' scanned, so large CDC-enabled writes fall back to the serial path for now -
+            ' see DetermineNextSegmentLength.
+            '
             Return Options.MaxCryptoParallelism > 1 AndAlso
                    Options.ChunkSize > 0 AndAlso
+                   Options.ChunkSizeVariance <= 0 AndAlso
                    CLng(ByteCount) >= CLng(Options.ChunkSize) * ParallelChunkCryptoMinChunks
+
+        End Function
+
+        ''' <summary>
+        ''' Determines how many bytes, starting at InputOffset with Remaining available, the
+        ''' next chunk should take.
+        ''' </summary>
+        ''' <remarks>
+        ''' When <see cref="ChunkedStreamOptions.ChunkSizeVariance"/> is <c>0</c> this is always
+        ''' <c>Math.Min(Options.ChunkSize, Remaining)</c> - today's fixed-size behaviour, with no
+        ''' scanning cost. Otherwise it runs a Gear-hash scan bounded by
+        ''' <see cref="ChunkedStreamOptions.MinChunkSize"/>/<see cref="ChunkedStreamOptions.MaxChunkSize"/>,
+        ''' so the boundary is chosen by the data's own content rather than always landing at a
+        ''' fixed offset. The hash only starts accumulating once <c>MinChunkSize</c> bytes have
+        ''' been consumed - below that, no boundary can be chosen anyway, so there is nothing to
+        ''' gain from hashing those bytes.
+        ''' </remarks>
+        Private Function DetermineNextSegmentLength(Input As Byte(), InputOffset As Integer, Remaining As Integer) As Integer
+
+            If Options.ChunkSizeVariance <= 0 Then
+                Return Math.Min(Options.ChunkSize, Remaining)
+            End If
+
+            Dim MinChunkSize = Options.MinChunkSize
+            Dim MaxChunkSize = Options.MaxChunkSize
+            Dim Threshold = Options.SplitHashThreshold
+
+            Dim Cap = Math.Min(MaxChunkSize, Remaining)
+
+            If Cap <= MinChunkSize Then
+
+                '
+                ' Not enough data left to even reach MinChunkSize - the chunk ends where the
+                ' data (or, in principle, the cap) does. This is the expected shape of the
+                ' last chunk of any write.
+                '
+                Return Cap
+
+            End If
+
+            Dim Hash As ULong = 0
+            Dim WrittenLength = 0
+
+            While WrittenLength < Cap
+
+                Dim DataByte = Input(InputOffset + WrittenLength)
+                WrittenLength += 1
+
+                If WrittenLength >= MinChunkSize Then
+
+                    Hash = GearHash.Roll(Hash, DataByte)
+
+                    If Hash < Threshold OrElse WrittenLength >= MaxChunkSize Then
+                        Return WrittenLength
+                    End If
+
+                End If
+
+            End While
+
+            Return WrittenLength
 
         End Function
 

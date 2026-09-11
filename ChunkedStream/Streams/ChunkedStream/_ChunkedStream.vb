@@ -577,8 +577,17 @@ Namespace Streams
         Private Const MetadataRootLengthOffset As Integer = 256
         Private Const IndexPageEntryCountOffset As Integer = 260
         Private Const IndexDirectoryEntryCountOffset As Integer = 264
-        Private Const MetadataReservedOffset As Integer = 268
-        Private Const MetadataReservedLength As Integer = 212
+
+        '
+        ' Claims the first 8 bytes of what was previously reserved header space. Safe to
+        ' claim because it reads as all-zero on every file written before this field
+        ' existed, and 0.0 is exactly the correct ChunkSizeVariance for a file that
+        ' predates content-defined chunking.
+        '
+        Private Const ChunkSizeVarianceOffset As Integer = 268
+
+        Private Const MetadataReservedOffset As Integer = 276
+        Private Const MetadataReservedLength As Integer = 204
 
         Private Const MetadataRootHeaderSize As Integer = 72
         Private Const MetadataRootMagicSize As Integer = 8
@@ -1446,6 +1455,7 @@ Namespace Streams
         Private _IndexOffset As Long
         Private _Length As Long
         Private _ChunkSize As Integer
+        Private _ChunkSizeVariance As Double
         Private _Disposed As Boolean
 
         '
@@ -1574,6 +1584,24 @@ Namespace Streams
             Return _ChunkSize
         End Function
 
+        ''' <summary>
+        ''' The chunk-size variance this stream's existing extents were last rewritten with -
+        ''' see <see cref="ChunkedStreamOptions.ChunkSizeVariance"/>. Existing extents and
+        ''' physical records are not required to match this value.
+        ''' </summary>
+        Public ReadOnly Property ChunkSizeVariance As Double
+            Get
+                Using EnterStateLock()
+                    Return GetChunkSizeVarianceCore()
+                End Using
+            End Get
+        End Property
+
+        Private Function GetChunkSizeVarianceCore() As Double
+            ThrowIfDisposed()
+            Return _ChunkSizeVariance
+        End Function
+
         Private Sub New(BaseStream As Stream,
                         Header As Byte(),
                         HeaderSequence As Long,
@@ -1640,6 +1668,7 @@ Namespace Streams
             RebuildAnchorIndex()
 
             _ChunkSize = Me.Options.ChunkSize
+            _ChunkSizeVariance = Me.Options.ChunkSizeVariance
 
             _Rng = RandomNumberGenerator.Create()
 
@@ -2038,6 +2067,14 @@ Namespace Streams
             End If
 
             EffectiveOptions.ChunkSize = StoredChunkSize
+
+            Dim StoredChunkSizeVariance = BitConverter.ToDouble(Header, ChunkSizeVarianceOffset)
+
+            If StoredChunkSizeVariance < 0 OrElse StoredChunkSizeVariance >= 1 OrElse Double.IsNaN(StoredChunkSizeVariance) Then
+                Throw New InvalidDataException($"Invalid chunked stream chunk-size variance: {StoredChunkSizeVariance}.")
+            End If
+
+            EffectiveOptions.ChunkSizeVariance = StoredChunkSizeVariance
 
             Dim IndexOffset = BitConverter.ToInt64(Header, IndexOffsetOffset)
             Dim IndexCount = BitConverter.ToInt64(Header, IndexCountOffset)
@@ -2588,6 +2625,7 @@ Namespace Streams
             Buffer.BlockCopy(BitConverter.GetBytes(CLng(Flags)), 0, Header, FlagsOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(0L), 0, Header, LengthOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(EffectiveOptions.ChunkSize), 0, Header, ChunkSizeOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(EffectiveOptions.ChunkSizeVariance), 0, Header, ChunkSizeVarianceOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(CLng(DataStartOffset)), 0, Header, IndexOffsetOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(0L), 0, Header, IndexCountOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(0L), 0, Header, MetadataRootOffsetOffset, 8)
@@ -4834,6 +4872,7 @@ Namespace Streams
             Buffer.BlockCopy(BitConverter.GetBytes(CLng(_HeaderFlags)), 0, _Header, FlagsOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(_Length), 0, _Header, LengthOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(_ChunkSize), 0, _Header, ChunkSizeOffset, 4)
+            Buffer.BlockCopy(BitConverter.GetBytes(_ChunkSizeVariance), 0, _Header, ChunkSizeVarianceOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(_IndexOffset), 0, _Header, IndexOffsetOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(CLng(_Extents.Count)), 0, _Header, IndexCountOffset, 8)
             Buffer.BlockCopy(BitConverter.GetBytes(_MetadataRootOffset), 0, _Header, MetadataRootOffsetOffset, 8)
@@ -5069,6 +5108,11 @@ Namespace Streams
             If Source._ChunkSize <> _ChunkSize Then
                 Throw New InvalidDataException(
                     $"Reloaded chunk size {Source._ChunkSize} does not match the open stream's chunk size {_ChunkSize}.")
+            End If
+
+            If Source._ChunkSizeVariance <> _ChunkSizeVariance Then
+                Throw New InvalidDataException(
+                    $"Reloaded chunk-size variance {Source._ChunkSizeVariance} does not match the open stream's chunk-size variance {_ChunkSizeVariance}.")
             End If
 
             Buffer.BlockCopy(Source._Header, 0, _Header, 0, _Header.Length)

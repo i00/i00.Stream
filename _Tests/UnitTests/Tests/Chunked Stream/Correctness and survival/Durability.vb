@@ -396,6 +396,7 @@ Namespace Tests
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .ChunkSize = 256,
+                        .ChunkSizeVariance = 0,
                         .CompressionRatioThreshold = 1
                     }
 
@@ -513,6 +514,7 @@ Namespace Tests
                     ' records so the freed-chunk hole is the significant free region.
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .ChunkSize = OriginalChunkSize,
+                        .ChunkSizeVariance = 0,
                         .IndexPageEntryCount = 16,
                         .IndexDirectoryEntryCount = 16
                     }

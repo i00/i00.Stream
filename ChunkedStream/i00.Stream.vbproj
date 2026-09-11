@@ -61,6 +61,12 @@
     <Reference Include="System.Net.Http" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\i00.Stream.Unchecked\i00.Stream.Unchecked.vbproj">
+      <Project>{28863F05-0B7C-44F1-99E8-805A0390D62A}</Project>
+      <Name>i00.Stream.Unchecked</Name>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
     <Import Include="Microsoft.VisualBasic" />
     <Import Include="System" />
     <Import Include="System.Collections" />

@@ -753,6 +753,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
+                        Cs.Options.ChunkSizeVariance = 0
                         ChunkSize = Cs.Options.ChunkSize
                         Expected = GenerateRandomData(ChunkSize * 4, 4300)
                         Cs.Write(0, Expected)
@@ -811,6 +812,7 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms)
 
+                        Cs.Options.ChunkSizeVariance = 0
                         Dim ChunkSize = Cs.Options.ChunkSize
                         Cs.Write(0, GenerateRandomData(ChunkSize * 4, 4400))
 
