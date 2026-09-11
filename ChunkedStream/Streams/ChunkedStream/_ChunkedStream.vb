@@ -27,7 +27,7 @@
 '   - Data-only checkpoints with automatic rollback to the current checkpoint
 '     baseline when disposed.
 '   - Configurable fixed logical chunk size per stream.
-'   - Optional most-recently-read plaintext chunk cache.
+'   - Optional bounded cache of recently read decrypted chunk records.
 '   - Built-in structure and fragmentation diagnostics.
 '
 ' Stream Model
@@ -146,9 +146,18 @@
 '     This preserves checkpoint rollback and crash-recovery behaviour.
 '
 ' Read Cache Model
-'   - The most recently loaded plaintext chunk may be cached.
-'   - The cache is controlled by Options.UseChunkReadCache.
-'   - Cache contents are invalidated when data, structure or checkpoint state changes.
+'   - Decrypted physical-record plaintext is cached, keyed by physical-record id, in a
+'     bounded most-recently-used set. Both the serial and the large multi-chunk read
+'     paths consult and fill it.
+'   - Options.ChunkReadBlockCache sets how many records are held (0 disables the cache);
+'     the ceiling is ChunkReadBlockCache * ChunkSize bytes per open stream.
+'   - A physical record's stored bytes never change under a fixed id and ids are only
+'     handed out ascending, so an entry is valid for exactly as long as the record is in
+'     _PhysicalRecords. Eviction is hooked into DetachReclaimedPhysicalRecord (the single
+'     point a record leaves that table), so an ordinary write only drops the entries for
+'     the records it supersedes and leaves the rest of the working set warm. The bulk
+'     resets - image reload, checkpoint rollback, defragment, ApplyOptions, repair -
+'     still drop the whole set via InvalidateChunkCache.
 '   - The cache is an optimisation only and is never required for correctness.
 '
 ' Integrity Model
@@ -440,6 +449,13 @@ Namespace Streams
         ''' behaviour) unless <see cref="ChunkSize" /> is raised above it.
         ''' </summary>
         Public Const DefaultSubBlockSize As Integer = DefaultChunkSize
+
+        ''' <summary>
+        ''' Default number of recently read decrypted chunk records held in the read cache
+        ''' (<see cref="ChunkedStreamOptions.ChunkReadBlockCache" />). At the default
+        ''' <see cref="DefaultChunkSize" /> this is a ceiling of roughly 4 MB per open stream.
+        ''' </summary>
+        Public Const DefaultChunkReadBlockCache As Integer = 32
 
         ''' <summary>
         ''' Size, in bytes, of the initialisation vector stored in each physical chunk record.
@@ -1381,10 +1397,31 @@ Namespace Streams
         Private _NextPhysicalRecordId As Long = 1
         Private ReadOnly _PendingReclaimedPhysicalRecords As New HashSet(Of Long)()
 
-        Private _ChunkPlain As Byte()
+        '
+        ' Read cache: decrypted physical-record plaintext keyed by physical-record id, held
+        ' in a bounded most-recently-used set (front of _ReadCacheOrder = most recent). A
+        ' record's stored bytes never change under a fixed id and ids are only ever handed
+        ' out ascending, so an entry is valid for exactly as long as the record is in
+        ' _PhysicalRecords: EvictCachedRecord (hooked into DetachReclaimedPhysicalRecord)
+        ' drops it the moment the record is detached, and the bulk resets drop the whole set
+        ' via InvalidateChunkCache. Concurrent shared-lock readers reach this, so every
+        ' access takes _ReadCacheSync. Entries are treated as immutable once inserted -
+        ' TryGetCachedRecordPlain hands the array out by reference and callers only read it.
+        '
+        Private NotInheritable Class ReadCacheEntry
+            Public ReadOnly RecordId As Long
+            Public ReadOnly Plain As Byte()
+            Public Sub New(RecordId As Long, Plain As Byte())
+                Me.RecordId = RecordId
+                Me.Plain = Plain
+            End Sub
+        End Class
 
-        Private _CachedExtentIndex As Integer = -1
-        Private _CachedChunkPlain As Byte()
+        Private ReadOnly _ReadCacheSync As New Object()
+        Private ReadOnly _ReadCache As New Dictionary(Of Long, LinkedListNode(Of ReadCacheEntry))()
+        Private ReadOnly _ReadCacheOrder As New LinkedList(Of ReadCacheEntry)()
+        Private _ReadCacheHitCount As Long
+        Private _ReadCacheFillCount As Long
 
         '
         ' The AES-CTR chunk cipher. All of its state (the AES-ECB transform and the
@@ -1603,8 +1640,6 @@ Namespace Streams
             RebuildAnchorIndex()
 
             _ChunkSize = Me.Options.ChunkSize
-            _ChunkPlain = New Byte(_ChunkSize - 1) {}
-            _CachedChunkPlain = New Byte(_ChunkSize - 1) {}
 
             _Rng = RandomNumberGenerator.Create()
 
@@ -1612,9 +1647,106 @@ Namespace Streams
 
         End Sub
 
+        '
+        ' Drops every cached decrypted chunk record. Reserved for the bulk resets - image
+        ' reload, checkpoint rollback, defragment, ApplyOptions, repair - where physical
+        ' record ids may be renumbered or reloaded to different content. Ordinary edits do
+        ' not call this; they rely on EvictCachedRecord firing as each superseded record is
+        ' detached, which keeps the untouched working set warm.
+        '
         Private Sub InvalidateChunkCache()
 
-            _CachedExtentIndex = -1
+            SyncLock _ReadCacheSync
+                _ReadCache.Clear()
+                _ReadCacheOrder.Clear()
+            End SyncLock
+
+        End Sub
+
+        '
+        ' Drops one record's cached plaintext. Hooked into DetachReclaimedPhysicalRecord so
+        ' every path that removes a record from _PhysicalRecords - an overwrite's superseded
+        ' records, a truncate, the pending-reclaim batch, the unreferenced sweep - evicts it
+        ' precisely, without disturbing the rest of the cache.
+        '
+        Private Sub EvictCachedRecord(RecordId As Long)
+
+            SyncLock _ReadCacheSync
+
+                Dim Node As LinkedListNode(Of ReadCacheEntry) = Nothing
+
+                If _ReadCache.TryGetValue(RecordId, Node) = False Then Return
+
+                _ReadCacheOrder.Remove(Node)
+                _ReadCache.Remove(RecordId)
+
+            End SyncLock
+
+        End Sub
+
+        '
+        ' Returns the cached decrypted plaintext for a physical record, or Nothing on a miss.
+        ' The array is shared - the caller must treat it as read-only. A hit promotes the
+        ' entry to most-recently-used.
+        '
+        Private Function TryGetCachedRecordPlain(RecordId As Long) As Byte()
+
+            SyncLock _ReadCacheSync
+
+                Dim Node As LinkedListNode(Of ReadCacheEntry) = Nothing
+
+                If _ReadCache.TryGetValue(RecordId, Node) = False Then Return Nothing
+
+                If _ReadCacheOrder.First IsNot Node Then
+                    _ReadCacheOrder.Remove(Node)
+                    _ReadCacheOrder.AddFirst(Node)
+                End If
+
+                _ReadCacheHitCount += 1
+                Return Node.Value.Plain
+
+            End SyncLock
+
+        End Function
+
+        '
+        ' Records a freshly decrypted physical record. A no-op when the cache is disabled
+        ' (Options.ChunkReadBlockCache <= 0) or the record is already held. Evicts the
+        ' least-recently-used entries to stay within the configured count.
+        '
+        Private Sub CacheRecordPlain(RecordId As Long, Plain As Byte())
+
+            If Plain Is Nothing OrElse RecordId <= SparsePhysicalRecordId Then Return
+
+            Dim Capacity = Options.ChunkReadBlockCache
+
+            If Capacity <= 0 Then
+                ' Disabled - stay off the lock in the steady state. Only take it to drop
+                ' entries left behind if the option was lowered to 0 while the stream was open.
+                If _ReadCache.Count > 0 Then
+                    SyncLock _ReadCacheSync
+                        _ReadCache.Clear()
+                        _ReadCacheOrder.Clear()
+                    End SyncLock
+                End If
+                Return
+            End If
+
+            SyncLock _ReadCacheSync
+
+                If _ReadCache.ContainsKey(RecordId) Then Return
+
+                Dim Node = _ReadCacheOrder.AddFirst(New ReadCacheEntry(RecordId, Plain))
+                _ReadCache(RecordId) = Node
+                _ReadCacheFillCount += 1
+
+                Do While _ReadCache.Count > Capacity
+                    Dim Oldest = _ReadCacheOrder.Last
+                    _ReadCacheOrder.RemoveLast()
+                    _ReadCache.Remove(Oldest.Value.RecordId)
+                Loop
+
+            End SyncLock
 
         End Sub
 
@@ -2971,7 +3103,10 @@ Namespace Streams
         ' A large multi-chunk read authenticates, decrypts and decompresses its chunks on a
         ' worker pool (Options.MaxCryptoParallelism). Only that per-chunk CPU is threaded:
         ' the backing-store reads and the copy into the caller's buffer stay serial, and
-        ' each worker takes its own ChunkCipher so nothing crypto-related is shared.
+        ' each worker takes its own ChunkCipher so nothing crypto-related is shared. The read
+        ' cache is consulted (single-threaded) while the work list is built, so a record
+        ' already cached is neither re-read nor re-decrypted, and every record this call does
+        ' decrypt is added to the cache once the worker pool has finished.
         '
         ''' <summary>
         ''' A read or write must cover at least this many chunks before its per-chunk crypto
@@ -3031,7 +3166,7 @@ Namespace Streams
             For Each Slice In Slices
 
                 If Slice.PhysicalRecordId = SparsePhysicalRecordId Then Continue For
-                If StoredById.ContainsKey(Slice.PhysicalRecordId) Then Continue For
+                If PlainById.ContainsKey(Slice.PhysicalRecordId) Then Continue For
 
                 Dim Record = GetPhysicalRecord(Slice.PhysicalRecordId)
 
@@ -3039,6 +3174,12 @@ Namespace Streams
                    Record.PhysicalLength < MinChunkRecordSize OrElse
                    Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then
                     Throw New InvalidDataException($"Invalid physical record {Slice.PhysicalRecordId}.")
+                End If
+
+                Dim Cached = TryGetCachedRecordPlain(Slice.PhysicalRecordId)
+                If Cached IsNot Nothing AndAlso Cached.Length = Record.PlainLength Then
+                    PlainById(Slice.PhysicalRecordId) = Cached
+                    Continue For
                 End If
 
                 Dim Stored(Record.PhysicalLength - 1) As Byte
@@ -3068,6 +3209,10 @@ Namespace Streams
                 Catch ex As AggregateException When ex.InnerExceptions.Count > 0
                     Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerExceptions(0)).Throw()
                 End Try
+
+                For Each RecordId In RecordIds
+                    CacheRecordPlain(RecordId, PlainById(RecordId))
+                Next
 
             End If
 
@@ -3136,7 +3281,7 @@ Namespace Streams
             For Each Slice In Slices
 
                 If Slice.PhysicalRecordId = SparsePhysicalRecordId Then Continue For
-                If RecordById.ContainsKey(Slice.PhysicalRecordId) Then Continue For
+                If PlainById.ContainsKey(Slice.PhysicalRecordId) Then Continue For
 
                 Dim Record = GetPhysicalRecord(Slice.PhysicalRecordId)
 
@@ -3144,6 +3289,12 @@ Namespace Streams
                    Record.PhysicalLength < MinChunkRecordSize OrElse
                    Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then
                     Throw New InvalidDataException($"Invalid physical record {Slice.PhysicalRecordId}.")
+                End If
+
+                Dim Cached = TryGetCachedRecordPlain(Slice.PhysicalRecordId)
+                If Cached IsNot Nothing AndAlso Cached.Length = Record.PlainLength Then
+                    PlainById(Slice.PhysicalRecordId) = Cached
+                    Continue For
                 End If
 
                 RecordById(Slice.PhysicalRecordId) = Record
@@ -3207,6 +3358,10 @@ Namespace Streams
                 Catch ex As AggregateException When ex.InnerExceptions.Count > 0
                     Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerExceptions(0)).Throw()
                 End Try
+
+                For Each RecordId In RecordIds
+                    CacheRecordPlain(RecordId, PlainById(RecordId))
+                Next
 
             End If
 
@@ -3469,8 +3624,6 @@ Namespace Streams
 
             Try
 
-                InvalidateChunkCache()
-
                 If LogicalOffset > _Length Then
                     InsertSparseRange(_Length, LogicalOffset - _Length)
                 End If
@@ -3554,8 +3707,6 @@ Namespace Streams
             ThrowIfFaulted()
 
             If Length < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Length))
-
-            InvalidateChunkCache()
 
             If Length = _Length Then Return
 
@@ -3729,8 +3880,6 @@ Namespace Streams
 
             Try
 
-                InvalidateChunkCache()
-
                 Dim ActualLength =
                     If(LogicalOffset < _Length,
                        Math.Min(Length, _Length - LogicalOffset),
@@ -3881,8 +4030,6 @@ Namespace Streams
 
             Try
 
-                InvalidateChunkCache()
-
                 Dim ActualLength =
                     Math.Min(CloneLength,
                              _Length - SourceLogicalOffset)
@@ -3972,8 +4119,6 @@ Namespace Streams
             If Length = 0 OrElse LogicalOffset >= _Length Then Return
 
             Try
-
-                InvalidateChunkCache()
 
                 Dim ActualLength = Math.Min(Length, _Length - LogicalOffset)
 
@@ -4110,8 +4255,6 @@ Namespace Streams
 
             Try
 
-                InvalidateChunkCache()
-
                 Dim NewExtents = Await BuildExtentsFromBufferAsync(Data,
                                                                   DataOffset,
                                                                   Count,
@@ -4195,8 +4338,6 @@ Namespace Streams
 
             Try
 
-                InvalidateChunkCache()
-
                 Dim ActualLength = Math.Min(CloneLength, _Length - SourceLogicalOffset)
                 Dim CloneExtents = Await BuildCloneExtentsAsync(SourceLogicalOffset, ActualLength, RunAsync, CancellationToken).ConfigureAwait(False)
 
@@ -4279,8 +4420,6 @@ Namespace Streams
                     NameOf(Count),
                     "The clear range extends beyond the logical stream length.")
             End If
-
-            InvalidateChunkCache()
 
             If Options.StoreSparseChunks Then
 
@@ -4437,8 +4576,6 @@ Namespace Streams
                     NameOf(Count),
                     "The insert would exceed the maximum supported logical length.")
             End If
-
-            InvalidateChunkCache()
 
             If Options.StoreSparseChunks Then
 

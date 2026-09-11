@@ -197,6 +197,209 @@ Namespace Tests
 
         End Function
 
+        ' ================================================================================
+        ' Throughput - fixed wall-clock windows, memory-backed streams only, reported in
+        ' MB/s. The metric is bytes-moved / elapsed, so a slow host reports a smaller number
+        ' within the same fixed test time rather than the run taking longer.
+        ' ================================================================================
+
+        Private Const ThroughputWindowMs As Long = 500
+        Private Const ThroughputStageBudgetMs As Long = 350
+        Private Const ThroughputRegionBytes As Integer = 32 * 1024 * 1024
+        Private Const ThroughputIoBytes As Integer = 4 * 1024 * 1024
+        Private Const ThroughputCachedRegionBytes As Integer = 4 * 1024 * 1024
+
+        Private Structure ThroughputScenario
+            Public Label As String
+            Public NewOptions As Func(Of ChunkedStream.ChunkedStreamOptions)
+            Public MakeData As Func(Of Integer, Byte())
+        End Structure
+
+        Private Shared Function ThroughputScenarios() As ThroughputScenario()
+
+            Dim Incompressible As Func(Of Integer, Byte()) =
+                Function(Length As Integer) GenerateRandomData(Length, 4242)
+
+            Return {
+                New ThroughputScenario With {
+                    .Label = "Plain",
+                    .NewOptions = Function() New ChunkedStream.ChunkedStreamOptions() With {
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.None},
+                    .MakeData = Incompressible},
+                New ThroughputScenario With {
+                    .Label = "Encrypted (AES-256-CTR)",
+                    .NewOptions = Function() New ChunkedStream.ChunkedStreamOptions() With {
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.None,
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(71))},
+                    .MakeData = Incompressible},
+                New ThroughputScenario With {
+                    .Label = "Encrypted + LZ4 (60% compressible)",
+                    .NewOptions = Function() New ChunkedStream.ChunkedStreamOptions() With {
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
+                        .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(71))},
+                    .MakeData = Function(Length As Integer) GeneratePartiallyCompressibleDataForLength(0.6R, Length, ChunkedStream.DefaultChunkSize, 4242)}
+            }
+
+        End Function
+
+        '
+        ' Fills [0, ThroughputRegionBytes) with copies of Buffer, but stops after
+        ' ThroughputStageBudgetMs so staging costs the same wall-clock time on every host.
+        ' Always writes at least one buffer; returns how many bytes were staged.
+        '
+        Private Shared Function StageThroughputRegion(Cs As ChunkedStream, Buffer As Byte()) As Long
+
+            Dim Sw = Stopwatch.StartNew()
+            Dim Staged As Long = 0
+
+            Do
+                Cs.Write(Staged, Buffer)
+                Staged += Buffer.Length
+            Loop While Staged < ThroughputRegionBytes AndAlso Sw.ElapsedMilliseconds < ThroughputStageBudgetMs
+
+            Return Staged
+
+        End Function
+
+        Private Shared Function ThroughputMbPerSec(BytesMoved As Long, Elapsed As TimeSpan) As Double
+            Return BytesMoved / 1048576.0 / Math.Max(0.000001, Elapsed.TotalSeconds)
+        End Function
+
+        Private Shared Function ThroughputRow(Label As String, BytesMoved As Long, Elapsed As TimeSpan) As String
+            Return $"  {(Label & ":").PadRight(38)}{ThroughputMbPerSec(BytesMoved, Elapsed),10:N1} MB/s"
+        End Function
+
+        ''' <summary>
+        ''' Sustained read and write throughput of a memory-backed <see cref="ChunkedStream" />,
+        ''' measured over fixed time windows (the run takes the same wall-clock time on any
+        ''' host) and reported in MB/s. Writes overwrite a staged region with multi-chunk
+        ''' writes; reads re-read it with multi-chunk reads. The per-scenario read rows run
+        ''' with the read cache off to measure raw MAC + decrypt + decompress throughput; the
+        ''' last read row re-reads a fully cache-resident region for the cache ceiling.
+        ''' </summary>
+        <UnitTester.SimpleBenchmark()>
+        Public Shared Function ChunkedStreamThroughput() As UnitTester.SimpleTest.BenchmarkResult
+
+            Dim Lines As New List(Of String) From {
+                $"{ThroughputRegionBytes \ 1048576} MB region ({ThroughputStageBudgetMs} ms stage budget), " &
+                $"{ThroughputIoBytes \ 1048576} MB I/O, {ThroughputWindowMs} ms windows",
+                "Write (overwrite) ---"
+            }
+
+            Dim ResultType = UnitTester.TestRunner.ResultTypes.OK
+
+            For Each Scenario In ThroughputScenarios()
+
+                Dim Buffer = Scenario.MakeData(ThroughputIoBytes)
+                Dim Check(Buffer.Length - 1) As Byte
+
+                Using Ms As New MemoryStream(ThroughputRegionBytes * 3)
+                    Using Cs = ChunkedStream.Open(Ms, Scenario.NewOptions())
+
+                        Dim Staged = StageThroughputRegion(Cs, Buffer)
+                        Cs.Write(0, Buffer) ' warm the overwrite path
+
+                        Dim Bytes As Long = 0
+                        Dim Offset As Long = 0
+                        Dim Sw = Stopwatch.StartNew()
+
+                        Do While Sw.ElapsedMilliseconds < ThroughputWindowMs
+                            If Offset + Buffer.Length > Staged Then Offset = 0
+                            Cs.Write(Offset, Buffer)
+                            Offset += Buffer.Length
+                            Bytes += Buffer.Length
+                        Loop
+
+                        Sw.Stop()
+
+                        Cs.Read(0, Check)
+                        AssertBytesEqual(Buffer, Check, $"[{Scenario.Label}] write throughput round-trip mismatch.")
+
+                        If ThroughputMbPerSec(Bytes, Sw.Elapsed) < 1.0 Then ResultType = UnitTester.TestRunner.ResultTypes.Warning
+                        Lines.Add(ThroughputRow(Scenario.Label, Bytes, Sw.Elapsed))
+
+                    End Using
+                End Using
+
+            Next
+
+            Lines.Add("Read (decode, read cache off) ---")
+
+            For Each Scenario In ThroughputScenarios()
+
+                Dim Options = Scenario.NewOptions()
+                Options.ChunkReadBlockCache = 0
+
+                Dim Buffer = Scenario.MakeData(ThroughputIoBytes)
+                Dim ReadBuffer(ThroughputIoBytes - 1) As Byte
+
+                Using Ms As New MemoryStream(ThroughputRegionBytes * 3)
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Dim Staged = StageThroughputRegion(Cs, Buffer)
+
+                        Cs.Read(0, ReadBuffer)
+                        AssertBytesEqual(Buffer, ReadBuffer, $"[{Scenario.Label}] read throughput round-trip mismatch.")
+
+                        Dim Bytes As Long = 0
+                        Dim Offset As Long = 0
+                        Dim Sw = Stopwatch.StartNew()
+
+                        Do While Sw.ElapsedMilliseconds < ThroughputWindowMs
+                            If Offset >= Staged Then Offset = 0
+                            Dim Count = CInt(Math.Min(CLng(ReadBuffer.Length), Staged - Offset))
+                            Cs.Read(Offset, ReadBuffer, 0, Count)
+                            Offset += Count
+                            Bytes += Count
+                        Loop
+
+                        Sw.Stop()
+
+                        If ThroughputMbPerSec(Bytes, Sw.Elapsed) < 1.0 Then ResultType = UnitTester.TestRunner.ResultTypes.Warning
+                        Lines.Add(ThroughputRow(Scenario.Label, Bytes, Sw.Elapsed))
+
+                    End Using
+                End Using
+
+            Next
+
+            ' Cache ceiling - a region small enough to stay entirely resident in the read cache.
+            Using Ms As New MemoryStream(ThroughputCachedRegionBytes * 4)
+
+                Dim Options As New ChunkedStream.ChunkedStreamOptions() With {
+                    .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(71)),
+                    .ChunkReadBlockCache = (ThroughputCachedRegionBytes \ ChunkedStream.DefaultChunkSize) + 8
+                }
+
+                Dim Buffer = GenerateRandomData(ThroughputCachedRegionBytes, 99)
+                Dim ReadBuffer(ThroughputCachedRegionBytes - 1) As Byte
+
+                Using Cs = ChunkedStream.Open(Ms, Options)
+
+                    Cs.Write(0, Buffer)
+                    Cs.Read(0, ReadBuffer) ' fill the cache
+                    Cs.Read(0, ReadBuffer) ' now fully resident
+                    AssertBytesEqual(Buffer, ReadBuffer, "cached read throughput round-trip mismatch.")
+
+                    Dim Bytes As Long = 0
+                    Dim Sw = Stopwatch.StartNew()
+
+                    Do While Sw.ElapsedMilliseconds < ThroughputWindowMs
+                        Cs.Read(0, ReadBuffer)
+                        Bytes += ReadBuffer.Length
+                    Loop
+
+                    Sw.Stop()
+
+                    Lines.Add(ThroughputRow($"Encrypted, {ThroughputCachedRegionBytes \ 1048576} MB fully cached", Bytes, Sw.Elapsed))
+
+                End Using
+            End Using
+
+            Return New UnitTester.SimpleTest.BenchmarkResult($"{UnitTester.ConsoleEx.Format.Foreground.Default}" & String.Join(Environment.NewLine, Lines), ResultType)
+
+        End Function
+
         '''' <summary>
         '''' Measures the cost of publishing metadata as index size grows.
         '''' </summary>

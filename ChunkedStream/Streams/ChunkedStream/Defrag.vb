@@ -941,8 +941,6 @@ Namespace Streams
                                               OriginalChunkSize As Integer,
                                               OriginalIndexPageEntryCount As Integer,
                                               OriginalIndexDirectoryEntryCount As Integer,
-                                              OriginalChunkPlain As Byte(),
-                                              OriginalCachedChunkPlain As Byte(),
                                               OriginalExtents As List(Of ExtentIndexEntry),
                                               OriginalPhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry))
 
@@ -968,9 +966,6 @@ Namespace Streams
             _ChunkSize = OriginalChunkSize
             _IndexPageEntryCount = OriginalIndexPageEntryCount
             _IndexDirectoryEntryCount = OriginalIndexDirectoryEntryCount
-
-            _ChunkPlain = OriginalChunkPlain
-            _CachedChunkPlain = OriginalCachedChunkPlain
 
             _Extents.Clear()
             _Extents.AddRange(OriginalExtents)
@@ -1022,8 +1017,6 @@ Namespace Streams
             Dim OriginalChunkSize = _ChunkSize
             Dim OriginalIndexPageEntryCount = _IndexPageEntryCount
             Dim OriginalIndexDirectoryEntryCount = _IndexDirectoryEntryCount
-            Dim OriginalChunkPlain = _ChunkPlain
-            Dim OriginalCachedChunkPlain = _CachedChunkPlain
 
             Dim OriginalExtents =
                 New List(Of ExtentIndexEntry)(_Extents)
@@ -1079,8 +1072,6 @@ Namespace Streams
                             OriginalChunkSize,
                             OriginalIndexPageEntryCount,
                             OriginalIndexDirectoryEntryCount,
-                            OriginalChunkPlain,
-                            OriginalCachedChunkPlain,
                             OriginalExtents,
                             OriginalPhysicalRecords)
 
@@ -1173,12 +1164,6 @@ Namespace Streams
                 _IndexPageEntryCount = Options.IndexPageEntryCount
                 _IndexDirectoryEntryCount = Options.IndexDirectoryEntryCount
 
-                _ChunkPlain =
-                    New Byte(_ChunkSize - 1) {}
-
-                _CachedChunkPlain =
-                    New Byte(_ChunkSize - 1) {}
-
                 '
                 ' Rebuild after applying the new metadata page size so physical-record
                 ' page membership is calculated using the new page boundaries.
@@ -1234,8 +1219,6 @@ Namespace Streams
                         OriginalChunkSize,
                         OriginalIndexPageEntryCount,
                         OriginalIndexDirectoryEntryCount,
-                        OriginalChunkPlain,
-                        OriginalCachedChunkPlain,
                         OriginalExtents,
                         OriginalPhysicalRecords)
 

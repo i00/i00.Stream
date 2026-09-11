@@ -180,6 +180,57 @@
 
         End Sub
 
+        ''' <summary>Number of decrypted physical records currently held in the read cache.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_ChunkReadCacheEntryCount() As Integer
+
+            SyncLock _ReadCacheSync
+                Return _ReadCache.Count
+            End SyncLock
+
+        End Function
+
+        ''' <summary>True when the read cache holds the decrypted plaintext for <paramref name="RecordId" />.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_ChunkReadCacheContainsRecord(RecordId As Long) As Boolean
+
+            SyncLock _ReadCacheSync
+                Return _ReadCache.ContainsKey(RecordId)
+            End SyncLock
+
+        End Function
+
+        ''' <summary>Times a read has been served from the read cache since the last counter reset.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_ChunkReadCacheHitCount() As Long
+
+            SyncLock _ReadCacheSync
+                Return _ReadCacheHitCount
+            End SyncLock
+
+        End Function
+
+        ''' <summary>Times a freshly decrypted record has been added to the read cache since the last counter reset.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_ChunkReadCacheFillCount() As Long
+
+            SyncLock _ReadCacheSync
+                Return _ReadCacheFillCount
+            End SyncLock
+
+        End Function
+
+        ''' <summary>Zeroes the read-cache hit and fill counters, leaving the cached entries in place.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Sub Debug_ResetChunkReadCacheCounters()
+
+            SyncLock _ReadCacheSync
+                _ReadCacheHitCount = 0
+                _ReadCacheFillCount = 0
+            End SyncLock
+
+        End Sub
+
         ''' <summary>
         ''' Number of tracked physical-record entries that no live extent references.
         ''' </summary>

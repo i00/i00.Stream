@@ -1262,6 +1262,9 @@ Namespace Streams
             If Record.PhysicalLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
             If Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
 
+            Dim Cached = TryGetCachedRecordPlain(Record.RecordId)
+            If Cached IsNot Nothing AndAlso Cached.Length = Record.PlainLength Then Return Cached
+
             Dim StoredRecord(Record.PhysicalLength - 1) As Byte
 
             ReadAt(Record.PhysicalOffset, StoredRecord, 0, StoredRecord.Length)
@@ -1269,6 +1272,8 @@ Namespace Streams
             Dim Plain(Record.PlainLength - 1) As Byte
 
             DecryptPhysicalRecord(Record.RecordId, StoredRecord, Plain, Cipher)
+
+            CacheRecordPlain(Record.RecordId, Plain)
 
             Return Plain
 
@@ -1295,6 +1300,22 @@ Namespace Streams
             If Record.PhysicalOffset < DataStartOffset Then Throw New InvalidDataException($"Invalid physical record offset for record {Record.RecordId}.")
             If Record.PhysicalLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
             If Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
+
+            '
+            ' A cached whole-record plaintext serves any sub-range with no I/O or crypto,
+            ' regardless of the record's sub-block layout. On a miss the sub-block path below
+            ' still only pays for the sub-blocks the range overlaps; the whole-record fill
+            ' happens in ReadPhysicalRecordPlain, reached via the single-sub-block fast path.
+            '
+            Dim CachedWhole = TryGetCachedRecordPlain(Record.RecordId)
+            If CachedWhole IsNot Nothing AndAlso CachedWhole.Length = Record.PlainLength Then
+                If RangeOffset < 0 OrElse RangeOffset + RangeLength > CachedWhole.Length Then
+                    Throw New InvalidDataException($"Invalid range for physical record {Record.RecordId}.")
+                End If
+                Dim CachedResult(RangeLength - 1) As Byte
+                Buffer.BlockCopy(CachedWhole, RangeOffset, CachedResult, 0, RangeLength)
+                Return CachedResult
+            End If
 
             Dim Header(ChunkRecordHeaderSize - 1) As Byte
             ReadAt(Record.PhysicalOffset, Header, 0, Header.Length)
@@ -1425,6 +1446,20 @@ Namespace Streams
             If Record.PhysicalLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
             If Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
 
+            '
+            ' See the synchronous twin: a cached whole-record plaintext serves any sub-range
+            ' with no I/O or crypto.
+            '
+            Dim CachedWhole = TryGetCachedRecordPlain(Record.RecordId)
+            If CachedWhole IsNot Nothing AndAlso CachedWhole.Length = Record.PlainLength Then
+                If RangeOffset < 0 OrElse RangeOffset + RangeLength > CachedWhole.Length Then
+                    Throw New InvalidDataException($"Invalid range for physical record {Record.RecordId}.")
+                End If
+                Dim CachedResult(RangeLength - 1) As Byte
+                Buffer.BlockCopy(CachedWhole, RangeOffset, CachedResult, 0, RangeLength)
+                Return CachedResult
+            End If
+
             Dim Header(ChunkRecordHeaderSize - 1) As Byte
             Await ReadAtAsync(Record.PhysicalOffset, Header, 0, Header.Length, CancellationToken).ConfigureAwait(False)
 
@@ -1548,6 +1583,9 @@ Namespace Streams
             If Record.PhysicalLength < MinChunkRecordSize Then Throw New InvalidDataException($"Invalid physical record length for record {Record.RecordId}.")
             If Record.PhysicalOffset + Record.PhysicalLength > BaseStream.Length Then Throw New InvalidDataException($"Physical record {Record.RecordId} extends beyond the backing stream.")
 
+            Dim Cached = TryGetCachedRecordPlain(Record.RecordId)
+            If Cached IsNot Nothing AndAlso Cached.Length = Record.PlainLength Then Return Cached
+
             Dim StoredRecord(Record.PhysicalLength - 1) As Byte
 
             Await ReadAtAsync(Record.PhysicalOffset, StoredRecord, 0, StoredRecord.Length, CancellationToken).ConfigureAwait(False)
@@ -1555,6 +1593,8 @@ Namespace Streams
             Dim Plain(Record.PlainLength - 1) As Byte
 
             DecryptPhysicalRecord(Record.RecordId, StoredRecord, Plain, Cipher)
+
+            CacheRecordPlain(Record.RecordId, Plain)
 
             Return Plain
 

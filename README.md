@@ -303,9 +303,15 @@ boundaries, report progress and can be cancelled.
 
 ### Read cache
 
-The most recently decrypted plaintext chunk can be cached
-(`Options.UseChunkReadCache`, on by default). It is invalidated on any data, structure or
-checkpoint change and is never required for correctness.
+Recently decrypted chunk records are held in a bounded most-recently-used cache
+(`Options.ChunkReadBlockCache`, default 32 records; `0` disables it) so a repeat read of
+the same region skips the backing-store read, MAC check, decryption and decompression.
+Both the serial and the large multi-chunk (parallel) read paths fill and read it. The
+ceiling is `ChunkReadBlockCache * ChunkSize` bytes per open stream — about 4 MB at the
+defaults, and it scales with `ChunkSize`. Entries are keyed by physical record, so an
+ordinary write only drops the entries for the records it supersedes and leaves the rest of
+the working set warm; defragment, `ApplyOptions`, checkpoint rollback and fault recovery
+drop the whole cache. It is never required for correctness.
 
 ---
 
@@ -322,13 +328,13 @@ match what is stored.
 | `CompressionMethod` | `None` | `Deflate`, `GZip`, `Lz4` or `Snappy`. |
 | `CompressionEvaluation` | `Always` | Whether/how to trial-compress each chunk. |
 | `CompressionRatioThreshold` | `0.95` | Store compressed only if it saves at least this fraction. |
-| `ChunkSize` | 128 KB | Logical chunk size for new records; applied to existing data via `ApplyOptions(ChunkSize)` or `Defragment(Rebuild)`. |
+| `ChunkSize` | 128 KB | Logical chunk size for new records; applied to existing data via `ApplyOptions(ChunkSize)` or `Defragment(Rebuild)`. Also scales the read-cache ceiling — see `ChunkReadBlockCache`. |
 | `SubBlockSize` | = `ChunkSize` | Sub-divide a chunk record into independently IV'd and MAC'd sub-blocks. |
 | `StoreSparseChunks` | `False` | Represent all-zero ranges as sparse extents. |
 | `NewChunkWriteLocationPolicy` | `BestFit` | Append vs. reuse holes for new chunk records. |
 | `HoleDirectoryMode` | `Auto` | Whether to persist the free-space directory for faster reopen. |
 | `ExtentReclaimType` | `RefCount` | Reference counting vs. full scan for reclaiming unreferenced records. |
-| `UseChunkReadCache` | `True` | Cache the most recently decrypted chunk. |
+| `ChunkReadBlockCache` | `32` | Recently decrypted chunk records to keep in memory (`0` disables). Ceiling ≈ `ChunkReadBlockCache * ChunkSize` bytes per open stream. |
 | `MaxCryptoParallelism` | CPU count | Parallel per-chunk crypto for large reads and writes. |
 | `MaxPhysicalReadParallelism` / `MaxPhysicalWriteParallelism` | `4` | Parallel physical I/O against a capable backing stream. |
 | `AutoRecoverOnFault` | `False` | Reload the in-memory image from disk after a mid-operation fault instead of leaving the stream unusable. |
@@ -483,9 +489,6 @@ thumbnails, list / detail / tile views, Back / Forward navigation, search, and Q
 Extended scan tools that run the validate → mark → repair → recover pass. If the archive
 had to be recovered while opening, the window explains what happened and offers an
 extended scan.
-
-`repair-test-efs.ps1` opens a *copy* of a damaged `.efs` and runs the full headless
-validate / mark / repair / recover pass, writing `<name>.repaired.efs` alongside it.
 
 ---
 

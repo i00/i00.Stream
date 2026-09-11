@@ -4,6 +4,75 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ---
 
+## 2026-09-11
+
+### Multi-chunk read cache — DONE
+
+`Options.UseChunkReadCache` had been dead since the Aug 2026 extents rework (d254bd5): it
+gated a single-slot most-recently-read cache keyed by chunk-table index; the rework rebuilt
+the read path around extents + reference-counted physical records and dropped every cache
+hit/fill site. `_ChunkPlain` / `_CachedChunkPlain` / `_CachedExtentIndex` survived only as
+snapshot/realloc ceremony in `Defrag.vb` / `Options.vb`, and the option was referenced only
+in a header comment. The old `Diagnostics.vb` "chunk cache" tests asserted read correctness
+only, so they passed either way.
+
+- **`Options.ChunkReadBlockCache As Integer` (default `DefaultChunkReadBlockCache` = 32)**
+  replaces `UseChunkReadCache`. `0` disables. It is a runtime knob (not persisted). The XML
+  doc spells out the `ChunkReadBlockCache * ChunkSize` ceiling (~4 MB at the defaults) and
+  `ChunkSize`'s doc now points at it.
+- **The cache** (`_ChunkedStream.vb`) is a `Dictionary(Of Long, LinkedListNode(Of ReadCacheEntry))`
+  + intrusive MRU `LinkedList`, keyed by physical-record id, holding the decrypted whole-record
+  plaintext. Every access takes `_ReadCacheSync` — concurrent shared-lock readers reach it.
+  Entries are immutable once inserted and handed out by reference (all callers of
+  `ReadPhysicalRecordPlain*` treat the result read-only, verified incl. the `ApplyRecordOptions`
+  write-back path, which copies out per sub-block). A record's stored bytes never change under
+  a fixed id and ids only ascend, so a surviving entry is always valid for its id.
+- **Wiring** (`Storage.vb`): `ReadPhysicalRecordPlain` + async twin check/fill; `ReadPhysicalRecordPlainRange`
+  + async twin check a cached whole record and slice from it (serving any sub-range with no I/O
+  or MAC/crypto even for multi-sub-block records). `ReadRangeInParallel[Async]` (`_ChunkedStream.vb`)
+  consults the cache single-threaded while building its work list — a cached record is neither
+  re-read nor re-decrypted — and fills it once the worker pool finishes. Nothing touches the
+  cache from inside the parallel region.
+- **Invalidation is per-record.** `EvictCachedRecord(id)` is hooked into
+  `DetachReclaimedPhysicalRecord` — the single point a record leaves `_PhysicalRecords` (an
+  overwrite's superseded records, a truncate, the pending-reclaim batch, the unreferenced
+  sweep). An entry is valid for exactly as long as its record is in that table (bytes are
+  immutable under a fixed id; ids only ascend), so an ordinary edit keeps the untouched
+  working set warm. The `InvalidateChunkCache()` full-clear calls were removed from the data
+  entrypoints (`Write` / `SetLength` / `Insert` / `Remove` / `Clone` / `Clear` /
+  `InsertNullBytes` / `CreateAnchor`) and kept only at the bulk resets where ids can be
+  renumbered or reloaded to different content: image reload, checkpoint rollback, all of
+  `Defragment`, `ApplyOptions` (plus one added at the end of `RunApplyOptions`), repair.
+- **Tests** (`Diagnostics.vb`, via new `Debug_ChunkReadCache*` seams): repeat reads served as
+  hits not fills; MRU eviction at `ChunkReadBlockCache = 2`; an overwrite evicts only its own
+  record and leaves the others warm (re-read = hits); the parallel path fills and is served;
+  multi-sub-block records (partial read doesn't fill, but a cached whole record serves a later
+  partial read); `ChunkReadBlockCache = 0` retains nothing; negative value rejected.
+  `ParallelChunkCryptoMatchesSerialAndSurfacesCorruption` sets `ChunkReadBlockCache = 0` — it
+  tampers with bytes the stream has already read, which a cache would legitimately mask. 335/335.
+- **`CacheRecordPlain` fast-paths a disabled cache** off the lock (`ChunkReadBlockCache <= 0`
+  returns without `SyncLock` once the cache is drained), so `ChunkReadBlockCache = 0` is truly
+  zero-overhead on the read path.
+
+### Throughput benchmark — DONE
+
+`zBenchmarks.ChunkedStreamThroughput` (`_Tests/UnitTests/Benchmarks/_Core.vb`) — one
+`SimpleBenchmark` reporting read and write MB/s for memory-backed streams over fixed
+`ThroughputWindowMs` (500 ms) windows, so the run takes the same wall-clock time on any host
+(a slow host reports a smaller number, it does not run longer). Staging is also time-bounded
+(`ThroughputStageBudgetMs`). Writes overwrite a 32 MB region with 4 MB (multi-chunk) writes;
+reads re-read it with 4 MB reads. Rows: Plain / Encrypted (AES-256-CTR) / Encrypted+Deflate
+(60% compressible) for each of write and read; the per-scenario read rows force
+`ChunkReadBlockCache = 0` to measure raw MAC+decrypt+decompress, and a final row re-reads a
+4 MB fully cache-resident region for the cache ceiling. Each row round-trips one buffer as a
+correctness guard; a row under ~8 MB/s warns.
+
+Also: removed the dangling `repair-test-efs.ps1` mention from the README (the user deleted
+the script — the validate/mark/repair/recover pass it ran is the built-in `Validate()` /
+`ValidationReport.Repair()` / `RecoverPendingFiles` API plus the sample's own Extended Scan).
+
+---
+
 ## 2026-09-10
 
 ### Torn physical-record index could be persisted, bricking the reopen — DONE

@@ -420,7 +420,8 @@ Namespace Tests
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
                         .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
                         .EncryptionInfo = New ChunkedStream.EncryptionInfo(MakeKey(2301)),
-                        .MaxCryptoParallelism = 8
+                        .MaxCryptoParallelism = 8,
+                        .ChunkReadBlockCache = 0 ' The corruption check below tampers with bytes this stream has already read; a read cache would legitimately serve the pre-corruption plaintext and mask it.
                     }
 
                     Using Cs = ChunkedStream.Open(Ms, Options)

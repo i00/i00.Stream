@@ -385,8 +385,6 @@ Namespace Streams
                 FirstExtent.AnchorId = AnchorId
                 NewExtents(0) = FirstExtent
 
-                InvalidateChunkCache()
-
                 InsertExtentsCore(AnchorOffset,
                                   NewExtents,
                                   AnchorActionsAtLogicalOffset.Use)

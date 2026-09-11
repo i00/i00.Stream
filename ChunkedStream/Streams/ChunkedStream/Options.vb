@@ -100,6 +100,10 @@ Namespace Streams
             ''' Opening an existing stream updates this property to the chunk size stored in the stream.
             ''' Changing this property does not immediately affect existing extents.
             ''' To apply a new chunk size to an existing stream, set this property and call ApplyOptions(ApplyOptionTypes.ChunkSize).
+            ''' This is also the per-record size the read cache is measured against: the cache
+            ''' can hold up to <c>ChunkSize * </c><see cref="ChunkReadBlockCache" /> bytes per
+            ''' open stream, so raising the chunk size raises that ceiling in proportion - see
+            ''' <see cref="ChunkReadBlockCache" />.
             ''' </remarks>
             Public Property ChunkSize As Integer
                 Get
@@ -396,13 +400,34 @@ Namespace Streams
             ''' </summary>
             Public Property StoreSparseChunks As Boolean = False
 
+            Private _ChunkReadBlockCache As Integer = ChunkedStream.DefaultChunkReadBlockCache
+
             ''' <summary>
-            ''' Enables caching of the most recently read plaintext chunk.
+            ''' How many recently read decrypted chunk records are kept in memory so a repeat
+            ''' read of the same region skips the backing-store read, MAC check, decryption and
+            ''' decompression. <c>0</c> disables the cache.
             ''' </summary>
             ''' <remarks>
-            ''' Disabling this avoids the extra cache copy on chunk reads, but repeated reads of the same chunk may require repeated stream reads, MAC validation, decompression and decryption.
+            ''' The cache holds up to this many physical records, each up to
+            ''' <see cref="ChunkSize" /> bytes of plaintext, so it can grow to roughly
+            ''' <c>ChunkReadBlockCache * ChunkSize</c> bytes per open stream - about 4 MB at the
+            ''' defaults. Raising <see cref="ChunkSize" /> scales this ceiling with it; revisit
+            ''' this value whenever you change <see cref="ChunkSize" />, especially if many
+            ''' streams are open at once. Both the serial and the large multi-chunk read paths
+            ''' fill and are served from it. Entries are keyed by physical record: a write only
+            ''' drops the entries for the records it supersedes, so an unrelated read-heavy
+            ''' working set stays warm across writes; defragment, ApplyOptions, checkpoint
+            ''' rollback and fault recovery drop the whole cache.
             ''' </remarks>
-            Public Property UseChunkReadCache As Boolean = True
+            Public Property ChunkReadBlockCache As Integer
+                Get
+                    Return _ChunkReadBlockCache
+                End Get
+                Set
+                    If Value < 0 Then Throw New ArgumentOutOfRangeException(NameOf(ChunkReadBlockCache))
+                    _ChunkReadBlockCache = Value
+                End Set
+            End Property
 
             ''' <summary>
             ''' Maximum worker threads a single large synchronous read may use to authenticate,
@@ -808,6 +833,13 @@ Namespace Streams
             '
             If HasOpenCheckpoint = False Then ApplyPendingPhysicalRecordReclaims()
 
+            '
+            ' Detaching the replaced records already evicted them one by one; drop the whole
+            ' set as well so an open checkpoint (whose reclaims are still pending) and a
+            ' cancelled or partial rewrite cannot leave a superseded record cached.
+            '
+            InvalidateChunkCache()
+
             Dim RemovedFileMasterKey = False
 
             If Result.WasCancelled = False AndAlso Types.HasFlag(ApplyOptionTypes.Encryption) Then
@@ -988,8 +1020,6 @@ Namespace Streams
             Dim OriginalIndexOffset = _IndexOffset
             Dim OriginalPhysicalLength = BaseStream.Length
             Dim OriginalChunkSize = _ChunkSize
-            Dim OriginalChunkPlain = _ChunkPlain
-            Dim OriginalCachedChunkPlain = _CachedChunkPlain
 
             '
             ' Anchors identify logical boundaries. The rebuilt extent layout must retain
@@ -1028,9 +1058,7 @@ Namespace Streams
                             OriginalNextAnchorId,
                             OriginalIndexOffset,
                             OriginalPhysicalLength,
-                            OriginalChunkSize,
-                            OriginalChunkPlain,
-                            OriginalCachedChunkPlain)
+                            OriginalChunkSize)
 
                         Return
 
@@ -1122,12 +1150,6 @@ Namespace Streams
 
                 _ChunkSize = Options.ChunkSize
 
-                _ChunkPlain =
-                    New Byte(_ChunkSize - 1) {}
-
-                _CachedChunkPlain =
-                    New Byte(_ChunkSize - 1) {}
-
                 RebuildPhysicalRecordOrdinals()
                 RebuildAnchorIndex()
 
@@ -1147,9 +1169,7 @@ Namespace Streams
                     OriginalNextAnchorId,
                     OriginalIndexOffset,
                     OriginalPhysicalLength,
-                    OriginalChunkSize,
-                    OriginalChunkPlain,
-                    OriginalCachedChunkPlain)
+                    OriginalChunkSize)
 
                 Throw
 
@@ -1163,9 +1183,7 @@ Namespace Streams
                                                     OriginalNextAnchorId As Long,
                                                     OriginalIndexOffset As Long,
                                                     OriginalPhysicalLength As Long,
-                                                    OriginalChunkSize As Integer,
-                                                    OriginalChunkPlain As Byte(),
-                                                    OriginalCachedChunkPlain As Byte())
+                                                    OriginalChunkSize As Integer)
 
             If OriginalExtents Is Nothing Then
                 Throw New ArgumentNullException(NameOf(OriginalExtents))
@@ -1196,8 +1214,6 @@ Namespace Streams
 
                 _IndexOffset = OriginalIndexOffset
                 _ChunkSize = OriginalChunkSize
-                _ChunkPlain = OriginalChunkPlain
-                _CachedChunkPlain = OriginalCachedChunkPlain
 
                 RebuildPhysicalRecordOrdinals()
                 RebuildAnchorIndex()

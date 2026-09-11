@@ -340,6 +340,10 @@ Namespace Streams
             _PhysicalRecords.Remove(RecordId)
             _PhysicalRecordOrdinals.Remove(RecordId)
 
+            ' The id is now dead (ids are only ever handed out ascending), so its cached
+            ' plaintext can never be served again - drop it and free the slot.
+            EvictCachedRecord(RecordId)
+
             Dim PageNumber = RemovedOrdinal \ _IndexPageEntryCount
             Dim PageRecordIds As SortedSet(Of Long) = Nothing
 

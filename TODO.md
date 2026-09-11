@@ -221,7 +221,10 @@ depth-assert.
   writer-preference `AsyncReaderWriterLock`; the large positional reads take it shared with a
   per-call `ChunkCipher`.
 - **Write coalescing / current-chunk write caching** — `Options.CurrentChunkWriteCaching`.
-- **Multi-chunk read cache** — `Options.ReadCacheChunkCount > 1` (currently fixed at 1).
+- **Multi-chunk read cache** — *done (see DONE.md).* `Options.ChunkReadBlockCache` (default 32)
+  is a record-id-keyed MRU set. Eviction is per-record (hooked into
+  `DetachReclaimedPhysicalRecord`), so a write only drops the records it supersedes; both the
+  serial and the `ReadRangeInParallel` paths fill and read it.
 - **Read-time coalescing of contiguous extents.**
 - **Shrink the file header?**
 - **More compression methods:** fast Brotli, Zstd, LZMA / 7-Zip.
