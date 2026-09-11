@@ -62,6 +62,13 @@ Namespace Streams
             Public RecordLength As Integer
         End Structure
 
+        ''' <summary>
+        ''' How many chunks' worth of MaxChunkSize Rebuild reads at once when content-defined
+        ''' chunking is active, so the CDC rolling hash gets a long continuous scan instead of
+        ''' resetting at every chunk-sized boundary. See the remarks where it's used.
+        ''' </summary>
+        Private Const RebuildContinuousScanChunkMultiple As Integer = 64
+
         Private Structure DefragHole
             Public Offset As Long
             Public Length As Long
@@ -1056,6 +1063,26 @@ Namespace Streams
                 ClearFreeSpaceMap()
 
                 Dim TargetChunkSize = Options.ChunkSize
+
+                '
+                ' A window of TargetChunkSize would reset the CDC rolling hash at every
+                ' chunk-sized boundary, defeating content-defined splitting almost entirely -
+                ' each window would only ever produce the one chunk it exactly fits. Read a
+                ' much larger window instead so the hash scans continuously across many chunks
+                ' at once, only resetting at (rare) window boundaries. Not needed - and not
+                ' applied - when ChunkSizeVariance is 0, since fixed-size splitting already
+                ' produces exactly one output chunk per TargetChunkSize window with no scan to
+                ' interrupt.
+                '
+                Dim ReadWindowSize As Integer
+
+                If Options.ChunkSizeVariance > 0 Then
+                    Dim ScaledWindow = CLng(Options.MaxChunkSize) * RebuildContinuousScanChunkMultiple
+                    ReadWindowSize = CInt(Math.Min(ScaledWindow, Integer.MaxValue))
+                Else
+                    ReadWindowSize = TargetChunkSize
+                End If
+
                 Dim NewExtents As New List(Of ExtentIndexEntry)()
                 Dim NewPhysicalRecordIds As New HashSet(Of Long)()
                 Dim LogicalOffset As Long = 0
@@ -1086,7 +1113,7 @@ Namespace Streams
                     End If
 
                     Dim SegmentLength =
-                        CInt(Math.Min(CLng(TargetChunkSize),
+                        CInt(Math.Min(CLng(ReadWindowSize),
                                       _Length - LogicalOffset))
 
                     Dim Buffer(SegmentLength - 1) As Byte
