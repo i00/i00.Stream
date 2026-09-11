@@ -541,8 +541,12 @@ Namespace Tests
             ' ================================================================================
 
             ''' <summary>
-            ''' Verifies that ApplyOptions does not stop after the chunk-size rewrite: the
-            ''' remaining categories are still processed in the same call.
+            ''' Verifies that a single ApplyOptions(All) call both splits over-sized records and
+            ''' leaves the resulting pieces properly compressed - chunk-size splitting and the
+            ''' other categories now share one per-record pass (see
+            ''' <see cref="ChunkedStream.ApplyOptionTypes.ChunkSize"/>'s remarks), and a record
+            ''' that gets split picks up the current compression policy as part of that split
+            ''' rather than needing a separate rewrite afterward.
             ''' </summary>
             <UnitTester.SimpleTest()>
             Public Shared Sub ApplyOptionsAppliesRemainingCategoriesAfterAChunkSizeRewrite()
@@ -550,6 +554,7 @@ Namespace Tests
                 Using Ms As New MemoryStream()
 
                     Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSizeVariance = 0,
                         .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.None
                     }
 
@@ -557,7 +562,8 @@ Namespace Tests
 
                     Using Cs = ChunkedStream.Open(Ms, Options)
 
-                        Expected = GenerateRandomData(Cs.Options.ChunkSize * 6, 7101)
+                        ' Highly compressible data so Deflate is guaranteed to win.
+                        Expected = GeneratePatternData(Cs.Options.ChunkSize * 6, 7101)
                         Cs.Write(0, Expected)
 
                         Cs.Options.ChunkSize = Cs.Options.ChunkSize \ 2
@@ -566,9 +572,15 @@ Namespace Tests
                         Dim Result = Cs.ApplyOptions(ChunkedStream.ApplyOptionTypes.All)
 
                         AssertTrue(Result.ChunkSizeChanges > 0, "The chunk-size rewrite did not run.")
+
+                        Dim AllocatedChunks =
+                            Cs.GetStructure().Chunks.Where(Function(chunk) chunk.PhysicalOffset.HasValue).ToList()
+
+                        AssertTrue(AllocatedChunks.Count > 0, "Test setup produced no allocated chunks to check.")
+
                         AssertTrue(
-                            Result.ExaminedChunks > Result.ChunkSizeChanges,
-                            "ApplyOptions returned after the chunk-size rewrite without examining the other categories.")
+                            AllocatedChunks.All(Function(chunk) chunk.CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate),
+                            "Every chunk produced by the chunk-size split should already reflect the current compression policy.")
 
                         AssertBytesEqual(Expected, Cs.ToArray(), "ApplyOptions changed logical data.")
                         Cs.Validate().ThrowIfErrors()

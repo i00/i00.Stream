@@ -715,7 +715,10 @@ Namespace Streams
         Public NotInheritable Class ApplyOptionsResult
 
             ''' <summary>
-            ''' Number of extents rewritten because their logical size did not match the requested chunk-size policy.
+            ''' Number of physical records split because they exceeded the current chunk-size
+            ''' policy. Each one becomes two or more new records, all counted together in
+            ''' <see cref="RewrittenChunks"/> as a single rewritten record, the same as every
+            ''' other category here.
             ''' </summary>
             Public Property ChunkSizeChanges As Integer
 
@@ -895,26 +898,16 @@ Namespace Streams
                                     Result As ApplyOptionsResult)
 
             Dim CancellationToken As New CancellationToken()
-            Dim ChunkSizeRewritten = False
 
-            If Types.HasFlag(ApplyOptionTypes.ChunkSize) AndAlso NeedsChunkSizeRewrite() Then
-
-                ApplyChunkSizeOptions(Result, ProgressCallback, CancellationToken)
-
-                If CancellationToken.Cancel Then
-                    Result.WasCancelled = True
-                    Result.PhysicalLengthAfter = BaseStream.Length
-                    Return
-                End If
-
-                '
-                ' The rewrite rebuilds every extent with the current data policy, so any
-                ' Compression / Encryption / Sparseness categories also selected are
-                ' already satisfied. Fall through anyway - the record loop below verifies
-                ' them and the single publish at the end covers the whole operation.
-                '
-                ChunkSizeRewritten = True
-
+            '
+            ' Chunk-size splitting is handled per-record inside ApplyRecordOptions, alongside
+            ' Compression/Encryption, rather than as its own whole-stream rebuild pass - see
+            ' TryComputeChunkSizeSplit. Declare the stream's chunk-size preference up front so
+            ' it's recorded even if no individual record ends up needing a split.
+            '
+            If Types.HasFlag(ApplyOptionTypes.ChunkSize) Then
+                _ChunkSize = Options.ChunkSize
+                _ChunkSizeVariance = Options.ChunkSizeVariance
             End If
 
             If Types.HasFlag(ApplyOptionTypes.Sparseness) AndAlso Options.StoreSparseChunks Then
@@ -986,7 +979,7 @@ Namespace Streams
             End If
 
             If HasOpenCheckpoint = False AndAlso
-               (ChunkSizeRewritten OrElse Result.RewrittenChunks > 0 OrElse RemovedFileMasterKey) Then
+               (Types.HasFlag(ApplyOptionTypes.ChunkSize) OrElse Result.RewrittenChunks > 0 OrElse RemovedFileMasterKey) Then
                 PersistIndexAndHeader(_IndexOffset, Durable)
             End If
 
@@ -1035,6 +1028,22 @@ Namespace Streams
                 Result.NewlySparseChunks += 1
 
                 Return True
+
+            End If
+
+            If Types.HasFlag(ApplyOptionTypes.ChunkSize) AndAlso Record.PlainLength > Options.MaxChunkSize Then
+
+                Dim Split = TryComputeChunkSizeSplit(Plain)
+
+                If Split IsNot Nothing Then
+
+                    ApplyChunkSizeSplitToRecord(RecordId, Split)
+
+                    Result.ChunkSizeChanges += 1
+
+                    Return True
+
+                End If
 
             End If
 
@@ -1138,246 +1147,136 @@ Namespace Streams
 
         End Function
 
-        Private Sub ApplyChunkSizeOptions(Result As ApplyOptionsResult,
-                                          ProgressCallback As StreamProgressCallback,
-                                          CancellationToken As CancellationToken)
+        ''' <summary>
+        ''' Computes, but does not commit, the chunk-size split for one over-bound record's
+        ''' plaintext. Returns Nothing if splitting isn't worthwhile - see the remarks on
+        ''' <see cref="ApplyOptionTypes.ChunkSize"/>.
+        ''' </summary>
+        ''' <remarks>
+        ''' Only the final piece of a multi-piece split can ever be smaller than
+        ''' <see cref="ChunkedStreamOptions.MinChunkSize"/> - every earlier cut is already
+        ''' bounded within [MinChunkSize, MaxChunkSize] by <see cref="DetermineNextSegmentLength"/>
+        ''' itself - so checking only the last piece against <see cref="ChunkedStreamOptions.BisectLimit"/>
+        ''' is sufficient. At the default BisectLimit of 0 this never rejects a split.
+        ''' </remarks>
+        Private Function TryComputeChunkSizeSplit(Plain As Byte()) As List(Of ExtentIndexEntry)
 
-            If Options.ChunkSize <= 0 Then
-                Throw New InvalidOperationException(
-                    "Chunk size must be greater than zero.")
-            End If
+            Dim Candidate = BuildExtentsFromBuffer(Plain, 0, Plain.Length)
 
-            Dim OriginalExtents = New List(Of ExtentIndexEntry)(_Extents)
+            Dim RemainderLength = Candidate(Candidate.Count - 1).LogicalLength
 
-            Dim OriginalPhysicalRecords =
-                _PhysicalRecords.ToDictionary(
-                    Function(pair) pair.Key,
-                    Function(pair) pair.Value)
+            If RemainderLength < Options.BisectLimit Then Return Nothing
 
-            Dim OriginalNextPhysicalRecordId = _NextPhysicalRecordId
-            Dim OriginalNextAnchorId = _NextAnchorId
-            Dim OriginalIndexOffset = _IndexOffset
-            Dim OriginalPhysicalLength = BaseStream.Length
-            Dim OriginalChunkSize = _ChunkSize
-            Dim OriginalChunkSizeVariance = _ChunkSizeVariance
+            Return Candidate
 
-            '
-            ' Anchors identify logical boundaries. The rebuilt extent layout must retain
-            ' those boundaries even when the new chunk-size policy would normally place
-            ' extent boundaries elsewhere.
-            '
-            Dim AnchoredOffsets =
-                _Extents.
-                Where(Function(extent) extent.AnchorId > 0).
-                Select(
-                    Function(extent)
-                        Return New AnchoredBoundary With {
-                            .AnchorId = extent.AnchorId,
-                            .RelativeOffset = extent.LogicalOffset
-                        }
-                    End Function).
-                OrderBy(Function(item) item.RelativeOffset).
-                ToList()
+        End Function
 
-            Try
+        ''' <summary>
+        ''' Commits a chunk-size split computed by <see cref="TryComputeChunkSizeSplit"/>,
+        ''' replacing every current extent that references <paramref name="OldRecordId"/> with
+        ''' one or more extents over the new, already-written records in
+        ''' <paramref name="SplitPieces"/>.
+        ''' </summary>
+        ''' <remarks>
+        ''' A record's live extents don't necessarily cover its whole plaintext contiguously -
+        ''' an overwrite or removal that landed in the middle of it drops the extent for that
+        ''' sub-range while leaving the record referenced (and alive) via the surrounding
+        ''' extents that still point into it. So a new piece can end up covering only
+        ''' logically-dead byte ranges with nothing to reference it; those are reclaimed here
+        ''' rather than left as an orphaned, unreferenced physical record.
+        ''' </remarks>
+        Private Sub ApplyChunkSizeSplitToRecord(OldRecordId As Long, SplitPieces As List(Of ExtentIndexEntry))
 
-                Dim NewExtents As New List(Of ExtentIndexEntry)()
-                Dim NewRecordIds As New HashSet(Of Long)()
-                Dim LogicalOffset As Long = 0
-                Dim TotalBytes = Math.Max(1L, _Length)
-                Dim ProcessedBytes As Long = 0
+            Dim Pieces As New List(Of (Start As Integer, Finish As Integer, RecordId As Long))
+            Dim Running As Integer = 0
 
-                While LogicalOffset < _Length
+            For Each Piece In SplitPieces
+                Pieces.Add((Running, Running + Piece.LogicalLength, Piece.PhysicalRecordId))
+                Running += Piece.LogicalLength
+            Next
 
-                    If CancellationToken.Cancel Then
+            Dim ReferenceCounts As New Dictionary(Of Long, Integer)()
+            Dim NewExtents As New List(Of ExtentIndexEntry)(_Extents.Count)
 
-                        RestoreApplyOptionsRewriteState(
-                            OriginalExtents,
-                            OriginalPhysicalRecords,
-                            OriginalNextPhysicalRecordId,
-                            OriginalNextAnchorId,
-                            OriginalIndexOffset,
-                            OriginalPhysicalLength,
-                            OriginalChunkSize,
-                            OriginalChunkSizeVariance)
+            For Each Extent In _Extents
 
-                        Return
+                If Extent.PhysicalRecordId <> OldRecordId Then
+                    NewExtents.Add(Extent)
+                    Continue For
+                End If
+
+                Dim RangeStart = Extent.PhysicalRecordOffset
+                Dim RangeEnd = Extent.PhysicalRecordOffset + Extent.LogicalLength
+                Dim LogicalCursor = Extent.LogicalOffset
+                Dim IsFirstReplacement = True
+
+                For Each Piece In Pieces
+
+                    Dim OverlapStart = Math.Max(Piece.Start, RangeStart)
+                    Dim OverlapEnd = Math.Min(Piece.Finish, RangeEnd)
+
+                    If OverlapStart >= OverlapEnd Then Continue For
+
+                    NewExtents.Add(New ExtentIndexEntry With {
+                        .LogicalOffset = LogicalCursor,
+                        .LogicalLength = OverlapEnd - OverlapStart,
+                        .PhysicalRecordId = Piece.RecordId,
+                        .PhysicalRecordOffset = OverlapStart - Piece.Start,
+                        .AnchorId = If(IsFirstReplacement, Extent.AnchorId, 0)
+                    })
+
+                    LogicalCursor += OverlapEnd - OverlapStart
+                    IsFirstReplacement = False
+
+                    If Piece.RecordId <> SparsePhysicalRecordId Then
+
+                        If ReferenceCounts.ContainsKey(Piece.RecordId) Then
+                            ReferenceCounts(Piece.RecordId) += 1
+                        Else
+                            ReferenceCounts(Piece.RecordId) = 1
+                        End If
 
                     End If
 
-                    Dim SegmentLength =
-                        CInt(Math.Min(CLng(Options.ChunkSize),
-                                      _Length - LogicalOffset))
+                Next
 
-                    Dim Buffer(SegmentLength - 1) As Byte
+            Next
 
-                    Read(LogicalOffset,
-                         Buffer,
-                         0,
-                         SegmentLength)
+            For Each Piece In Pieces
 
-                    Dim SegmentExtents =
-                        BuildExtentsFromBuffer(Buffer,
-                                               0,
-                                               SegmentLength)
+                If Piece.RecordId = SparsePhysicalRecordId Then Continue For
 
-                    For Each extent In SegmentExtents
+                If ReferenceCounts.ContainsKey(Piece.RecordId) = False Then
 
-                        Dim NewExtent = extent
+                    ' Nothing referenced this piece - it only ever covered a logically-dead
+                    ' sub-range of the old record. Reclaim it rather than leak it.
+                    Dim DeadRecord = GetPhysicalRecord(Piece.RecordId)
+                    DeadRecord.RefCount = 0
+                    _PhysicalRecords(Piece.RecordId) = DeadRecord
+                    _PendingReclaimedPhysicalRecords.Add(Piece.RecordId)
 
-                        NewExtent.LogicalOffset = LogicalOffset
-                        NewExtent.AnchorId = 0
+                Else
 
-                        NewExtents.Add(NewExtent)
-
-                        If NewExtent.PhysicalRecordId <> SparsePhysicalRecordId Then
-                            NewRecordIds.Add(NewExtent.PhysicalRecordId)
-                        End If
-
-                        LogicalOffset += NewExtent.LogicalLength
-
+                    ' Each new record already carries RefCount = 1 from its own creation.
+                    For AdditionalReference = 2 To ReferenceCounts(Piece.RecordId)
+                        IncrementPhysicalRecordRefCount(Piece.RecordId)
                     Next
 
-                    Result.ExaminedChunks += 1
-                    Result.ChunkSizeChanges += 1
-                    Result.RewrittenChunks += 1
-
-                    ProcessedBytes += SegmentLength
-
-                    ReportProgress(
-                        ProgressCallback,
-                        Math.Min(ProcessedBytes, TotalBytes),
-                        TotalBytes,
-                        ProcessUnitTypes.Bytes,
-                        CancellationToken)
-
-                End While
-
-                '
-                ' Split the rebuilt layout at every anchored logical boundary and restore
-                ' each immutable AnchorId to the extent beginning at that boundary.
-                '
-                NewExtents =
-                    ApplyAnchoredBoundariesToExtents(
-                        NewExtents,
-                        AnchoredOffsets,
-                        _Length)
-
-                RebaseExtentLogicalOffsets(NewExtents)
-
-                Dim OldPhysicalRecords =
-                    _PhysicalRecords.ToDictionary(
-                        Function(pair) pair.Key,
-                        Function(pair) pair.Value)
-
-                Dim NewPhysicalRecords As New Dictionary(Of Long, PhysicalRecordEntry)()
-
-                For Each RecordId In NewRecordIds
-
-                    Dim Record = GetPhysicalRecord(RecordId)
-
-                    NewPhysicalRecords(RecordId) = Record
-
-                Next
-
-                _Extents.Clear()
-                _Extents.AddRange(NewExtents)
-
-                _PhysicalRecords.Clear()
-
-                For Each pair In NewPhysicalRecords
-                    _PhysicalRecords(pair.Key) = pair.Value
-                Next
-
-                _ChunkSize = Options.ChunkSize
-                _ChunkSizeVariance = Options.ChunkSizeVariance
-
-                RebuildPhysicalRecordOrdinals()
-                RebuildAnchorIndex()
-
-                ReleaseOldPhysicalRecordSpaces(
-                    OldPhysicalRecords.Values,
-                    NewRecordIds)
-
-                InvalidateChunkCache()
-                MarkAllMetadataPagesDirty()
-
-            Catch
-
-                RestoreApplyOptionsRewriteState(
-                    OriginalExtents,
-                    OriginalPhysicalRecords,
-                    OriginalNextPhysicalRecordId,
-                    OriginalNextAnchorId,
-                    OriginalIndexOffset,
-                    OriginalPhysicalLength,
-                    OriginalChunkSize,
-                    OriginalChunkSizeVariance)
-
-                Throw
-
-            End Try
-
-        End Sub
-
-        Private Sub RestoreApplyOptionsRewriteState(OriginalExtents As List(Of ExtentIndexEntry),
-                                                    OriginalPhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry),
-                                                    OriginalNextPhysicalRecordId As Long,
-                                                    OriginalNextAnchorId As Long,
-                                                    OriginalIndexOffset As Long,
-                                                    OriginalPhysicalLength As Long,
-                                                    OriginalChunkSize As Integer,
-                                                    OriginalChunkSizeVariance As Double)
-
-            If OriginalExtents Is Nothing Then
-                Throw New ArgumentNullException(NameOf(OriginalExtents))
-            End If
-
-            If OriginalPhysicalRecords Is Nothing Then
-                Throw New ArgumentNullException(NameOf(OriginalPhysicalRecords))
-            End If
-
-            Try
-
-                _Extents.Clear()
-                _Extents.AddRange(OriginalExtents)
-
-                _PhysicalRecords.Clear()
-
-                For Each pair In OriginalPhysicalRecords
-                    _PhysicalRecords(pair.Key) = pair.Value
-                Next
-
-                _NextPhysicalRecordId =
-                    Math.Max(SparsePhysicalRecordId + 1,
-                             OriginalNextPhysicalRecordId)
-
-                _NextAnchorId =
-                    Math.Max(1L,
-                             OriginalNextAnchorId)
-
-                _IndexOffset = OriginalIndexOffset
-                _ChunkSize = OriginalChunkSize
-                _ChunkSizeVariance = OriginalChunkSizeVariance
-
-                RebuildPhysicalRecordOrdinals()
-                RebuildAnchorIndex()
-
-                DiscardPendingPhysicalRecordReclaims()
-                _DeferredFreeRanges.Clear()
-                InvalidateChunkCache()
-
-                MarkAllMetadataPagesDirty()
-
-                If BaseStream.Length > OriginalPhysicalLength Then
-                    BaseStream.SetLength(OriginalPhysicalLength)
                 End If
 
-            Finally
+            Next
 
-                BuildFreeSpaceMapCore()
+            _Extents.Clear()
+            _Extents.AddRange(NewExtents)
 
-            End Try
+            Dim OldRecord = GetPhysicalRecord(OldRecordId)
+            OldRecord.RefCount = 0
+            _PhysicalRecords(OldRecordId) = OldRecord
+
+            _PendingReclaimedPhysicalRecords.Add(OldRecordId)
+
+            RebuildAnchorIndex()
+            MarkAllMetadataPagesDirty()
 
         End Sub
 
@@ -1511,24 +1410,6 @@ Namespace Streams
             _PendingReclaimedPhysicalRecords.Add(OldRecordId)
 
             MarkAllMetadataPagesDirty()
-
-        End Sub
-
-        Private Sub ReleaseOldPhysicalRecordSpaces(OldRecords As IEnumerable(Of PhysicalRecordEntry),
-                                                   NewRecordIds As HashSet(Of Long))
-
-            If OldRecords Is Nothing Then Return
-
-            For Each record In OldRecords
-
-                If record.RecordId <= SparsePhysicalRecordId Then Continue For
-                If NewRecordIds IsNot Nothing AndAlso NewRecordIds.Contains(record.RecordId) Then Continue For
-
-                If HasOpenCheckpoint = False Then
-                    AddFreeSpace(record.PhysicalOffset, record.PhysicalLength)
-                End If
-
-            Next
 
         End Sub
 
