@@ -985,16 +985,8 @@ Namespace Streams
 
         Private Function ShouldBuildChunksInParallel(ByteCount As Integer) As Boolean
 
-            '
-            ' The parallel path pre-splits the buffer into fixed-size pieces before
-            ' dispatching them to the crypto pool, which only works when chunk boundaries
-            ' are known up front. Content-defined boundaries aren't known until the data is
-            ' scanned, so large CDC-enabled writes fall back to the serial path for now -
-            ' see DetermineNextSegmentLength.
-            '
             Return Options.MaxCryptoParallelism > 1 AndAlso
                    Options.ChunkSize > 0 AndAlso
-                   Options.ChunkSizeVariance <= 0 AndAlso
                    CLng(ByteCount) >= CLng(Options.ChunkSize) * ParallelChunkCryptoMinChunks
 
         End Function
@@ -1068,10 +1060,13 @@ Namespace Streams
         End Structure
 
         '
-        ' Splits the input into chunks, compresses / encrypts / authenticates the non-sparse
-        ' ones on a worker pool (Options.MaxCryptoParallelism), then places them serially so
-        ' the free-space allocation, physical-record table and ordinal map are only ever
-        ' touched from one thread. Each worker takes its own ChunkCipher.
+        ' Splits the input into chunks with a single serial pass (DetermineNextSegmentLength -
+        ' a CDC scan when Options.ChunkSizeVariance is non-zero, otherwise the same fixed-size
+        ' cut ShouldBuildChunksInParallel's caller would get either way), then compresses /
+        ' encrypts / authenticates the non-sparse ones on a worker pool
+        ' (Options.MaxCryptoParallelism), then places them serially so the free-space
+        ' allocation, physical-record table and ordinal map are only ever touched from one
+        ' thread. Each worker takes its own ChunkCipher.
         '
         Private Async Function BuildExtentsInParallelAsync(Input As Byte(),
                                                           InputOffset As Integer,
@@ -1092,7 +1087,7 @@ Namespace Streams
 
             While Remaining > 0
 
-                Dim SegmentLength = Math.Min(Options.ChunkSize, Remaining)
+                Dim SegmentLength = DetermineNextSegmentLength(Input, CurrentInputOffset, Remaining)
                 Dim Segment(SegmentLength - 1) As Byte
                 Buffer.BlockCopy(Input, CurrentInputOffset, Segment, 0, SegmentLength)
 
