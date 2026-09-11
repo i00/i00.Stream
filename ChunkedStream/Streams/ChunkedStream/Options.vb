@@ -931,6 +931,105 @@ Namespace Streams
 
         End Function
 
+        ''' <summary>
+        ''' Rebuilds the deduplication index from scratch, then runs the same catch-up scan
+        ''' <see cref="ApplyOptionTypes.Deduplication"/> does to cover anything the rebuild
+        ''' doesn't already account for.
+        ''' </summary>
+        ''' <param name="Soft">
+        ''' True (the default) keeps the existing dedup key and every still-valid hash - entries
+        ''' whose target record has since been reclaimed are dropped, everything else is copied
+        ''' forward into a fresh index (picking up a changed
+        ''' <see cref="ChunkedStreamOptions.DedupIndexPageEntryCount"/> along the way), cheaply,
+        ''' with no re-hashing. False discards the key entirely (via <see cref="RegenerateDedupKey"/>)
+        ''' and every existing hash with it - every live record's plaintext is re-hashed from
+        ''' scratch under the new key, the only variant where key rotation makes sense, since it's
+        ''' already paying to touch every record's plaintext.
+        ''' </param>
+        ''' <returns>A summary of the operation, in the same shape ApplyOptions returns.</returns>
+        Public Function DedupRebuild(Optional Soft As Boolean = True) As ApplyOptionsResult
+
+            Using EnterStateLock()
+                Return DedupRebuildCore(Soft)
+            End Using
+
+        End Function
+
+        Private Function DedupRebuildCore(Soft As Boolean) As ApplyOptionsResult
+
+            ThrowIfDisposed()
+            ThrowIfFaulted()
+
+            If _DeferPublishDepth > 0 Then
+                Throw New InvalidOperationException("DedupRebuild cannot be performed while metadata publishing is deferred.")
+            End If
+
+            Dim Result As New ApplyOptionsResult With {
+                .PhysicalLengthBefore = BaseStream.Length,
+                .PhysicalLengthAfter = BaseStream.Length
+            }
+
+            Try
+
+                If Soft Then
+
+                    '
+                    ' HMAC values computed under the current key stay valid, so there's nothing
+                    ' to re-hash - just drop entries whose target record no longer exists and
+                    ' copy every other entry into a fresh table (which also picks up a changed
+                    ' DedupIndexPageEntryCount). _DedupCoveredUpToRecordId is deliberately left
+                    ' untouched: every record that was already covered and is still live keeps
+                    ' its surviving entry, so re-examining it here would only insert a redundant
+                    ' duplicate of the exact entry it already has. Anything never covered is
+                    ' unaffected by the rebuild and still reaches the catch-up pass below.
+                    '
+                    Dim OldTable = _DedupHashTable
+                    _DedupHashTable = Nothing
+
+                    Dim NewTable = EnsureDedupHashTable()
+
+                    If OldTable IsNot Nothing Then
+
+                        For Each Entry In OldTable.GetAllEntries()
+
+                            Dim Record As PhysicalRecordEntry = Nothing
+
+                            If _PhysicalRecords.TryGetValue(Entry.Value, Record) AndAlso Record.RefCount > 0 Then
+                                NewTable.Insert(Entry.Key, Entry.Value)
+                            End If
+
+                        Next
+
+                    End If
+
+                Else
+
+                    '
+                    ' Every existing hash was computed under the key being discarded, so the
+                    ' whole table is worthless - Soft:=False is explicitly the "recompute
+                    ' everything" variant. Resetting the high-water mark to 0 forces the
+                    ' catch-up pass below to re-hash and re-index every live record from
+                    ' scratch under the new key.
+                    '
+                    RegenerateDedupKey()
+                    _DedupHashTable = Nothing
+                    _DedupCoveredUpToRecordId = 0
+
+                End If
+
+                RunApplyOptions(ApplyOptionTypes.Deduplication, Nothing, Durable:=True, Result)
+
+            Catch
+
+                _Faulted = True
+                Throw
+
+            End Try
+
+            Return Result
+
+        End Function
+
         Private Sub RunApplyOptions(Types As ApplyOptionTypes,
                                     ProgressCallback As StreamProgressCallback,
                                     Durable As Boolean,
