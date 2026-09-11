@@ -836,7 +836,7 @@ Namespace Streams
 
                 Dim Deduped = Await TryDeduplicateWriteAsync(Plain, PlainLength, RunAsync, CancellationToken).ConfigureAwait(False)
 
-                If Deduped.HasValue Then Return Deduped.Value
+                If Deduped.Match.HasValue Then Return Deduped.Match.Value
 
             End If
 
@@ -875,23 +875,31 @@ Namespace Streams
         ''' corruption elsewhere in the file; deduplication just backs off rather than failing an
         ''' otherwise-unrelated write).
         ''' </summary>
+        ''' <returns>
+        ''' Match is set on a verified hit (the caller should use the existing record instead of
+        ''' writing). Hash is always the plaintext's computed dedup hash (Nothing only when
+        ''' PlainLength &lt;= 0) regardless of whether a match was found, so a caller that also
+        ''' needs the hash for its own purposes (e.g. BuildExtentsInParallelAsync's intra-batch
+        ''' dedup check) never has to compute it twice. VB disallows ByRef parameters on Async
+        ''' functions, hence the tuple return instead of an output parameter.
+        ''' </returns>
         Private Async Function TryDeduplicateWriteAsync(Plain As Byte(),
                                                         PlainLength As Integer,
                                                         RunAsync As Boolean,
-                                                        CancellationToken As Threading.CancellationToken) As Task(Of PhysicalRecordEntry?)
+                                                        CancellationToken As Threading.CancellationToken) As Task(Of (Match As PhysicalRecordEntry?, Hash As Byte()))
 
-            If PlainLength <= 0 Then Return Nothing
+            If PlainLength <= 0 Then Return (Nothing, Nothing)
 
             Dim Hash = ComputeDedupHash(Plain, PlainLength)
             Dim CandidateRecordId As Long
 
-            If EnsureDedupHashTable().TryGetValue(Hash, CandidateRecordId) = False Then Return Nothing
+            If EnsureDedupHashTable().TryGetValue(Hash, CandidateRecordId) = False Then Return (Nothing, Hash)
 
             Dim Candidate As PhysicalRecordEntry = Nothing
 
-            If _PhysicalRecords.TryGetValue(CandidateRecordId, Candidate) = False Then Return Nothing
-            If Candidate.RefCount <= 0 Then Return Nothing
-            If Candidate.PlainLength <> PlainLength Then Return Nothing
+            If _PhysicalRecords.TryGetValue(CandidateRecordId, Candidate) = False Then Return (Nothing, Hash)
+            If Candidate.RefCount <= 0 Then Return (Nothing, Hash)
+            If Candidate.PlainLength <> PlainLength Then Return (Nothing, Hash)
 
             Dim CandidatePlain As Byte()
 
@@ -904,16 +912,16 @@ Namespace Streams
                 End If
 
             Catch ex As CryptographicException
-                Return Nothing
+                Return (Nothing, Hash)
             Catch ex As IOException
-                Return Nothing
+                Return (Nothing, Hash)
             End Try
 
-            If PlainContentEquals(Plain, PlainLength, CandidatePlain) = False Then Return Nothing
+            If PlainContentEquals(Plain, PlainLength, CandidatePlain) = False Then Return (Nothing, Hash)
 
             IncrementPhysicalRecordRefCount(CandidateRecordId)
 
-            Return GetPhysicalRecord(CandidateRecordId)
+            Return (GetPhysicalRecord(CandidateRecordId), Hash)
 
         End Function
 

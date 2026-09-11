@@ -162,6 +162,46 @@ Namespace Tests
 
             End Sub
 
+            <UnitTester.SimpleTest()>
+            Public Shared Sub IdenticalChunksWithinTheSameParallelWriteDedupeAgainstEachOther()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.Deduplication = True
+                        Cs.Options.ChunkSize = 4096
+                        Cs.Options.ChunkSizeVariance = 0
+                        Cs.Options.MaxCryptoParallelism = 4
+
+                        ' 10 distinct chunks, big enough to clear ParallelChunkCryptoMinChunks (8)
+                        ' so this routes through BuildExtentsInParallelAsync - then chunk 5 is
+                        ' overwritten with an exact copy of chunk 0's bytes, all within this one
+                        ' Write() call, so neither chunk is in the persisted index yet when the
+                        ' other is planned.
+                        Const ChunkSize As Integer = 4096
+                        Dim Data = GenerateRandomData(ChunkSize * 10, 7)
+                        Buffer.BlockCopy(Data, 0, Data, ChunkSize * 5, ChunkSize)
+
+                        Cs.Write(0, Data)
+
+                        AssertEqual(9, Cs.Debug_GetPhysicalRecordCount(), "Ten chunks with one intra-batch duplicate should create nine distinct records.")
+
+                        Dim RecordIdA = Cs.Debug_GetPhysicalRecordIdAt(0)
+                        Dim RecordIdB = Cs.Debug_GetPhysicalRecordIdAt(CLng(ChunkSize) * 5)
+
+                        AssertEqual(RecordIdA, RecordIdB, "Chunk 0 and chunk 5 should share the same physical record.")
+                        AssertEqual(2, Cs.Debug_GetPhysicalRecordRefCount(RecordIdA), "The shared record should have a reference count of 2.")
+
+                        Dim ReadBack(Data.Length - 1) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        AssertBytesEqual(Data, ReadBack, "The whole write, including the intra-batch duplicate, should read back correctly.")
+
+                    End Using
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

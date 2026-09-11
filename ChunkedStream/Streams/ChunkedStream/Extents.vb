@@ -1059,6 +1059,15 @@ Namespace Streams
             Public Ivs As Byte()()
             Public IsDeduped As Boolean
             Public DedupedRecord As PhysicalRecordEntry
+
+            ''' <summary>
+            ''' Set instead of <see cref="DedupedRecord"/> when this plan matches an earlier plan
+            ''' in the same batch rather than an already-persisted record - the earlier plan's own
+            ''' physical record doesn't exist yet at planning time, so it's resolved by index once
+            ''' the batch has actually been placed (see the resolution pass in
+            ''' BuildExtentsInParallelAsync).
+            ''' </summary>
+            Public DuplicateOfPlanIndex As Integer?
         End Structure
 
         '
@@ -1087,6 +1096,18 @@ Namespace Streams
             Dim Remaining = Count
             Dim CurrentInputOffset = InputOffset
 
+            '
+            ' Maps a content hash (Base64-encoded - simplest way to get structural rather than
+            ' reference equality out of a Dictionary key, and this only ever holds as many entries
+            ' as one batch has chunks) to the plan index that first established it, so two
+            ' identical chunks within the *same* write can dedupe against each other even though
+            ' neither is in the persisted index yet (nothing in this batch is placed until every
+            ' plan has been built). Only ever consulted for a plan that already missed the
+            ' persisted index, so a genuinely cross-write duplicate always prefers reusing the
+            ' existing on-disk record over a same-batch sibling.
+            '
+            Dim SeenHashes As New Dictionary(Of String, Integer)()
+
             While Remaining > 0
 
                 Dim SegmentLength = DetermineNextSegmentLength(Input, CurrentInputOffset, Remaining)
@@ -1100,9 +1121,12 @@ Namespace Streams
                 If Plan.IsSparse = False Then
 
                     Dim Deduped As PhysicalRecordEntry? = Nothing
+                    Dim Hash As Byte() = Nothing
 
                     If Options.Deduplication Then
-                        Deduped = Await TryDeduplicateWriteAsync(Segment, SegmentLength, RunAsync, CancellationToken).ConfigureAwait(False)
+                        Dim DedupResult = Await TryDeduplicateWriteAsync(Segment, SegmentLength, RunAsync, CancellationToken).ConfigureAwait(False)
+                        Deduped = DedupResult.Match
+                        Hash = DedupResult.Hash
                     End If
 
                     If Deduped.HasValue Then
@@ -1110,17 +1134,37 @@ Namespace Streams
                         Plan.IsDeduped = True
                         Plan.DedupedRecord = Deduped.Value
 
+                        If Hash IsNot Nothing Then
+                            SeenHashes(Convert.ToBase64String(Hash)) = Plans.Count
+                        End If
+
                     Else
 
-                        Plan.RecordId = AllocatePhysicalRecordId()
-                        Dim SubBlockCount = ComputeSubBlockCount(SegmentLength, Options.SubBlockSize)
-                        Dim Ivs As Byte()() = New Byte(SubBlockCount - 1)() {}
-                        For SubBlockIndex = 0 To SubBlockCount - 1
-                            Dim SubIv(IvSize - 1) As Byte
-                            _Rng.GetBytes(SubIv)
-                            Ivs(SubBlockIndex) = SubIv
-                        Next
-                        Plan.Ivs = Ivs
+                        Dim LeaderIndex As Integer = -1
+                        Dim HashKey = If(Hash IsNot Nothing, Convert.ToBase64String(Hash), Nothing)
+
+                        If HashKey IsNot Nothing AndAlso SeenHashes.TryGetValue(HashKey, LeaderIndex) AndAlso
+                           Plans(LeaderIndex).Segment.Length = SegmentLength AndAlso
+                           PlainContentEquals(Segment, SegmentLength, Plans(LeaderIndex).Segment) Then
+
+                            Plan.IsDeduped = True
+                            Plan.DuplicateOfPlanIndex = LeaderIndex
+
+                        Else
+
+                            If HashKey IsNot Nothing Then SeenHashes(HashKey) = Plans.Count
+
+                            Plan.RecordId = AllocatePhysicalRecordId()
+                            Dim SubBlockCount = ComputeSubBlockCount(SegmentLength, Options.SubBlockSize)
+                            Dim Ivs As Byte()() = New Byte(SubBlockCount - 1)() {}
+                            For SubBlockIndex = 0 To SubBlockCount - 1
+                                Dim SubIv(IvSize - 1) As Byte
+                                _Rng.GetBytes(SubIv)
+                                Ivs(SubBlockIndex) = SubIv
+                            Next
+                            Plan.Ivs = Ivs
+
+                        End If
 
                     End If
 
@@ -1194,6 +1238,32 @@ Namespace Streams
                 End If
 
             End If
+
+            '
+            ' Resolve every intra-batch duplicate now that its leader's actual physical record
+            ' exists - either freshly placed above, or (if the leader was itself a cross-write
+            ' dedup hit) already known at planning time. A leader is never itself a duplicate, so
+            ' this never needs more than one hop. Each duplicate needs its own increment: the
+            ' leader's own single reference was already accounted for when it was placed or
+            ' matched, and every duplicate is one more independent use of the same content.
+            '
+            For Index = 0 To Plans.Count - 1
+
+                If Plans(Index).DuplicateOfPlanIndex.HasValue = False Then Continue For
+
+                Dim LeaderIndex = Plans(Index).DuplicateOfPlanIndex.Value
+                Dim LeaderPlan = Plans(LeaderIndex)
+
+                Dim ResolvedRecordId =
+                    If(LeaderPlan.IsDeduped, LeaderPlan.DedupedRecord.RecordId, PlacedByPlanIndex(LeaderIndex).RecordId)
+
+                IncrementPhysicalRecordRefCount(ResolvedRecordId)
+
+                Dim ResolvedPlan = Plans(Index)
+                ResolvedPlan.DedupedRecord = GetPhysicalRecord(ResolvedRecordId)
+                Plans(Index) = ResolvedPlan
+
+            Next
 
             Dim Result As New List(Of ExtentIndexEntry)()
 
