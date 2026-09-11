@@ -724,6 +724,19 @@ Namespace Streams
             ''' </remarks>
             ChunkSize = 1 << 3
 
+            ''' <summary>
+            ''' Scans physical records that predate <see cref="ChunkedStreamOptions.Deduplication"/>
+            ''' being turned on (or that were written before a previous catch-up scan reached them)
+            ''' and indexes or deduplicates each one - see the deduplication index notes.
+            ''' </summary>
+            ''' <remarks>
+            ''' Deliberately excluded from <see cref="All"/>: unlike the other categories, this
+            ''' hashes and potentially decrypts every not-yet-covered record regardless of whether
+            ''' <see cref="ChunkedStreamOptions.Deduplication"/> is even in use, so it must be
+            ''' requested explicitly rather than paid for by every default <c>ApplyOptions()</c> call.
+            ''' </remarks>
+            Deduplication = 1 << 4
+
             All = Compression Or Encryption Or Sparseness Or ChunkSize
         End Enum
 
@@ -766,6 +779,14 @@ Namespace Streams
             Public Property SparsenessChanges As Integer
 
             ''' <summary>
+            ''' Number of chunks merged into an already-indexed duplicate found by the
+            ''' deduplication catch-up scan (<see cref="ApplyOptionTypes.Deduplication"/>).
+            ''' Does not count records that were simply indexed for the first time - those aren't
+            ''' a "change" to the record itself.
+            ''' </summary>
+            Public Property DeduplicationChanges As Integer
+
+            ''' <summary>
             ''' Number of allocated chunks converted to sparse chunks.
             ''' </summary>
             Public Property NewlySparseChunks As Integer
@@ -806,7 +827,7 @@ Namespace Streams
             Public Overrides Function ToString() As String
                 Return $"ApplyOptions [examined={ExaminedChunks}, rewritten={RewrittenChunks}, " &
                        $"compression={CompressionChanges}, encryption={EncryptionChanges}, sparse={SparsenessChanges}, " &
-                       $"chunkSize={ChunkSizeChanges}, physicalDelta={PhysicalBytesChanged.FormatFileSizeFromBytes()}, cancelled={WasCancelled}]"
+                       $"chunkSize={ChunkSizeChanges}, dedup={DeduplicationChanges}, physicalDelta={PhysicalBytesChanged.FormatFileSizeFromBytes()}, cancelled={WasCancelled}]"
             End Function
 
         End Class
@@ -996,8 +1017,22 @@ Namespace Streams
                 RemovedFileMasterKey = RemoveUnusedFileMasterKeyIfPossible()
             End If
 
+            '
+            ' Close the high-water mark up to the highest id ever allocated, not just the highest
+            ' one actually seen in the loop above - a reclaimed record that has since been dropped
+            ' from _PhysicalRecords entirely would otherwise leave a permanent gap the mark can
+            ' never advance past (there is nothing live left to process for it, but its id still
+            ' needs to count as "considered"). Only safe when the scan actually ran to completion.
+            '
+            If Result.WasCancelled = False AndAlso Types.HasFlag(ApplyOptionTypes.Deduplication) Then
+                _DedupCoveredUpToRecordId = Math.Max(_DedupCoveredUpToRecordId, _NextPhysicalRecordId - 1)
+            End If
+
             If HasOpenCheckpoint = False AndAlso
-               (Types.HasFlag(ApplyOptionTypes.ChunkSize) OrElse Result.RewrittenChunks > 0 OrElse RemovedFileMasterKey) Then
+               (Types.HasFlag(ApplyOptionTypes.ChunkSize) OrElse
+                Types.HasFlag(ApplyOptionTypes.Deduplication) OrElse
+                Result.RewrittenChunks > 0 OrElse
+                RemovedFileMasterKey) Then
                 PersistIndexAndHeader(_IndexOffset, Durable)
             End If
 
@@ -1065,6 +1100,21 @@ Namespace Streams
 
             End If
 
+            '
+            ' Records consumed by the Sparseness/ChunkSize branches above never reach here - they
+            ' already returned. Records rewritten below by Compression/Encryption already get
+            ' considered for deduplication through WritePhysicalRecordWithPolicyAsync's own hook
+            ' (via ReplacePhysicalRecordWithNewRecord), so the only genuine gap this closes is a
+            ' record that nothing else in this pass would ever touch.
+            '
+            If Types.HasFlag(ApplyOptionTypes.Deduplication) Then
+
+                If ApplyDeduplicationCatchUp(RecordId, Plain, Result) Then
+                    Return True
+                End If
+
+            End If
+
             Dim NeedsRewrite = False
 
             If Types.HasFlag(ApplyOptionTypes.Compression) Then
@@ -1127,6 +1177,96 @@ Namespace Streams
 
         End Function
 
+
+        ''' <summary>
+        ''' Considers one not-yet-covered physical record for the deduplication index: merges it
+        ''' into an already-indexed duplicate if a verified match exists, otherwise indexes it as
+        ''' the canonical entry for its content. Always advances
+        ''' <see cref="_DedupCoveredUpToRecordId"/> past RecordId - either outcome means this
+        ''' record has now been considered, which is all the high-water mark promises.
+        ''' </summary>
+        ''' <returns>
+        ''' True if RecordId was merged into an existing record (and so was "rewritten" the same
+        ''' way a Compression/Encryption change is); False if it was newly indexed, or if it was
+        ''' already covered by an earlier scan.
+        ''' </returns>
+        Private Function ApplyDeduplicationCatchUp(RecordId As Long,
+                                                   Plain As Byte(),
+                                                   Result As ApplyOptionsResult) As Boolean
+
+            If RecordId <= _DedupCoveredUpToRecordId Then Return False
+
+            Dim Hash = ComputeDedupHash(Plain, Plain.Length)
+            Dim CandidateRecordId As Long
+
+            If EnsureDedupHashTable().TryGetValue(Hash, CandidateRecordId) AndAlso CandidateRecordId <> RecordId Then
+
+                Dim Candidate As PhysicalRecordEntry = Nothing
+
+                If _PhysicalRecords.TryGetValue(CandidateRecordId, Candidate) AndAlso
+                   Candidate.RefCount > 0 AndAlso
+                   Candidate.PlainLength = Plain.Length Then
+
+                    Dim CandidatePlain = ReadPhysicalRecordPlain(Candidate)
+
+                    If PlainContentEquals(Plain, Plain.Length, CandidatePlain) Then
+
+                        MergePhysicalRecordIntoExisting(RecordId, CandidateRecordId)
+
+                        _DedupCoveredUpToRecordId = RecordId
+                        Result.DeduplicationChanges += 1
+
+                        Return True
+
+                    End If
+
+                End If
+
+            End If
+
+            ' No live, verified match - this record becomes the canonical entry for its content.
+            EnsureDedupHashTable().Insert(Hash, RecordId)
+            _DedupCoveredUpToRecordId = RecordId
+
+            Return False
+
+        End Function
+
+        ''' <summary>
+        ''' Redirects every extent referencing OldRecordId onto TargetRecordId (an existing,
+        ''' already-live record - unlike ReplacePhysicalRecordWithNewRecord, nothing was just
+        ''' written for this call, so every redirected extent needs its own increment) and
+        ''' reclaims OldRecordId.
+        ''' </summary>
+        Private Sub MergePhysicalRecordIntoExisting(OldRecordId As Long, TargetRecordId As Long)
+
+            Dim RedirectedExtentCount = 0
+
+            For Index = 0 To _Extents.Count - 1
+
+                Dim Extent = _Extents(Index)
+
+                If Extent.PhysicalRecordId <> OldRecordId Then Continue For
+
+                Extent.PhysicalRecordId = TargetRecordId
+                _Extents(Index) = Extent
+                RedirectedExtentCount += 1
+
+            Next
+
+            For AdditionalReference = 1 To RedirectedExtentCount
+                IncrementPhysicalRecordRefCount(TargetRecordId)
+            Next
+
+            Dim OldRecord = GetPhysicalRecord(OldRecordId)
+            OldRecord.RefCount = 0
+            _PhysicalRecords(OldRecordId) = OldRecord
+
+            _PendingReclaimedPhysicalRecords.Add(OldRecordId)
+
+            MarkAllMetadataPagesDirty()
+
+        End Sub
 
         Private Function NeedsCompressionRewrite(Header As ChunkHeaderSnapshot) As Boolean
 

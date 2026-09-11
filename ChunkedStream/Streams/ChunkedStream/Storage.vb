@@ -909,9 +909,7 @@ Namespace Streams
                 Return Nothing
             End Try
 
-            For Index = 0 To PlainLength - 1
-                If CandidatePlain(Index) <> Plain(Index) Then Return Nothing
-            Next
+            If PlainContentEquals(Plain, PlainLength, CandidatePlain) = False Then Return Nothing
 
             IncrementPhysicalRecordRefCount(CandidateRecordId)
 
@@ -935,6 +933,21 @@ Namespace Streams
             _DedupCoveredUpToRecordId = Math.Max(_DedupCoveredUpToRecordId, RecordId)
 
         End Sub
+
+        ''' <summary>
+        ''' True if Right's first LeftLength bytes are byte-for-byte identical to Left's. Shared by
+        ''' every dedup verification site (the write-path hook and the ApplyOptions catch-up scan)
+        ''' since a matching hash is only ever a hint - see the deduplication design notes.
+        ''' </summary>
+        Private Shared Function PlainContentEquals(Left As Byte(), LeftLength As Integer, Right As Byte()) As Boolean
+
+            For Index = 0 To LeftLength - 1
+                If Left(Index) <> Right(Index) Then Return False
+            Next
+
+            Return True
+
+        End Function
 
         Private Structure PreparedChunkRecord
             Public RecordId As Long
