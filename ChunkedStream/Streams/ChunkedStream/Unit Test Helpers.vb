@@ -156,6 +156,22 @@
 
         End Function
 
+        ''' <summary>True while Options.CurrentChunkWriteCaching has bytes buffered that haven't yet been committed to a real physical record.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_HasPendingChunkWriteCache() As Boolean
+
+            Return _PendingChunkPlain IsNot Nothing
+
+        End Function
+
+        ''' <summary>Number of bytes currently buffered by Options.CurrentChunkWriteCaching, or 0 if nothing is buffered.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_PendingChunkWriteCacheLength() As Integer
+
+            Return If(_PendingChunkPlain IsNot Nothing, _PendingChunkPlain.Count, 0)
+
+        End Function
+
         ''' <summary>The PhysicalRecordId of the extent covering LogicalOffset - lets a test confirm two logical ranges share (or don't share) the exact same physical record.</summary>
         <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
         Friend Function Debug_GetPhysicalRecordIdAt(LogicalOffset As Long) As Long

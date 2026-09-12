@@ -245,11 +245,67 @@ Namespace Streams
         End Sub
 
         ''' <summary>
+        ''' True when the stream's current last extent wholly (from its own offset 0) and
+        ''' exclusively (RefCount = 1) references a non-sparse record that still has room below
+        ''' Options.ChunkSize - the one condition under which growing that record in place, rather
+        ''' than starting a new one, is safe. A shared or dedup-matched record has other extents
+        ''' relying on its exact current content; a sub-range reference isn't "the whole chunk" to
+        ''' begin with.
+        ''' </summary>
+        Private Function TryGetExtendableLastChunk(ByRef Record As PhysicalRecordEntry) As Boolean
+
+            Record = Nothing
+
+            If _Extents.Count = 0 Then Return False
+
+            Dim LastExtent = _Extents(_Extents.Count - 1)
+
+            If LastExtent.PhysicalRecordId = SparsePhysicalRecordId Then Return False
+            If LastExtent.PhysicalRecordOffset <> 0 Then Return False
+
+            Dim Candidate = GetPhysicalRecord(LastExtent.PhysicalRecordId)
+
+            If Candidate.RefCount <> 1 Then Return False
+            If Candidate.PlainLength <> LastExtent.LogicalLength Then Return False
+            If Candidate.PlainLength >= Options.ChunkSize Then Return False
+
+            Record = Candidate
+            Return True
+
+        End Function
+
+        ''' <summary>
+        ''' Redirects the stream's current last extent onto NewRecordId (already carrying one
+        ''' reference credited to this call, per WritePhysicalRecordAsync's usual contract) and
+        ''' reclaims OldRecordId - the commit step shared by growing a chunk in place immediately
+        ''' (TryExtendLastChunkAsync) and committing one that was buffered
+        ''' (CommitPendingChunkAsync).
+        ''' </summary>
+        Private Sub ReplaceLastExtentRecord(NewRecordId As Long, NewLogicalLength As Integer, OldRecordId As Long)
+
+            Dim LastIndex = _Extents.Count - 1
+            Dim LastExtent = _Extents(LastIndex)
+
+            LastExtent.PhysicalRecordId = NewRecordId
+            LastExtent.PhysicalRecordOffset = 0
+            LastExtent.LogicalLength = NewLogicalLength
+            _Extents(LastIndex) = LastExtent
+
+            MarkExtentPageDirty(LastIndex)
+
+            DecrementPhysicalRecordRefCount(OldRecordId)
+            SettleDeferredPhysicalRecordReclaims()
+
+        End Sub
+
+        ''' <summary>
         ''' Tries to absorb a genuine end-of-stream append into the physical record the stream's
         ''' current last extent already references, instead of always creating a brand-new
         ''' (possibly tiny) chunk for every Write() call - see the write-coalescing plan notes.
         ''' Unconditional: this is not gated behind an option, since every Write() call still
-        ''' fully commits before returning either way, exactly as before this existed.
+        ''' fully commits before returning either way, exactly as before this existed. Not used
+        ''' when Options.CurrentChunkWriteCaching defers this same decision instead - see
+        ''' AppendThroughWriteCacheAsync.
         ''' </summary>
         ''' <returns>
         ''' The number of leading bytes of Input (starting at DataOffset) actually absorbed into
@@ -264,26 +320,11 @@ Namespace Streams
                                                        CancellationToken As Threading.CancellationToken) As Task(Of Integer)
 
             If Count <= 0 Then Return 0
-            If _Extents.Count = 0 Then Return 0
 
-            Dim LastIndex = _Extents.Count - 1
-            Dim LastExtent = _Extents(LastIndex)
-
-            If LastExtent.PhysicalRecordId = SparsePhysicalRecordId Then Return 0
-            If LastExtent.PhysicalRecordOffset <> 0 Then Return 0
-
-            Dim Record = GetPhysicalRecord(LastExtent.PhysicalRecordId)
-
-            ' Only a whole, unshared record - one extent referencing it, covering all of it from
-            ' its own start - can be safely grown in place. A shared or dedup-matched record has
-            ' other extents relying on its exact current content; a sub-range reference isn't
-            ' "the whole chunk" to begin with.
-            If Record.RefCount <> 1 Then Return 0
-            If Record.PlainLength <> LastExtent.LogicalLength Then Return 0
+            Dim Record As PhysicalRecordEntry = Nothing
+            If TryGetExtendableLastChunk(Record) = False Then Return 0
 
             Dim RoomLeft = Options.ChunkSize - Record.PlainLength
-            If RoomLeft <= 0 Then Return 0
-
             Dim AbsorbCount = Math.Min(RoomLeft, Count)
 
             Dim OldPlain As Byte()
@@ -302,21 +343,202 @@ Namespace Streams
             ' the grown content happens to already match something else in the index.
             Dim NewRecord = Await WritePhysicalRecordAsync(Combined, Combined.Length, RunAsync, CancellationToken).ConfigureAwait(False)
 
-            Dim OldRecordId = LastExtent.PhysicalRecordId
-
-            LastExtent.PhysicalRecordId = NewRecord.RecordId
-            LastExtent.PhysicalRecordOffset = 0
-            LastExtent.LogicalLength = Combined.Length
-            _Extents(LastIndex) = LastExtent
-
             _Length += AbsorbCount
 
-            MarkExtentPageDirty(LastIndex)
-
-            DecrementPhysicalRecordRefCount(OldRecordId)
-            SettleDeferredPhysicalRecordReclaims()
+            ReplaceLastExtentRecord(NewRecord.RecordId, Combined.Length, Record.RecordId)
 
             Return AbsorbCount
+
+        End Function
+
+        ''' <summary>
+        ''' Opens <see cref="_PendingChunkPlain"/>, seeding it from the stream's current last
+        ''' chunk when that chunk is eligible to grow (see <see cref="TryGetExtendableLastChunk"/>)
+        ''' or starting it empty otherwise. Only ever called when no buffer is already open.
+        ''' </summary>
+        Private Async Function OpenPendingChunkAsync(RunAsync As Boolean, CancellationToken As Threading.CancellationToken) As Task
+
+            Dim Record As PhysicalRecordEntry = Nothing
+
+            If TryGetExtendableLastChunk(Record) Then
+
+                Dim SeedPlain As Byte()
+
+                If RunAsync Then
+                    SeedPlain = Await ReadPhysicalRecordPlainAsync(Record, CancellationToken).ConfigureAwait(False)
+                Else
+                    SeedPlain = ReadPhysicalRecordPlain(Record)
+                End If
+
+                _PendingChunkPlain = New List(Of Byte)(SeedPlain)
+                _PendingChunkStart = _Extents(_Extents.Count - 1).LogicalOffset
+                _PendingChunkSourceRecordId = Record.RecordId
+
+            Else
+
+                _PendingChunkPlain = New List(Of Byte)()
+                _PendingChunkStart = _Length
+                _PendingChunkSourceRecordId = SparsePhysicalRecordId
+
+            End If
+
+        End Function
+
+        ''' <summary>
+        ''' Commits the pending write-cache buffer first if a read of EffectiveCount bytes
+        ''' starting at LogicalOffset would otherwise reach into it - the buffered tail isn't
+        ''' backed by any extent until it's committed, so an unflushed read into that range would
+        ''' fail to resolve. Callers are responsible for only invoking this while holding the
+        ''' stream's exclusive state lock: unlike an ordinary positional read, this can mutate
+        ''' shared extent/physical-record state, which the read lock alone does not protect
+        ''' against a concurrent reader also observing.
+        ''' </summary>
+        Private Async Function FlushPendingChunkBeforeReadAsync(LogicalOffset As Long,
+                                                                EffectiveCount As Integer,
+                                                                RunAsync As Boolean,
+                                                                CancellationToken As Threading.CancellationToken) As Task
+
+            If _PendingChunkPlain Is Nothing Then Return
+            If EffectiveCount <= 0 Then Return
+            If LogicalOffset + CLng(EffectiveCount) <= _PendingChunkStart Then Return
+
+            Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+
+        End Function
+
+        ''' <summary>
+        ''' Commits <see cref="_PendingChunkPlain"/> as a real physical record - replacing the
+        ''' extent it was seeded from, if any, or appending a brand new one - and closes the
+        ''' buffer. A no-op if nothing is currently buffered, so every commit trigger
+        ''' (a full chunk, an explicit flush, or anything needing complete extent/record state)
+        ''' can call this unconditionally.
+        ''' </summary>
+        Private Async Function CommitPendingChunkAsync(RunAsync As Boolean, CancellationToken As Threading.CancellationToken) As Task
+
+            If _PendingChunkPlain Is Nothing Then Return
+
+            If _PendingChunkPlain.Count = 0 Then
+                _PendingChunkPlain = Nothing
+                _PendingChunkSourceRecordId = SparsePhysicalRecordId
+                Return
+            End If
+
+            Dim Combined = _PendingChunkPlain.ToArray()
+            Dim NewRecord = Await WritePhysicalRecordAsync(Combined, Combined.Length, RunAsync, CancellationToken).ConfigureAwait(False)
+
+            If _PendingChunkSourceRecordId <> SparsePhysicalRecordId Then
+
+                ReplaceLastExtentRecord(NewRecord.RecordId, Combined.Length, _PendingChunkSourceRecordId)
+
+            Else
+
+                ' Nothing to replace - splice a brand new extent onto the stream's tail directly
+                ' (rather than through InsertExtentsCore, which would double-count _Length: every
+                ' buffered byte already advanced it the moment it was appended to the buffer).
+                _Extents.Add(New ExtentIndexEntry With {
+                    .LogicalOffset = _PendingChunkStart,
+                    .LogicalLength = Combined.Length,
+                    .PhysicalRecordId = NewRecord.RecordId,
+                    .PhysicalRecordOffset = 0,
+                    .AnchorId = 0
+                })
+
+                RebuildAnchorIndex()
+                MarkExtentPageDirty(_Extents.Count - 1)
+
+            End If
+
+            _PendingChunkPlain = Nothing
+            _PendingChunkSourceRecordId = SparsePhysicalRecordId
+
+        End Function
+
+        ''' <summary>
+        ''' Routes a genuine end-of-stream append through the deferred write cache: opens
+        ''' <see cref="_PendingChunkPlain"/> if nothing is buffered yet, appends as many bytes as
+        ''' fit below Options.ChunkSize, commits and starts a fresh buffer whenever it fills, and
+        ''' repeats for however many chunks' worth Count spans. _Length advances immediately as
+        ''' each byte is buffered, so the stream's reported length is never behind what Write()
+        ''' already returned to the caller.
+        ''' </summary>
+        Private Async Function AppendThroughWriteCacheAsync(Input As Byte(),
+                                                             DataOffset As Integer,
+                                                             Count As Integer,
+                                                             RunAsync As Boolean,
+                                                             CancellationToken As Threading.CancellationToken) As Task
+
+            Dim Remaining = Count
+            Dim CurrentDataOffset = DataOffset
+
+            While Remaining > 0
+
+                If _PendingChunkPlain Is Nothing Then
+                    Await OpenPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+                End If
+
+                Dim RoomLeft = Options.ChunkSize - _PendingChunkPlain.Count
+                Dim AbsorbCount = Math.Min(RoomLeft, Remaining)
+
+                If AbsorbCount > 0 Then
+
+                    Dim Segment(AbsorbCount - 1) As Byte
+                    Buffer.BlockCopy(Input, CurrentDataOffset, Segment, 0, AbsorbCount)
+                    _PendingChunkPlain.AddRange(Segment)
+
+                    _Length += AbsorbCount
+                    CurrentDataOffset += AbsorbCount
+                    Remaining -= AbsorbCount
+
+                End If
+
+                If _PendingChunkPlain.Count >= Options.ChunkSize Then
+                    Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+                End If
+
+            End While
+
+        End Function
+
+        ''' <summary>
+        ''' Commits whatever is currently buffered by <see cref="ChunkedStreamOptions.CurrentChunkWriteCaching"/>
+        ''' right now, under-full or not. A no-op if nothing is buffered or the option was never
+        ''' used - safe to call unconditionally.
+        ''' </summary>
+        Public Sub FlushCurrentChunkWriteCache()
+
+            Using EnterStateLock()
+                FlushCurrentChunkWriteCacheCore()
+            End Using
+
+        End Sub
+
+        ''' <summary>
+        ''' Asynchronous counterpart to <see cref="FlushCurrentChunkWriteCache"/>.
+        ''' </summary>
+        Public Function FlushCurrentChunkWriteCacheAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task
+
+            Return RunUnderStateLockAsync(CancellationToken, Function() FlushCurrentChunkWriteCacheCoreAsync(RunAsync:=True, CancellationToken:=CancellationToken))
+
+        End Function
+
+        Private Sub FlushCurrentChunkWriteCacheCore()
+
+            FlushCurrentChunkWriteCacheCoreAsync(RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+        End Sub
+
+        Private Async Function FlushCurrentChunkWriteCacheCoreAsync(RunAsync As Boolean, CancellationToken As Threading.CancellationToken) As Task
+
+            ThrowIfDisposed()
+            ThrowIfFaulted()
+
+            If _PendingChunkPlain Is Nothing Then Return
+
+            Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+
+            If MetadataPublishSuspended = False Then
+                Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
+            End If
 
         End Function
 

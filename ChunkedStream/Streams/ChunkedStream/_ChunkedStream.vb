@@ -1433,6 +1433,28 @@ Namespace Streams
             End Set
         End Property
 
+        ''' <summary>
+        ''' Buffered, not-yet-committed content for the chunk the stream's last extent will
+        ''' eventually reference, when Options.CurrentChunkWriteCaching defers committing it - see
+        ''' AppendThroughWriteCacheAsync. Nothing when no chunk is currently buffered. These bytes
+        ''' exist only here, not in any extent or physical record, until a commit trigger fires.
+        ''' </summary>
+        Private _PendingChunkPlain As List(Of Byte)
+
+        ''' <summary>
+        ''' Logical offset where <see cref="_PendingChunkPlain"/> begins - always the current
+        ''' stream length minus however many bytes are buffered.
+        ''' </summary>
+        Private _PendingChunkStart As Long
+
+        ''' <summary>
+        ''' The physical record <see cref="_PendingChunkPlain"/> was seeded from (its bytes are
+        ''' the buffer's initial content), or SparsePhysicalRecordId when the buffer started empty
+        ''' and will need a brand new extent on commit rather than replacing this stream's last
+        ''' one.
+        ''' </summary>
+        Private _PendingChunkSourceRecordId As Long = SparsePhysicalRecordId
+
         Private ReadOnly _Header As Byte()
         Private ReadOnly _Extents As List(Of ExtentIndexEntry)
         Private ReadOnly _PhysicalRecordOrdinals As New Dictionary(Of Long, Integer)
@@ -3031,6 +3053,8 @@ Namespace Streams
 
             ThrowIfDisposed()
 
+            FlushPendingChunkBeforeReadAsync(_Position, Count, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
             Dim BytesRead As Integer =
                 ReadCore(_Position,
                      Buffer,
@@ -3080,6 +3104,8 @@ Namespace Streams
 
             ThrowIfDisposed()
 
+            Await FlushPendingChunkBeforeReadAsync(_Position, Count, RunAsync:=True, CancellationToken:=CancellationToken).ConfigureAwait(False)
+
             Dim BytesRead As Integer =
                 Await ReadCoreAsync(CLng(_Position),
                                     Buffer,
@@ -3116,10 +3142,31 @@ Namespace Streams
                                        Optional OutputOffset As Integer = 0,
                                        Optional Count As Integer? = Nothing) As Integer
 
-            Using EnterReadLock()
+            '
+            ' A pending write-cache buffer isn't backed by any extent, so a read into it must
+            ' commit it first - which mutates shared extent/physical-record state, unsafe under
+            ' only the shared read lock a concurrent reader might also be holding. Upgrading to
+            ' the exclusive state lock here (only when caching is even in use) serialises reads
+            ' against each other while it's in effect; the ordinary read lock's own concurrency is
+            ' otherwise untouched.
+            '
+            Dim ReadLockScope As IDisposable = If(Options.CurrentChunkWriteCaching, EnterStateLock(), EnterReadLock())
+
+            Using ReadLockScope
+
+                If Options.CurrentChunkWriteCaching Then
+
+                    Dim EffectiveCount = 0
+                    If Output IsNot Nothing Then EffectiveCount = If(Count.HasValue, Count.Value, Output.Length - OutputOffset)
+
+                    FlushPendingChunkBeforeReadAsync(LogicalOffset, EffectiveCount, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+
+                End If
+
                 Using Cipher = CreateChunkCipher()
                     Return ReadCore(LogicalOffset, Output, OutputOffset, Count, Cipher)
                 End Using
+
             End Using
 
         End Function
@@ -3142,6 +3189,24 @@ Namespace Streams
                                             Optional OutputOffset As Integer = 0,
                                             Optional Count As Integer? = Nothing,
                                             Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Integer)
+
+            ' See the sync Read overload's remarks on why this upgrades to the exclusive lock
+            ' only when Options.CurrentChunkWriteCaching is in use.
+            If Options.CurrentChunkWriteCaching Then
+
+                Return RunUnderStateLockAsync(CancellationToken,
+                    Async Function() As Task(Of Integer)
+
+                        Dim EffectiveCount = 0
+                        If Output IsNot Nothing Then EffectiveCount = If(Count.HasValue, Count.Value, Output.Length - OutputOffset)
+
+                        Await FlushPendingChunkBeforeReadAsync(LogicalOffset, EffectiveCount, RunAsync:=True, CancellationToken:=CancellationToken).ConfigureAwait(False)
+
+                        Return Await ReadPositionedRangeAsync(LogicalOffset, Output, OutputOffset, Count, CancellationToken).ConfigureAwait(False)
+
+                    End Function)
+
+            End If
 
             Return RunUnderReadLockAsync(CancellationToken, Function() ReadPositionedRangeAsync(LogicalOffset, Output, OutputOffset, Count, CancellationToken))
 
@@ -3756,6 +3821,23 @@ Namespace Streams
 
             Try
 
+                '
+                ' Anything other than continuing right where the pending write-cache buffer left
+                ' off needs a real, complete extent table to work against - the replace path below
+                ' resolves logical offsets through _Extents, which the buffered tail isn't part of
+                ' yet. This also covers a gap-creating append (LogicalOffset > _Length): the sparse
+                ' fill just below operates on _Extents directly too. Also flush a stale buffer left
+                ' over from Options.CurrentChunkWriteCaching having since been turned off - the
+                ' unconditional TryExtendLastChunkAsync path below only ever looks at _Extents, not
+                ' this buffer.
+                '
+                If _PendingChunkPlain IsNot Nothing AndAlso
+                   (LogicalOffset <> _Length OrElse Options.CurrentChunkWriteCaching = False) Then
+
+                    Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+
+                End If
+
                 If LogicalOffset > _Length Then
                     InsertSparseRange(_Length, LogicalOffset - _Length)
                 End If
@@ -3780,7 +3862,14 @@ Namespace Streams
                     Dim AppendDataOffset = DataOffset + CInt(ExistingLength)
                     Dim AppendCount = EffectiveCount - CInt(ExistingLength)
 
-                    Dim ExtendedCount = Await TryExtendLastChunkAsync(Input, AppendDataOffset, AppendCount, RunAsync, CancellationToken).ConfigureAwait(False)
+                    Dim ExtendedCount As Integer
+
+                    If Options.CurrentChunkWriteCaching Then
+                        Await AppendThroughWriteCacheAsync(Input, AppendDataOffset, AppendCount, RunAsync, CancellationToken).ConfigureAwait(False)
+                        ExtendedCount = AppendCount
+                    Else
+                        ExtendedCount = Await TryExtendLastChunkAsync(Input, AppendDataOffset, AppendCount, RunAsync, CancellationToken).ConfigureAwait(False)
+                    End If
 
                     If ExtendedCount < AppendCount Then
 
@@ -3852,6 +3941,12 @@ Namespace Streams
             If Length = _Length Then Return
 
             Try
+
+                ' Both branches below resolve logical offsets through _Extents, which a pending
+                ' write-cache buffer isn't part of yet.
+                If _PendingChunkPlain IsNot Nothing Then
+                    Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+                End If
 
                 If Length < _Length Then
 
@@ -4825,6 +4920,22 @@ Namespace Streams
             ThrowIfDisposed()
 
             '
+            ' Flush is exactly the kind of explicit action that should force a buffered
+            ' write-cache chunk out, per Options.CurrentChunkWriteCaching's own contract -
+            ' materialise it (and publish that, the same way an ordinary Write() call would
+            ' have) before anything below considers metadata or the backing store durable.
+            '
+            If _PendingChunkPlain IsNot Nothing Then
+
+                Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+
+                If MetadataPublishSuspended = False Then
+                    Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
+                End If
+
+            End If
+
+            '
             ' Publish metadata a DeferPublish scope is holding back, so Flush is a real
             ' durability point even mid-batch. A checkpoint's pending metadata stays with
             ' the checkpoint - Flush must not partially commit it.
@@ -4872,6 +4983,16 @@ Namespace Streams
 
             Try
                 RemoveHandler Options.EncryptionInfoChanged, AddressOf Options_EncryptionInfoChanged
+
+                '
+                ' A buffered write-cache chunk exists only in memory - losing it silently on
+                ' Dispose would mean bytes a Write() call already returned success for never
+                ' existed anywhere. A faulted stream's in-memory state is already suspect and
+                ' must not be persisted, matching every other half-applied state below.
+                '
+                If _Faulted = False AndAlso _PendingChunkPlain IsNot Nothing Then
+                    CommitPendingChunkAsync(RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+                End If
 
                 While _CheckpointStack.Count > 0
                     CloseCheckpointCore(_CheckpointStack(_CheckpointStack.Count - 1))

@@ -175,15 +175,36 @@ Namespace Streams
             End Property
 
             ''' <summary>
-            ''' Reserved for future use. Does not currently change any behaviour.
+            ''' Whether matching chunks get reused instead of written again - see the
+            ''' deduplication design notes.
             ''' </summary>
             ''' <remarks>
-            ''' Whether matching chunks get reused, once deduplication is implemented. This is independent
-            ''' of <see cref="ChunkSizeVariance"/>, which only decides where chunk boundaries fall -
-            ''' content-defined splitting happens (or doesn't) based on <see cref="ChunkSizeVariance"/> alone,
-            ''' regardless of this setting.
+            ''' Independent of <see cref="ChunkSizeVariance"/>, which only decides where chunk
+            ''' boundaries fall - content-defined splitting happens (or doesn't) based on
+            ''' <see cref="ChunkSizeVariance"/> alone, regardless of this setting.
             ''' </remarks>
             Public Property Deduplication As Boolean = False
+
+            ''' <summary>
+            ''' When True, a genuine end-of-stream append that would otherwise pay to
+            ''' decrypt/re-encrypt the stream's last chunk on every single Write() call instead
+            ''' accumulates in memory and only commits when a chunk boundary is reached or
+            ''' something needs the committed state to be complete (an explicit
+            ''' <see cref="ChunkedStream.FlushCurrentChunkWriteCache"/>, <c>Flush</c>,
+            ''' <c>Dispose</c>, a non-contiguous write, or a read into the buffered range).
+            ''' </summary>
+            ''' <remarks>
+            ''' Coalescing the resulting chunk boundaries with the last existing chunk happens
+            ''' unconditionally regardless of this setting - see the write-coalescing plan notes.
+            ''' This option only controls whether that coalescing commits eagerly on every write
+            ''' (False, the default) or is deferred to reduce the number of decrypt/re-encrypt
+            ''' round trips a run of small appends pays for (True). While bytes are buffered they
+            ''' exist only in process memory, not in any physical record or extent - a crash or a
+            ''' killed process before a commit trigger fires loses them even though the Write()
+            ''' call that produced them already returned successfully. Off by default for exactly
+            ''' this reason.
+            ''' </remarks>
+            Public Property CurrentChunkWriteCaching As Boolean = False
 
             Private _MinChunkSize As Integer
             Private _MaxChunkSize As Integer
