@@ -149,6 +149,79 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' A brand new chunk's first byte(s) can legitimately be zero, purely by coincidence -
+            ''' this must not get permanently frozen as an isolated sparse extent the moment it's
+            ''' written, since a sparse extent is never itself eligible to extend (see
+            ''' TryGetExtendableLastChunkAsync). Sparse-checking it too eagerly would produce a
+            ''' chunk boundary one byte earlier than a one-shot write of the combined bytes would
+            ''' have (see BuildExtentsFromBufferAsync's AllowGrowableTail remarks).
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ALoneZeroByteAtTheStartOfANewChunkStaysGrowable()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.ChunkSize = 8
+
+                        ' Fill exactly one chunk with non-zero bytes so the very next append
+                        ' starts a brand new chunk from scratch.
+                        Cs.Write(0, New Byte() {1, 2, 3, 4, 5, 6, 7, 8})
+
+                        ' The new chunk's first byte happens to be zero, written entirely on its
+                        ' own - the smallest possible coalescing step.
+                        Cs.Write(8, New Byte() {0})
+                        Cs.Write(9, New Byte() {42})
+
+                        AssertEqual(2, Cs.Debug_GetExtentCount(), "The second chunk should still be one extent, not split apart at the zero byte.")
+                        AssertEqual(2, Cs.Debug_GetExtentLength(1), "The zero byte should have stayed part of the growing second chunk.")
+
+                        Dim ReadBack(9) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        AssertBytesEqual(New Byte() {1, 2, 3, 4, 5, 6, 7, 8, 0, 42}, ReadBack, "All ten bytes should read back correctly.")
+
+                    End Using
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Coalescing must never reach across a deliberate, explicit gap (SetLength growth or
+            ''' a jump-ahead Write()): a sparse gap-filler is never itself eligible to extend, so
+            ''' two writes separated by a gap smaller than Options.ChunkSize stay independent
+            ''' chunks - the same guarantee Deduplication's own equivalent tests rely on (see
+            ''' Deduplication\DedupWritePath.vb).
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CoalescingDoesNotReachAcrossAnExplicitGap()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, New Byte() {1, 2, 3})
+                        Cs.Write(1000, New Byte() {4, 5, 6})
+
+                        AssertEqual(3, Cs.Debug_GetExtentCount(), "The gap and both writes should each be their own extent, not merged into one.")
+                        AssertEqual(3, Cs.Debug_GetExtentLength(0), "The first write should be unaffected.")
+                        AssertEqual(997, Cs.Debug_GetExtentLength(1), "The gap should be exactly the requested size.")
+                        AssertEqual(3, Cs.Debug_GetExtentLength(2), "The second write should not have absorbed the gap into its own chunk.")
+
+                        Dim ReadBackA(2) As Byte
+                        Dim ReadBackB(2) As Byte
+
+                        Cs.Read(0, ReadBackA)
+                        Cs.Read(1000, ReadBackB)
+
+                        AssertBytesEqual(New Byte() {1, 2, 3}, ReadBackA, "The first write should read back correctly.")
+                        AssertBytesEqual(New Byte() {4, 5, 6}, ReadBackB, "The second write should read back correctly.")
+
+                    End Using
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

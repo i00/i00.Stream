@@ -145,6 +145,70 @@ This closes the original EFS/dedup-alignment gap write coalescing was built to f
 one-shot writes of the same bytes now chunk identically under content-defined chunking, the same
 way they already did under fixed-size chunking.
 
+**Follow-up fix - `CalculateSplitHashCheck`'s average-chunk-length math was off by `MinChunkSize`:**
+caught by checking the formula against how the hash is actually consumed. The hash only starts
+rolling once `MinChunkSize` bytes are already behind it (see `DetermineNextSegmentLength`'s own
+remarks) - those bytes are never subject to a threshold check at all. The old formula targeted
+`Threshold = 2^64 / ChunkSize`, which makes the *post-MinChunkSize* scan's own expected length
+`ChunkSize` - on top of the `MinChunkSize` bytes that already elapsed unconditionally before the
+scan could even start. Total expected chunk length was therefore `MinChunkSize + ChunkSize`, not
+`ChunkSize` - at the default 25% variance this pushes the average close to (or past)
+`MaxChunkSize`, so almost every chunk was cut by hitting the cap rather than by content, silently
+defeating most of CDC's own benefit. Fixed to target `Threshold = 2^64 / (ChunkSize - MinChunkSize)`
+instead - the scan only ever needs to explain the bytes *after* `MinChunkSize`, since those are
+already accounted for unconditionally. `RecalculateChunkSizeBounds` also now guards
+`AverageBytesToScan <= 0` (possible at a tiny non-zero `ChunkSizeVariance`, where `CInt`'s
+rounding can round `MinChunkSize` up to equal `ChunkSize`) by disabling the hash the same as
+`ChunkSizeVariance = 0` would - no room left for content to pick a boundary.
+
+**That fix immediately surfaced a real, previously-masked bug in stage 1/2 themselves:** with
+chunks now actually landing near `ChunkSize` instead of almost always at `MaxChunkSize`, real
+content-defined cuts became common for the first time - and one of `ContentDefinedWriteCoalescing.vb`'s
+own equivalence tests started failing. Root cause: a lone zero byte that happens to be the *first*
+byte of what should become a larger real chunk (e.g. one Write() call absorbing exactly one byte
+before the previous chunk closed) was getting sparse-flagged in isolation by the generic
+`BuildExtentsFromBufferAsync` extent builder - and a sparse extent is never itself eligible to
+extend (`TryGetExtendableLastChunkAsync` rejects it outright), so it froze there permanently, one
+byte short of what a one-shot write of the same combined bytes would have produced. That single
+misclassification shifted every later Gear-hash window by one byte, cascading into a
+stream-wide chunk-boundary mismatch (not a data-correctness bug - a sparse zero byte still reads
+back as zero - but a real alignment one, directly undercutting the EFS/dedup-alignment goal stage
+3 was built for).
+- **First attempt, tried and reverted: make sparse extents themselves eligible for extension.**
+  Seemed like the natural fix (treat a small sparse run's "plaintext" as a synthetic all-zero
+  array and run it through the same eligibility/extend machinery as a real record), and it did fix
+  the equivalence test - but it broke several *existing* deduplication tests
+  (`IdenticalSmallWritesShareOnePhysicalRecord`, `SharedRecordIsNotExtendedInPlace`, and others):
+  writing identical content at two offsets separated by a gap smaller than `ChunkSize` (a common
+  dedup-test pattern - `Cs.Write(0, Data); Cs.Write(1000, Data)`) now merged the *explicit,
+  deliberate* gap-filler (from a jump-ahead `Write()`) into the same physical record as whatever
+  got written after it, since that gap is *also* just a sparse extent under `ChunkSize`. A
+  deliberate gap and an undersized coalescing remainder are indistinguishable from an extent's own
+  fields alone, so this made *every* small gap growable too - reaching across a boundary
+  deduplication (and the pre-existing `SharedRecordIsNotExtendedInPlace` test) explicitly depends
+  on staying intact. Reverted in full (`ReplaceLastExtentWithSparse`, the eligibility branch, and
+  the transient `_PendingChunkHasSeedExtent` bookkeeping it needed).
+- **Actual fix, scoped to where the ambiguity truly lives:** `BuildExtentsFromBufferAsync` gained
+  an `AllowGrowableTail` parameter, set only by the one call site that fills in the remainder of a
+  genuine end-of-stream append `TryExtendLastChunkAsync` already partially absorbed
+  (`WriteCoreAsync`'s append branch) - never for an overwrite, insert, or gap fill, where nothing
+  is ever going to extend the result further. When true, the *last* segment produced skips the
+  sparse check if it hasn't genuinely closed yet (`IsChunkClosedByCdcBoundary` says open - i.e. it
+  stopped only because `Count` ran out, not a real boundary or `MaxChunkSize`) - it's written as a
+  real record instead, staying eligible for ordinary extend-in-place on the next `Write()` call,
+  exactly like any other real chunk. A deliberate gap-filler never reaches this code path at all
+  (`InsertSparseRange` has its own, separate extent-creation logic), so deduplication's
+  gap-independence guarantee is completely untouched.
+- **Bonus, independent fix found along the way:** `CommitPendingChunkAsync` (the
+  `CurrentChunkWriteCaching` buffer's own commit) never checked `Options.StoreSparseChunks` /
+  `IsAllZero` at all - a fully-zero buffered chunk always became a real record. Added the same
+  check `BuildExtentsFromBufferAsync` already had, for the one case it's actually reachable (a
+  buffer that started completely fresh, with no seed extent - a seeded buffer's content already
+  has a non-zero byte by construction, or its seed would have been sparse itself).
+- 3 more tests: `ALoneZeroByteAtTheStartOfANewChunkStaysGrowable` and
+  `CoalescingDoesNotReachAcrossAnExplicitGap` in `WriteCoalescing.vb`,
+  `AnAllZeroBufferedChunkBecomesSparseOnCommit` in `CurrentChunkWriteCaching.vb`. 399/399 total.
+
 ---
 
 ## 2026-09-11

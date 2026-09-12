@@ -483,6 +483,37 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' The write-cache buffer's own commit must apply Options.StoreSparseChunks'
+            ''' optimisation too, the same as any other extent-building path - a fully-zero
+            ''' buffered chunk should become a sparse extent rather than a wasted real record just
+            ''' because it happened to pass through the buffer first.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub AnAllZeroBufferedChunkBecomesSparseOnCommit()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.CurrentChunkWriteCaching = True
+
+                        Cs.Write(0, New Byte() {0})
+                        Cs.Write(1, New Byte() {0, 0, 0})
+
+                        Cs.FlushCurrentChunkWriteCache()
+
+                        AssertEqual(0, Cs.Debug_GetPhysicalRecordCount(), "An all-zero buffered chunk should become sparse, not a real record, on commit.")
+
+                        Dim ReadBack(3) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        AssertBytesEqual(New Byte() {0, 0, 0, 0}, ReadBack, "The sparse chunk should still read back as all zero.")
+
+                    End Using
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

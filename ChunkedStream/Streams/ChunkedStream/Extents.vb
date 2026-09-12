@@ -262,7 +262,10 @@ Namespace Streams
         ''' exclusively (RefCount = 1) references a non-sparse record that is still open to grow -
         ''' the one condition under which extending it in place, rather than starting a new chunk,
         ''' is safe. A shared or dedup-matched record has other extents relying on its exact
-        ''' current content; a sub-range reference isn't "the whole chunk" to begin with.
+        ''' current content; a sub-range reference isn't "the whole chunk" to begin with. A sparse
+        ''' extent is never eligible, deliberately - see BuildExtentsFromBufferAsync's
+        ''' AllowGrowableTail remarks for why a lone zero byte still needs to stay safe to grow
+        ''' into a larger real chunk without going through this path at all.
         ''' </summary>
         ''' <remarks>
         ''' Under fixed-size chunking (<see cref="ChunkedStreamOptions.ChunkSizeVariance"/> = 0)
@@ -433,6 +436,7 @@ Namespace Streams
 
         End Sub
 
+
         ''' <summary>
         ''' Tries to absorb a genuine end-of-stream append into the physical record the stream's
         ''' current last extent already references, instead of always creating a brand-new
@@ -550,11 +554,15 @@ Namespace Streams
         End Function
 
         ''' <summary>
-        ''' Commits <see cref="_PendingChunkPlain"/> as a real physical record - replacing the
-        ''' extent it was seeded from, if any, or appending a brand new one - and closes the
-        ''' buffer. A no-op if nothing is currently buffered, so every commit trigger
-        ''' (a full chunk, an explicit flush, or anything needing complete extent/record state)
-        ''' can call this unconditionally.
+        ''' Commits <see cref="_PendingChunkPlain"/> - replacing the extent it was seeded from, if
+        ''' any, or appending a brand new one - and closes the buffer. Writes a real physical
+        ''' record unless the buffered content is still entirely zero (and
+        ''' Options.StoreSparseChunks is False), in which case it becomes (or stays) a sparse
+        ''' extent instead - exactly what a one-shot write of the same bytes would have produced,
+        ''' rather than always materialising a real record just because this content happened to
+        ''' pass through the write-cache buffer. A no-op if nothing is currently buffered, so every
+        ''' commit trigger (a full chunk, an explicit flush, or anything needing complete extent/
+        ''' record state) can call this unconditionally.
         ''' </summary>
         Private Async Function CommitPendingChunkAsync(RunAsync As Boolean, CancellationToken As Threading.CancellationToken) As Task
 
@@ -567,9 +575,13 @@ Namespace Streams
             End If
 
             Dim Combined = _PendingChunkPlain.ToArray()
-            Dim NewRecord = Await WritePhysicalRecordAsync(Combined, Combined.Length, RunAsync, CancellationToken).ConfigureAwait(False)
 
             If _PendingChunkSourceRecordId <> SparsePhysicalRecordId Then
+
+                ' A real seed's plaintext already has at least one non-zero byte (or it would have
+                ' been sparse itself), so growing it can never end up all zero - always a real
+                ' record here.
+                Dim NewRecord = Await WritePhysicalRecordAsync(Combined, Combined.Length, RunAsync, CancellationToken).ConfigureAwait(False)
 
                 ReplaceLastExtentRecord(NewRecord.RecordId, Combined.Length, _PendingChunkSourceRecordId)
 
@@ -578,10 +590,19 @@ Namespace Streams
                 ' Nothing to replace - splice a brand new extent onto the stream's tail directly
                 ' (rather than through InsertExtentsCore, which would double-count _Length: every
                 ' buffered byte already advanced it the moment it was appended to the buffer).
+                ' Sparse rather than a wasted all-zero record when the buffer never picked up a
+                ' non-zero byte - exactly what a one-shot write of the same bytes would produce.
+                Dim NewRecordId = SparsePhysicalRecordId
+
+                If Options.StoreSparseChunks OrElse IsAllZero(Combined, Combined.Length) = False Then
+                    Dim NewRecord = Await WritePhysicalRecordAsync(Combined, Combined.Length, RunAsync, CancellationToken).ConfigureAwait(False)
+                    NewRecordId = NewRecord.RecordId
+                End If
+
                 _Extents.Add(New ExtentIndexEntry With {
                     .LogicalOffset = _PendingChunkStart,
                     .LogicalLength = Combined.Length,
-                    .PhysicalRecordId = NewRecord.RecordId,
+                    .PhysicalRecordId = NewRecordId,
                     .PhysicalRecordOffset = 0,
                     .AnchorId = 0
                 })
@@ -1380,11 +1401,31 @@ Namespace Streams
 
         End Function
 
+        ''' <param name="AllowGrowableTail">
+        ''' True only when this call is filling in the remainder of a genuine end-of-stream append
+        ''' that TryExtendLastChunkAsync (or AppendThroughWriteCacheAsync) already partially
+        ''' absorbed - never for an overwrite, insert, or gap fill, where nothing is ever going to
+        ''' extend the result further. When true, the very last segment produced skips the
+        ''' sparse-chunk optimisation if it hasn't genuinely closed yet (see
+        ''' <see cref="IsChunkClosedByCdcBoundary"/>) - i.e. it's short only because Count ran out,
+        ''' not because a real chunk boundary was found. Otherwise a lone zero byte written in
+        ''' isolation (the smallest possible coalescing step) would get permanently frozen as a
+        ''' sparse extent the moment it's created, since a sparse extent is never itself eligible
+        ''' to extend (see TryGetExtendableLastChunkAsync) - producing a chunk boundary one byte
+        ''' earlier than a one-shot write of the same bytes would have, and shifting every later
+        ''' content-defined boundary for the rest of the stream. Never applied to any segment but
+        ''' the last, or to anything built via <see cref="BuildExtentsInParallelAsync"/>'s own
+        ''' planning loop - every other segment already closed on its own terms (a content
+        ''' boundary or <see cref="ChunkedStreamOptions.ChunkSize"/>/<see cref="ChunkedStreamOptions.MaxChunkSize"/>),
+        ''' exactly like a one-shot write's non-final chunks always do; only the true tail can ever
+        ''' be ambiguous between "closed" and "merely out of data for now".
+        ''' </param>
         Private Async Function BuildExtentsFromBufferAsync(Input As Byte(),
                                                           InputOffset As Integer,
                                                           Count As Integer,
                                                           RunAsync As Boolean,
-                                                          CancellationToken As Threading.CancellationToken) As Task(Of List(Of ExtentIndexEntry))
+                                                          CancellationToken As Threading.CancellationToken,
+                                                          Optional AllowGrowableTail As Boolean = False) As Task(Of List(Of ExtentIndexEntry))
 
             If ShouldBuildChunksInParallel(Count) Then
                 Return Await BuildExtentsInParallelAsync(Input, InputOffset, Count, RunAsync, CancellationToken).ConfigureAwait(False)
@@ -1401,7 +1442,11 @@ Namespace Streams
 
                 Buffer.BlockCopy(Input, CurrentInputOffset, Segment, 0, SegmentLength)
 
-                If Options.StoreSparseChunks = False AndAlso IsAllZero(Segment, SegmentLength) Then
+                Dim IsGrowableTail = AllowGrowableTail AndAlso
+                                     SegmentLength = Remaining AndAlso
+                                     IsChunkClosedByCdcBoundary(Segment, SegmentLength) = False
+
+                If IsGrowableTail = False AndAlso Options.StoreSparseChunks = False AndAlso IsAllZero(Segment, SegmentLength) Then
 
                     Result.Add(New ExtentIndexEntry With {
                         .LogicalLength = SegmentLength,

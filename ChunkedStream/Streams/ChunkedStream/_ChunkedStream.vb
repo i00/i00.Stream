@@ -3924,7 +3924,7 @@ Namespace Streams
 
                         Dim RemainingDataOffset = AppendDataOffset + ExtendedCount
                         Dim RemainingCount = AppendCount - ExtendedCount
-                        Dim AppendExtents = Await BuildExtentsFromBufferAsync(Input, RemainingDataOffset, RemainingCount, RunAsync, CancellationToken).ConfigureAwait(False)
+                        Dim AppendExtents = Await BuildExtentsFromBufferAsync(Input, RemainingDataOffset, RemainingCount, RunAsync, CancellationToken, AllowGrowableTail:=True).ConfigureAwait(False)
 
                         InsertExtentsCore(AppendOffset + ExtendedCount, AppendExtents)
 

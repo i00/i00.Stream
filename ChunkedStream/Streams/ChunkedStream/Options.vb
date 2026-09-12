@@ -252,20 +252,35 @@ Namespace Streams
             Private Sub RecalculateChunkSizeBounds()
                 _MinChunkSize = CInt(_ChunkSize * (1.0R - _ChunkSizeVariance))
                 _MaxChunkSize = CInt(_ChunkSize * (1.0R + _ChunkSizeVariance))
-                _SplitHashThreshold = If(_ChunkSizeVariance > 0, CalculateSplitHashCheck(_ChunkSize), 0UL)
+
+                ' The hash only starts accumulating once MinChunkSize bytes are already behind
+                ' it (see DetermineNextSegmentLength's own remarks), so those bytes are never
+                ' subject to a threshold check at all - only the bytes from MinChunkSize onward
+                ' are. Targeting ChunkSize itself here biases the average total chunk length high
+                ' by roughly MinChunkSize. AverageBytesToScan can round down to 0 at a tiny
+                ' non-zero ChunkSizeVariance (CInt's rounding can make MinChunkSize = ChunkSize);
+                ' treat that the same as ChunkSizeVariance = 0 - no room for content to pick a
+                ' boundary, so don't hash at all.
+                Dim AverageBytesToScan = _ChunkSize - _MinChunkSize
+
+                _SplitHashThreshold =
+                    If(_ChunkSizeVariance > 0 AndAlso AverageBytesToScan > 0,
+                       CalculateSplitHashCheck(AverageBytesToScan),
+                       0UL)
             End Sub
 
             ''' <summary>
-            ''' Rolling-hash threshold that gives a memoryless Gear-hash scan an average chunk length of
-            ''' <paramref name="ChunkSize"/>: a split is taken whenever the rolling hash falls below this
-            ''' value, which happens with probability approximately <c>1 / ChunkSize</c> at each byte.
+            ''' Rolling-hash threshold that gives a memoryless Gear-hash scan an average of
+            ''' <paramref name="AverageBytesToScan"/> hashed bytes before it splits: a split is
+            ''' taken whenever the rolling hash falls below this value, which happens with
+            ''' probability approximately <c>1 / AverageBytesToScan</c> at each hashed byte.
             ''' </summary>
-            Private Shared Function CalculateSplitHashCheck(ChunkSize As Integer) As ULong
-                If ChunkSize <= 0 Then
-                    Throw New ArgumentOutOfRangeException(NameOf(ChunkSize))
+            Private Shared Function CalculateSplitHashCheck(AverageBytesToScan As Integer) As ULong
+                If AverageBytesToScan <= 0 Then
+                    Throw New ArgumentOutOfRangeException(NameOf(AverageBytesToScan))
                 End If
                 Const Possibilities As ULong = ULong.MaxValue
-                Return CULng(Possibilities \ CULng(ChunkSize))
+                Return CULng(Possibilities \ CULng(AverageBytesToScan))
             End Function
 
             Private _SubBlockSize As Integer = ChunkedStream.DefaultSubBlockSize
