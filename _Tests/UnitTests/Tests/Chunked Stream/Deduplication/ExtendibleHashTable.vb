@@ -135,20 +135,64 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Insert is an upsert: re-inserting an already-present key must update its value in
+            ''' place, never add a second entry for it - a bucket holding several entries that
+            ''' all share one identical key could never be split apart no matter how many more
+            ''' bits are examined, so treating a repeat insert as "add another entry" would grow
+            ''' the directory without bound (see the reclaimed-and-rewritten-content scenario this
+            ''' exact case represents for the deduplication index - ChunkedStream's own dedup
+            ''' entries recur under the same key whenever identical content is reclaimed and
+            ''' written again).
+            ''' </summary>
             <UnitTester.SimpleTest()>
-            Public Shared Sub InsertingManyIdenticalKeysThrowsRatherThanHanging()
+            Public Shared Sub InsertingTheSameKeyManyTimesUpdatesItsValueWithoutGrowing()
 
                 Dim Table As New ChunkedStream.ExtendibleHashTable(BucketCapacity:=2)
                 Dim SameKey = MakeKey(42)
+
+                For Index = 0 To 999
+                    Table.Insert(SameKey, Index)
+                Next
+
+                AssertEqual(0, Table.GlobalDepth, "A single distinct key should never need the directory to grow.")
+                AssertEqual(1, Table.Count, "Re-inserting the same key should never add a second entry.")
+
+                Dim Found As Long
+                AssertTrue(Table.TryGetValue(SameKey, Found), "The key should still be found.")
+                AssertEqual(999L, Found, "The value should be the most recently inserted one.")
+
+            End Sub
+
+            ''' <summary>
+            ''' The safety net is still needed for genuinely non-random *distinct* keys - ones
+            ''' that share a long common prefix without being identical, so separating them would
+            ''' need more bits of depth than MaxGlobalDepth allows. Unlike a repeated identical
+            ''' key (see InsertingTheSameKeyManyTimesUpdatesItsValueWithoutGrowing), an upsert
+            ''' cannot rescue this case - these really are different entries that need their own
+            ''' slots, and the table has run out of bits to tell them apart safely.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub InsertingManyKeysSharingALongCommonPrefixThrowsRatherThanHanging()
+
+                Dim Table As New ChunkedStream.ExtendibleHashTable(BucketCapacity:=2)
 
                 Dim Threw = False
 
                 Try
 
-                    ' No amount of splitting can separate identical keys - the table should
-                    ' detect this and fail loudly rather than spin forever.
+                    ' Every key shares the same first 3 bytes (24 bits) and differs only after
+                    ' that - indistinguishable from each other at any depth up to
+                    ' MaxGlobalDepth, even though no two are actually identical.
                     For Index = 0 To 999
-                        Table.Insert(SameKey, Index)
+
+                        Dim Key = MakeKey(Index)
+                        Key(0) = 0
+                        Key(1) = 0
+                        Key(2) = 0
+
+                        Table.Insert(Key, Index)
+
                     Next
 
                 Catch ex As InvalidOperationException
@@ -157,7 +201,7 @@ Namespace Tests
 
                 End Try
 
-                AssertTrue(Threw, "Inserting many identical keys should throw once the key's bits are exhausted, not hang.")
+                AssertTrue(Threw, "Inserting many keys that share a long common prefix should throw once depth is exhausted, not hang.")
 
             End Sub
 

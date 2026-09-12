@@ -6,6 +6,51 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ## 2026-09-12
 
+### Deduplication index: stale-key crash (production incident) — FIXED
+
+Reported live: the `EmbeddedFileSystemSample` app, with `Options.Deduplication = True`, threw
+`InvalidOperationException: Extendible hash table directory depth exceeded its safety limit -
+this points at duplicate or non-random keys, not normal growth.` while uploading files, and the
+backing `Test.efs` could no longer accept uploads afterward.
+
+**Root cause, confirmed by a minimal repro:** `ExtendibleHashTable.Insert`'s own contract requires
+the caller to have already done a `TryGetValue` miss check - but a "miss" from
+`TryDeduplicateWriteAsync` can mean two different things: no entry for this key ever existed, or
+an entry exists but points at a physical record that's since been reclaimed (a known, previously
+"harmless" limitation - the dedup index is never cleaned up on reclaim). `RegisterWrittenRecordForDeduplication`
+treated both cases identically and called `Insert` unconditionally on any miss. For the second
+case, this planted a **second** entry for a key that was already present. Since the key is a
+content hash and reclaim-then-rewrite of the same content is ordinary churn (any offset
+repeatedly overwritten with a small, recurring set of distinct contents - exactly what a real
+upload session does), the same key could accumulate many duplicate entries in one bucket over
+time - and a bucket full of entries that all share one identical key can never be split apart no
+matter how many more bits are examined, so it grows the directory forever and trips
+`MaxGlobalDepth`'s own safety limit.
+- **Fix:** `ExtendibleHashTable.Insert` is now an upsert - it scans its target bucket for an
+  existing entry with the same key first and updates its value in place, never appending a
+  second entry for one key. This is unconditionally safe (nothing ever legitimately wants two
+  entries for the same key - `TryGetValue` only ever returns the first one it finds anyway) and,
+  as a side effect, also closes the "stale entry can shadow a fresher live entry" known limitation
+  entirely for anything inserted from now on.
+- Repro and regression guard: `ReclaimingAndRewritingTheSameContentManyTimesDoesNotDuplicateItsDedupEntry`
+  (`DedupWritePath.vb`) cycles a small set of distinct contents through the same offset thousands
+  of times (each cycle reclaims and later re-establishes every pattern's own dedup entry) and
+  asserts the index never grows past one entry per distinct pattern. `ExtendibleHashTable.vb`'s
+  old `InsertingManyIdenticalKeysThrowsRatherThanHanging` test asserted the *previous, buggy*
+  behavior (that repeated identical keys eventually throw) and had to be replaced: split into
+  `InsertingTheSameKeyManyTimesUpdatesItsValueWithoutGrowing` (proves the upsert directly) and
+  `InsertingManyKeysSharingALongCommonPrefixThrowsRatherThanHanging` (keeps the actual safety net
+  under test, using genuinely distinct keys that share a 24-bit prefix instead of one repeated
+  key, since that's the one case an upsert genuinely cannot rescue).
+- **Recovery of the actual reported file:** confirmed the crash's own `MissingPhysicalRecord`
+  fallout was already isolated and repairable using the *existing* validation/repair tooling with
+  no new work needed - `ChunkedStream.Validate()` found the affected extents,
+  `EmbeddedFileSystem.Mark(Report)` localized them to exactly one nested subdirectory out of
+  three top-level entries, and `Report.Repair(RepairScope.IncludeDataLoss)` brought the stream
+  back to zero validation errors. Verified end-to-end against a copy of the real reported file:
+  opens cleanly, repairs cleanly, and a subsequent upload with `Deduplication = True` (the exact
+  originally-failing operation) now succeeds. 401/401 total.
+
 ### Write coalescing / current-chunk write caching — DONE
 
 Every `Write()` call used to decide its own chunk boundaries in total isolation - two sequential

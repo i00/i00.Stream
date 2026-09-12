@@ -127,10 +127,23 @@ Namespace Streams
             Private Const MaxGlobalDepth As Integer = 24
 
             ''' <summary>
-            ''' Adds an entry for <paramref name="Key"/>. Does not check whether an entry for
-            ''' this exact key already exists - callers are expected to have already done a
-            ''' <see cref="TryGetValue"/> lookup and only insert on a miss.
+            ''' Adds an entry for <paramref name="Key"/>, or updates its value in place if an
+            ''' entry for this exact key already exists - an upsert, never two entries for the
+            ''' same key. Safe to call without a prior <see cref="TryGetValue"/> check.
             ''' </summary>
+            ''' <remarks>
+            ''' The update-in-place case matters beyond just avoiding wasted duplicate entries: a
+            ''' caller that got a "miss" from <see cref="TryGetValue"/> because the entry it found
+            ''' pointed at a value that turned out to be gone (e.g. a deduplication index entry
+            ''' whose physical record was since reclaimed) still has that stale entry sitting in
+            ''' this table - re-inserting the same key without upserting would leave two entries
+            ''' for it. Since the key is deterministic (a content hash), that key can recur
+            ''' indefinitely as long as the same content keeps getting written and reclaimed, and
+            ''' a bucket holding several entries that all share one identical key can never be
+            ''' split apart no matter how many more bits of it are examined - it would grow the
+            ''' directory forever and trip <see cref="MaxGlobalDepth"/>'s safety limit for what is
+            ''' actually completely ordinary churn, not a real attack or a broken hash.
+            ''' </remarks>
             Public Sub Insert(Key As Byte(), Value As Long)
 
                 If Key Is Nothing Then Throw New ArgumentNullException(NameOf(Key))
@@ -143,6 +156,13 @@ Namespace Streams
                     End If
 
                     Dim TargetBucket = _Directory(DirectoryIndex(Key))
+
+                    For EntryIndex = 0 To TargetBucket.Entries.Count - 1
+                        If KeysEqual(TargetBucket.Entries(EntryIndex).Key, Key) Then
+                            TargetBucket.Entries(EntryIndex) = New Entry With {.Key = Key, .Value = Value}
+                            Return
+                        End If
+                    Next
 
                     If TargetBucket.Entries.Count < _BucketCapacity Then
                         TargetBucket.Entries.Add(New Entry With {.Key = Key, .Value = Value})

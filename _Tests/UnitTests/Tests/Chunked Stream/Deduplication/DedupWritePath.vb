@@ -202,6 +202,52 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' A dedup index entry pointing at a since-reclaimed record ("stale" - the index is
+            ''' never cleaned up on reclaim, a known, accepted limitation of its own) must not
+            ''' become a *second* entry for the same key the next time that same content is
+            ''' written and misses the index. The underlying hash table has no way to ever split
+            ''' a bucket apart when several of its entries all share one identical key - real
+            ''' content repeatedly reclaimed and rewritten (ordinary overwrite churn at one
+            ''' offset, nothing exotic) used to grow the directory without bound and eventually
+            ''' trip its own MaxGlobalDepth safety limit, exactly the crash this reproduces.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ReclaimingAndRewritingTheSameContentManyTimesDoesNotDuplicateItsDedupEntry()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.Deduplication = True
+
+                        ' A small, fixed set of distinct contents, cycled through many times at
+                        ' the same offset - every time a pattern comes back around, whichever
+                        ' pattern overwrote it in between has already reclaimed its record,
+                        ' leaving a stale dedup entry that this write must repair rather than
+                        ' duplicate.
+                        Const PatternCount As Integer = 8
+                        Const Cycles As Integer = 300
+
+                        For Round = 0 To PatternCount * Cycles - 1
+
+                            Dim PatternIndex = Round Mod PatternCount
+                            Cs.Write(0, GenerateRandomData(16, PatternIndex))
+
+                        Next
+
+                        AssertEqual(PatternCount, Cs.Debug_DedupIndexCount(), "Each distinct pattern should have exactly one dedup entry, no matter how many times it was reclaimed and rewritten.")
+
+                        Dim LastPatternIndex = (PatternCount * Cycles - 1) Mod PatternCount
+                        Dim ReadBack(15) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        AssertBytesEqual(GenerateRandomData(16, LastPatternIndex), ReadBack, "The final pattern should read back correctly.")
+
+                    End Using
+                End Using
+
+            End Sub
+
         End Class
 
     End Class
