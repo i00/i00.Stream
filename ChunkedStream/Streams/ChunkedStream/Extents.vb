@@ -619,53 +619,75 @@ Namespace Streams
 
         ''' <summary>
         ''' Routes a genuine end-of-stream append through the deferred write cache: opens
-        ''' <see cref="_PendingChunkPlain"/> if nothing is buffered yet, appends as many bytes as
-        ''' fit before the chunk closes - <see cref="ChunkedStreamOptions.ChunkSize"/>, or under
+        ''' <see cref="_PendingChunkPlain"/> if nothing is buffered yet, and appends as many bytes
+        ''' as fit before the chunk closes - <see cref="ChunkedStreamOptions.ChunkSize"/>, or under
         ''' content-defined chunking whichever of a Gear-hash boundary or
-        ''' <see cref="ChunkedStreamOptions.MaxChunkSize"/> comes first - commits and starts a
-        ''' fresh buffer whenever it closes, and repeats for however many chunks' worth Count
-        ''' spans. _Length advances immediately as each byte is buffered, so the stream's reported
-        ''' length is never behind what Write() already returned to the caller.
+        ''' <see cref="ChunkedStreamOptions.MaxChunkSize"/> comes first - committing it if it does.
+        ''' _Length advances immediately as each byte is buffered, so the stream's reported length
+        ''' is never behind what Write() already returned to the caller.
         ''' </summary>
+        ''' <remarks>
+        ''' Only ever fills/closes *one* chunk directly - deliberately not a loop. Count can span
+        ''' many chunks' worth in a single call (a large buffered upload draining all at once, for
+        ''' instance), and looping this same one-chunk-at-a-time logic across all of them used to
+        ''' mean every single chunk paid its own serial <see cref="WritePhysicalRecordAsync"/>
+        ''' round trip - never reaching <see cref="BuildExtentsInParallelAsync"/> no matter how
+        ''' large the write was, unlike the unconditional (non-cached) extend-in-place path, whose
+        ''' own remainder already always could. Once the first (possibly seeded) chunk is settled,
+        ''' anything left over is hashed out via the same <see cref="BuildExtentsFromBufferAsync"/>
+        ''' remainder path that path uses - which both content-defines its own boundaries across
+        ''' as many chunks as Remaining needs and, above
+        ''' <see cref="ChunkedStreamOptions.MinChunksForParallelCrypto"/> chunks, dispatches them
+        ''' to <see cref="BuildExtentsInParallelAsync"/>. <c>AllowGrowableTail:=True</c> keeps that
+        ''' call's own last segment open to a later append the same way this buffer's seed always
+        ''' is, so a follow-up small Write() call still coalesces into it via
+        ''' <see cref="OpenPendingChunkAsync"/> - nothing about the buffering guarantee this option
+        ''' promises is lost, only the everything-through-one-record serialisation was.
+        ''' </remarks>
         Private Async Function AppendThroughWriteCacheAsync(Input As Byte(),
                                                              DataOffset As Integer,
                                                              Count As Integer,
                                                              RunAsync As Boolean,
                                                              CancellationToken As Threading.CancellationToken) As Task
 
-            Dim Remaining = Count
-            Dim CurrentDataOffset = DataOffset
+            If _PendingChunkPlain Is Nothing Then
+                Await OpenPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+            End If
 
-            While Remaining > 0
+            Dim AbsorbCount = DetermineChunkExtensionLength(_PendingChunkPlain, _PendingChunkPlain.Count, Input, DataOffset, Count)
 
-                If _PendingChunkPlain Is Nothing Then
-                    Await OpenPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
-                End If
+            If AbsorbCount > 0 Then
 
-                Dim AbsorbCount = DetermineChunkExtensionLength(_PendingChunkPlain, _PendingChunkPlain.Count, Input, CurrentDataOffset, Remaining)
+                Dim Segment(AbsorbCount - 1) As Byte
+                Buffer.BlockCopy(Input, DataOffset, Segment, 0, AbsorbCount)
+                _PendingChunkPlain.AddRange(Segment)
 
-                If AbsorbCount > 0 Then
+                _Length += AbsorbCount
 
-                    Dim Segment(AbsorbCount - 1) As Byte
-                    Buffer.BlockCopy(Input, CurrentDataOffset, Segment, 0, AbsorbCount)
-                    _PendingChunkPlain.AddRange(Segment)
+            End If
 
-                    _Length += AbsorbCount
-                    CurrentDataOffset += AbsorbCount
-                    Remaining -= AbsorbCount
+            Dim ChunkIsClosed =
+                If(Options.ChunkSizeVariance <= 0,
+                   _PendingChunkPlain.Count >= Options.ChunkSize,
+                   IsChunkClosedByCdcBoundary(_PendingChunkPlain, _PendingChunkPlain.Count))
 
-                End If
+            If ChunkIsClosed Then
+                Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+            End If
 
-                Dim ChunkIsClosed =
-                    If(Options.ChunkSizeVariance <= 0,
-                       _PendingChunkPlain.Count >= Options.ChunkSize,
-                       IsChunkClosedByCdcBoundary(_PendingChunkPlain, _PendingChunkPlain.Count))
+            Dim RemainingCount = Count - AbsorbCount
+            If RemainingCount <= 0 Then Return
 
-                If ChunkIsClosed Then
-                    Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
-                End If
+            '
+            ' AbsorbCount was capped by room left in the chunk (or a content boundary within it),
+            ' not by Count, whenever there's a remainder here - so the chunk above always just
+            ' closed, and _PendingChunkPlain is Nothing again. Nothing left buffered to conflict
+            ' with placing the remainder as ordinary, immediately-committed extents.
+            '
+            Dim RemainingExtents =
+                Await BuildExtentsFromBufferAsync(Input, DataOffset + AbsorbCount, RemainingCount, RunAsync, CancellationToken, AllowGrowableTail:=True).ConfigureAwait(False)
 
-            End While
+            InsertExtentsCore(_Length, RemainingExtents)
 
         End Function
 
@@ -1479,7 +1501,7 @@ Namespace Streams
 
             Return Options.MaxCryptoParallelism > 1 AndAlso
                    Options.ChunkSize > 0 AndAlso
-                   CLng(ByteCount) >= CLng(Options.ChunkSize) * ParallelChunkCryptoMinChunks
+                   CLng(ByteCount) >= CLng(Options.ChunkSize) * Options.MinChunksForParallelCrypto
 
         End Function
 
@@ -1576,6 +1598,8 @@ Namespace Streams
                                                           Count As Integer,
                                                           RunAsync As Boolean,
                                                           CancellationToken As Threading.CancellationToken) As Task(Of List(Of ExtentIndexEntry))
+
+            _Debug_ParallelBuildInvocationCount += 1
 
             Dim EncryptionMethod =
                 If(_CurrentWriteEncryptionEnabled,

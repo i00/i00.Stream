@@ -367,6 +367,14 @@
 
         End Function
 
+        ''' <summary>Times BuildExtentsInParallelAsync has actually run - lets a test confirm a given write genuinely reached the parallel chunk-build path, not just that its size crosses the threshold for it.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_ParallelBuildInvocationCount() As Long
+
+            Return _Debug_ParallelBuildInvocationCount
+
+        End Function
+
         ''' <summary>Zeroes the read-cache hit and fill counters, leaving the cached entries in place.</summary>
         <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
         Friend Sub Debug_ResetChunkReadCacheCounters()

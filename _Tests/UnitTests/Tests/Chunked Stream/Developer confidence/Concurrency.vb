@@ -1134,6 +1134,77 @@ Namespace Tests
 
             End Class
 
+            ''' <summary>
+            ''' Options.CurrentChunkWriteCaching used to route every chunk of an append through
+            ''' CommitPendingChunkAsync one at a time, no matter how large the write was - it never
+            ''' reached BuildExtentsInParallelAsync the way the unconditional (non-cached)
+            ''' extend-in-place path's own remainder always could. Only the first, possibly-seeded
+            ''' chunk is handled that way now; anything left over goes through the same
+            ''' BuildExtentsFromBufferAsync remainder call the non-cached path uses, which is what
+            ''' actually decides whether to parallelise.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub LargeCachedWritesStillReachTheParallelBuildPath()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.ChunkSize = 4096
+                        Cs.Options.ChunkSizeVariance = 0
+                        Cs.Options.MaxCryptoParallelism = 4
+                        Cs.Options.CurrentChunkWriteCaching = True
+
+                        ' 10 chunks' worth in one call - once the first chunk is set aside into
+                        ' the write-cache buffer, the remaining 9 are comfortably above
+                        ' MinChunksForParallelCrypto (8, the default) and should still reach
+                        ' BuildExtentsInParallelAsync rather than being looped through
+                        ' CommitPendingChunkAsync one chunk at a time.
+                        Dim Data = GenerateRandomData(4096 * 10, 11)
+
+                        Cs.Write(0, Data)
+
+                        AssertTrue(Cs.Debug_ParallelBuildInvocationCount() > 0, "A large write should still reach the parallel chunk-build path with CurrentChunkWriteCaching on.")
+
+                        Dim ReadBack(Data.Length - 1) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        AssertBytesEqual(Data, ReadBack, "The large cached write should read back correctly.")
+
+                    End Using
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Options.MinChunksForParallelCrypto replaces the old, fixed ParallelChunkCryptoMinChunks
+            ''' constant (always 8) - it should actually control the threshold, not just document it.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub MinChunksForParallelCryptoControlsTheThreshold()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.ChunkSize = 4096
+                        Cs.Options.ChunkSizeVariance = 0
+                        Cs.Options.MaxCryptoParallelism = 4
+
+                        Dim SmallData = GenerateRandomData(4096 * 2, 1)
+
+                        Cs.Write(0, SmallData)
+
+                        AssertEqual(0L, Cs.Debug_ParallelBuildInvocationCount(), "Two chunks should stay on the serial path at the default threshold (8).")
+
+                        Cs.Options.MinChunksForParallelCrypto = 1
+                        Cs.Write(CLng(SmallData.Length), SmallData)
+
+                        AssertTrue(Cs.Debug_ParallelBuildInvocationCount() > 0, "Lowering the threshold to 1 should route even a small multi-chunk write through the parallel path.")
+
+                    End Using
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

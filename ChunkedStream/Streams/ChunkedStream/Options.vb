@@ -620,6 +620,28 @@ Namespace Streams
             ''' </summary>
             Public Property MaxCryptoParallelism As Integer = Environment.ProcessorCount
 
+            Private _MinChunksForParallelCrypto As Integer = 8
+
+            ''' <summary>
+            ''' A read or write must cover at least this many chunks before its per-chunk crypto
+            ''' (and, for a batched write, its backing-store placement) runs on a worker pool -
+            ''' see <see cref="MaxCryptoParallelism"/> and <see cref="MaxPhysicalWriteParallelism"/>.
+            ''' A caller batching reads or writes in units smaller than
+            ''' <c>ChunkSize * MinChunksForParallelCrypto</c> never reaches the parallel path, no
+            ''' matter how large those parallelism limits are. Defaults to 8; raise it if the
+            ''' per-call overhead of spinning up a worker pool for a modest batch outweighs the
+            ''' benefit, or lower it (down to 1) to parallelise more eagerly.
+            ''' </summary>
+            Public Property MinChunksForParallelCrypto As Integer
+                Get
+                    Return _MinChunksForParallelCrypto
+                End Get
+                Set
+                    If Value <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(MinChunksForParallelCrypto))
+                    _MinChunksForParallelCrypto = Value
+                End Set
+            End Property
+
             ''' <summary>
             ''' Maximum worker threads used to encrypt/decrypt/authenticate a single chunk's
             ''' own sub-blocks in parallel - on top of, not instead of,

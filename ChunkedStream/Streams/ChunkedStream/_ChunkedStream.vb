@@ -1498,6 +1498,9 @@ Namespace Streams
         Private _ReadCacheHitCount As Long
         Private _ReadCacheFillCount As Long
 
+        ''' <summary>Times BuildExtentsInParallelAsync has actually run - see Debug_ParallelBuildInvocationCount.</summary>
+        Private _Debug_ParallelBuildInvocationCount As Long
+
         '
         ' The AES-CTR chunk cipher. All of its state (the AES-ECB transform and the
         ' keystream scratch buffers) lives on the ChunkCipher instance, so bulk operations
@@ -3361,17 +3364,9 @@ Namespace Streams
         ' each worker takes its own ChunkCipher so nothing crypto-related is shared. The read
         ' cache is consulted (single-threaded) while the work list is built, so a record
         ' already cached is neither re-read nor re-decrypted, and every record this call does
-        ' decrypt is added to the cache once the worker pool has finished.
+        ' decrypt is added to the cache once the worker pool has finished. How many chunks a
+        ' read or write must cover before this kicks in is Options.MinChunksForParallelCrypto.
         '
-        ''' <summary>
-        ''' A read or write must cover at least this many chunks before its per-chunk crypto
-        ''' runs on a worker pool (<see cref="ChunkedStreamOptions.MaxCryptoParallelism" />, when
-        ''' that option allows more than one). A caller batching writes in units smaller than
-        ''' <c>ChunkSize * ParallelChunkCryptoMinChunks</c> never reaches the parallel path no
-        ''' matter how large <c>MaxCryptoParallelism</c> is.
-        ''' </summary>
-        Public Const ParallelChunkCryptoMinChunks As Integer = 8
-
         Private Structure ReadSlice
             Public PhysicalRecordId As Long
             Public SourceOffset As Integer
@@ -3383,7 +3378,7 @@ Namespace Streams
 
             Return Options.MaxCryptoParallelism > 1 AndAlso
                    _ChunkSize > 0 AndAlso
-                   CLng(ByteCount) >= CLng(_ChunkSize) * ParallelChunkCryptoMinChunks
+                   CLng(ByteCount) >= CLng(_ChunkSize) * Options.MinChunksForParallelCrypto
 
         End Function
 
