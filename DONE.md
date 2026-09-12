@@ -4,6 +4,59 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ---
 
+## 2026-09-12
+
+### Write coalescing / current-chunk write caching — stages 1-2 DONE
+
+Every `Write()` call used to decide its own chunk boundaries in total isolation - two sequential
+appends, even fully contiguous ones, always got two independent physical records (traced through
+`WriteCoreAsync`: the append branch calls `BuildExtentsFromBufferAsync` on only that call's own
+bytes, with no visibility into the previous extent's record; the same was true of the replace
+branch for a write into a just-`SetLength`'d range). Fixed in two stages, both landing after the
+deduplication feature shipped (see its own DONE.md entry) since the write-path hooks there turned
+out to matter for this too.
+
+**Stage 1 (`d39cadb`) - extend in place, unconditional:**
+- `TryGetExtendableLastChunk` (`Extents.vb`): true when the stream's last extent wholly
+  (`PhysicalRecordOffset = 0`, `LogicalLength = Record.PlainLength`) and exclusively
+  (`RefCount = 1`) references a non-sparse record still under `Options.ChunkSize`. A shared or
+  dedup-matched record is left alone - other extents rely on its exact current content.
+- `TryExtendLastChunkAsync`: on a genuine end-of-stream append, decrypts that record once, appends
+  as many new bytes as fit below `ChunkSize`, and writes the combined plaintext through the
+  ordinary `WritePhysicalRecordAsync` pipeline (so it can itself dedupe) instead of always
+  allocating a fresh record. `ReplaceLastExtentRecord` redirects the one extent and reclaims the
+  old record - not gated behind any option, since every `Write()` call still fully commits before
+  returning either way, exactly as before this existed.
+- Fixed-size only for now - targets `Options.ChunkSize`, not CDC-aware.
+
+**Stage 2 (`18ffd59`) - `Options.CurrentChunkWriteCaching` (off by default):**
+- Defers stage 1's same commit across several small appends instead of paying the decrypt/
+  re-encrypt round trip on every one: `_PendingChunkPlain` (a `List(Of Byte)`) accumulates in
+  memory, seeded once via the same `TryGetExtendableLastChunk` eligibility check, and only commits
+  (`CommitPendingChunkAsync`) when a chunk actually fills, `FlushCurrentChunkWriteCache`/`Async`
+  (new public API) is called explicitly, or something needs the committed state to be complete.
+- Commit triggers wired in: a full chunk (looped for a large append spanning several), explicit
+  flush, a non-contiguous write or one issued after the option was turned back off mid-stream,
+  `SetLength`, `Flush` (also publishes, matching an ordinary `Write()`), and `Dispose` (a faulted
+  stream's buffer is discarded like every other half-applied state - losing a buffer silently
+  otherwise would mean bytes a `Write()` call already returned success for never existed
+  anywhere).
+- **Locking:** a pending buffer isn't backed by any extent, so a read into it must commit first -
+  which mutates shared state, unsafe under only the shared read lock a concurrent reader might
+  also hold. The positional `Read`/`ReadAsync` overloads upgrade to the exclusive state lock only
+  when `Options.CurrentChunkWriteCaching` is actually in use; a stream that never touches the
+  option keeps its existing, fully concurrent read path untouched.
+- `_Length` always reflects buffered-but-uncommitted bytes immediately (never behind what
+  `Write()` already returned) - the brand-new-chunk commit path splices its extent directly rather
+  than through `InsertExtentsCore`, which would have double-counted it.
+- **Known gap, not yet wired:** `ApplyOptions`, `Defragment`, `Validate`, `GetStructure`,
+  `Replace`, and checkpoint/`DeferPublish` entry points don't yet flush a pending buffer first -
+  combining `CurrentChunkWriteCaching` with any of those today is not yet safe.
+- Tests: `WriteCoalescing.vb` (4, stage 1) + `CurrentChunkWriteCaching.vb` (8, stage 2), all under
+  `Logical mutations and allocation`. 381/381 passing.
+
+---
+
 ## 2026-09-11
 
 ### Multi-chunk read cache — DONE

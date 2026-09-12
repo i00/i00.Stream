@@ -220,7 +220,14 @@ depth-assert.
 - **Reader concurrency** — lock-free parallel reads — *done (see DONE.md).* `_StateLock` is a
   writer-preference `AsyncReaderWriterLock`; the large positional reads take it shared with a
   per-call `ChunkCipher`.
-- **Write coalescing / current-chunk write caching** — `Options.CurrentChunkWriteCaching`.
+- **Write coalescing / current-chunk write caching** — *stages 1-2 done (see DONE.md):* a
+  genuine end-of-stream append now grows the stream's last chunk in place instead of always
+  starting a new one, unconditionally; `Options.CurrentChunkWriteCaching` (off by default)
+  additionally defers that commit across several small appends. Follow-ups: carry the CDC
+  rolling-hash scan across the buffer (currently fixed-size-only, targets `Options.ChunkSize`);
+  make `ApplyOptions`/`Defragment`/`Validate`/`GetStructure`/`Replace`/checkpoint and
+  `DeferPublish` entry points flush a pending buffer first (not yet safe to combine caching with
+  those today).
 - **Multi-chunk read cache** — *done (see DONE.md).* `Options.ChunkReadBlockCache` (default 32)
   is a record-id-keyed MRU set. Eviction is per-record (hooked into
   `DetachReclaimedPhysicalRecord`), so a write only drops the records it supersedes; both the
