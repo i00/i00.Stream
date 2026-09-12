@@ -1213,7 +1213,36 @@ Namespace Streams
             Dim Extents = ReadExtentPages(BaseStream, ExtentPageDescriptors, Root.ExtentCount, IndexPageEntryCount)
             Dim PhysicalRecords = ReadPhysicalRecordPages(BaseStream, PhysicalRecordPageDescriptors, Root.PhysicalRecordCount, IndexPageEntryCount, Tolerate, Repairs)
             Dim HoleRecords = ReadHoleDirectoryPages(BaseStream, Root.HoleDirectoryPageDescriptors)
-            Dim DedupEntries = ReadDedupEntryPages(BaseStream, Root.DedupPageDescriptors)
+
+            '
+            ' Unlike the physical-record and extent tables, the dedup index is explicitly not
+            ' the source of truth (see the deduplication design notes) - it is a rebuildable
+            ' hint the write path treats as a cheap suggestion, always verified by decrypting
+            ' and comparing before it is ever trusted. A torn or MAC-invalid dedup page must
+            ' not refuse to open an otherwise-healthy archive the way the same failure would
+            ' for the physical-record table: discard the whole index and start empty, exactly
+            ' the state a stream that had never used deduplication would be in. Deliberately
+            ' unconditional (not gated behind Tolerate, unlike the physical-record table's own
+            ' narrower tolerance) - a strict, first-attempt open of an otherwise perfectly
+            ' healthy archive must not fail just because this one rebuildable, non-authoritative
+            ' structure is damaged.
+            '
+            Dim DedupEntries As List(Of (Key As Byte(), Value As Long))
+
+            Try
+
+                DedupEntries = ReadDedupEntryPages(BaseStream, Root.DedupPageDescriptors)
+
+            Catch ex As Exception When TypeOf ex Is CryptographicException OrElse TypeOf ex Is InvalidDataException
+
+                DedupEntries = New List(Of (Key As Byte(), Value As Long))()
+
+                Repairs.Add(New AutoRepair("DedupIndex", 1, 0,
+                    $"the deduplication index could not be read ({ex.Message}) and was discarded - " &
+                    "it is a rebuildable hint, never the source of truth, so the archive still opens " &
+                    "and reads correctly; run DedupRebuild to restore space-saving lookups"))
+
+            End Try
 
             If PhysicalRecords.Count = 0 AndAlso
                Extents.Count = 1 AndAlso

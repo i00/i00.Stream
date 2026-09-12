@@ -195,6 +195,61 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' A torn or MAC-invalid dedup index page must not prevent Open from succeeding -
+            ''' the dedup index is explicitly not the source of truth (every hit is re-verified
+            ''' by decrypting and comparing before it's ever trusted - see the write-path hook),
+            ''' so a corrupt copy of it should be discarded and the stream should still open and
+            ''' read correctly, exactly the state a stream that had never used deduplication
+            ''' would be in.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub OpeningToleratesACorruptDedupIndexPageAndDegradesGracefully()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Write(0, GenerateRandomData(64, 1))
+
+                        Cs.Debug_DedupInsert(MakeIndexKey(1), 1L)
+                        Cs.Write(1000, GenerateRandomData(64, 2))
+
+                        AssertTrue(Cs.Debug_DedupIndexCount() > 0, "Sanity check: the dedup index should have at least one entry before corrupting it.")
+
+                        Cs.Debug_CorruptFirstDedupIndexPage()
+
+                    End Using
+
+                    Ms.Position = 0
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+
+                        AssertEqual(0, Reopened.Debug_DedupIndexCount(), "A corrupt dedup index should be discarded on open, not crash it.")
+                        AssertTrue(Reopened.AutoRepairs.Any(Function(r) r.Field = "DedupIndex"), "The discard should be recorded as an AutoRepair.")
+
+                        Dim ReadBackA(63) As Byte
+                        Dim ReadBackB(63) As Byte
+                        Reopened.Read(0, ReadBackA)
+                        Reopened.Read(1000, ReadBackB)
+
+                        AssertBytesEqual(GenerateRandomData(64, 1), ReadBackA, "Data unrelated to the dedup index should still read back correctly.")
+                        AssertBytesEqual(GenerateRandomData(64, 2), ReadBackB, "Data unrelated to the dedup index should still read back correctly.")
+
+                        ' Deduplication should keep working afterward, rebuilding from scratch.
+                        Reopened.Options.Deduplication = True
+                        Reopened.Write(2000, GenerateRandomData(64, 3))
+                        Reopened.Write(3000, GenerateRandomData(64, 3))
+
+                        AssertEqual(1, Reopened.Debug_DedupIndexCount(), "Deduplication should still work, rebuilding its index from scratch after the old one was discarded.")
+                        AssertEqual(Reopened.Debug_GetPhysicalRecordIdAt(2000), Reopened.Debug_GetPhysicalRecordIdAt(3000), "The two new identical writes should share a record.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

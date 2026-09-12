@@ -4,6 +4,41 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ---
 
+## 2026-09-13
+
+### Deduplication index: a torn/MAC-invalid page used to refuse Open entirely — FIXED
+
+Reported live, a follow-up to the previous day's stale-key crash: after `Options.Deduplication`
+and `Options.CurrentChunkWriteCaching` were both turned on and an upload failed with
+`KeyNotFoundException`, the archive could no longer even be **opened** afterward -
+`ChunkedStream.Open` threw `CryptographicException: Dedup index page MAC invalid.` and aborted
+before anything else loaded. Root cause of the original crash not yet pinned down (deferred at
+the user's own request - a large fuzz test matching the reported settings ran clean, so it needs
+a real repro first rather than more guessing) - this entry is about the *open-time* failure only.
+
+The dedup index is documented, repeatedly, as explicitly not the source of truth - a rebuildable
+hint the write path always verifies by decrypting and comparing before trusting (see
+[[deduplication-feature]]) - so a damaged copy of *it specifically* refusing to open an otherwise
+healthy, fully-readable archive contradicted the feature's own design. `ReadPagedMetadata`
+(`Metadata.vb`) now catches `CryptographicException`/`InvalidDataException` around the dedup-page
+read and discards the whole index (an empty table, same as a stream that never used
+deduplication) rather than letting Open fail - unconditionally, not gated behind the narrower
+`Tolerate` flag `ReadPhysicalRecordPages` uses for its own, different class of inconsistency, since
+a strict first-attempt open of a healthy archive must not fail over this one non-authoritative
+structure. Records an `AutoRepair("DedupIndex", ...)` so the discard is visible rather than silent.
+The stored `_DedupCoveredUpToRecordId` high-water mark is also reset to 0 when this fires - keeping
+it would make a later catch-up scan believe everything up to that mark was already indexed, when
+the index backing that claim no longer exists; matches what `DedupRebuild(Soft:=False)` already
+does when it discards the whole table for a different reason (key rotation).
+- Added `Debug_CorruptFirstDedupIndexPage` (flips a byte in the first persisted dedup page's own
+  bytes, independent of `_Header`, unlike the existing dedup-key corruption helper) and
+  `OpeningToleratesACorruptDedupIndexPageAndDegradesGracefully` to `DedupIndexPersistence.vb`:
+  corrupts a real, durably-published dedup page, reopens, and confirms Open succeeds, unrelated
+  data reads back correctly, the discard is recorded, and deduplication keeps working afterward by
+  rebuilding its index from scratch. 403/403 passing.
+
+---
+
 ## 2026-09-12
 
 ### Deduplication index: stale-key crash (production incident) — FIXED

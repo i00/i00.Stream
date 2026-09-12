@@ -2313,7 +2313,16 @@ Namespace Streams
             Result._DedupEntryCount = BitConverter.ToInt64(Header, DedupEntryCountOffset)
             Result._DedupIndexPageEntryCount = BitConverter.ToInt32(Header, DedupIndexPageEntryCountOffset)
             Result._DedupIndexDirectoryEntryCount = BitConverter.ToInt32(Header, DedupIndexDirectoryEntryCountOffset)
-            Result._DedupCoveredUpToRecordId = BitConverter.ToInt64(Header, DedupCoveredUpToRecordIdOffset)
+
+            ' A discarded (unreadable) dedup index leaves the stored high-water mark referring
+            ' to an index that no longer exists - keeping it would make ApplyOptions(Deduplication)/
+            ' DedupRebuild's catch-up scan believe everything up to that mark is already covered,
+            ' when nothing actually is. Reset it the same way DedupRebuild(Soft:=False) does when
+            ' it discards the whole index, so a later catch-up pass re-examines every record.
+            Result._DedupCoveredUpToRecordId =
+                If(Repairs.Any(Function(repair) repair.Field = "DedupIndex"),
+                   0L,
+                   BitConverter.ToInt64(Header, DedupCoveredUpToRecordIdOffset))
 
             For Each pair In Metadata.DedupPageDescriptors
                 Result._DedupPageDescriptors(pair.Key) = pair.Value

@@ -42,6 +42,26 @@
 
         End Sub
 
+        ''' <summary>
+        ''' Flips a byte in the first persisted dedup index page's own bytes (not through
+        ''' _Header - dedup entries live in their own metadata pages), so its MAC no longer
+        ''' matches its descriptor on the next open - reproduces a torn or corrupted dedup
+        ''' page. Requires at least one durably published dedup entry.
+        ''' </summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Sub Debug_CorruptFirstDedupIndexPage()
+
+            Dim Descriptor = _DedupPageDescriptors.Values.OrderBy(Function(d) d.PageNumber).First()
+
+            Dim Page(Descriptor.Length - 1) As Byte
+            ReadAt(Descriptor.Offset, Page, 0, Page.Length)
+            Page(0) = CByte(Page(0) Xor &HFF)
+            WriteAt(Descriptor.Offset, Page, 0, Page.Length)
+
+            FlushDurable()
+
+        End Sub
+
         ''' <summary>Inserts a raw (Key, Value) entry into the dedup index, creating it if this is the first entry - exercises index persistence directly, without going through the write-path hook that isn't wired up yet.</summary>
         <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
         Friend Sub Debug_DedupInsert(Key As Byte(), Value As Long)
