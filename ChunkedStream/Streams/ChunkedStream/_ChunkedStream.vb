@@ -2842,10 +2842,21 @@ Namespace Streams
         ''' </returns>
         Public Function ToArray() As Byte()
 
-            Using EnterReadLock()
+            ' A whole-stream read always reaches the tail, so if a write-cache buffer is open it
+            ' always needs flushing first - see the logical Read overload's remarks on why this
+            ' upgrades to the exclusive lock only when Options.CurrentChunkWriteCaching is in use.
+            Dim LockScope As IDisposable = If(Options.CurrentChunkWriteCaching, EnterStateLock(), EnterReadLock())
+
+            Using LockScope
+
+                If Options.CurrentChunkWriteCaching AndAlso _PendingChunkPlain IsNot Nothing Then
+                    CommitPendingChunkAsync(RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+                End If
+
                 Using Cipher = CreateChunkCipher()
                     Return ToArrayCore(Cipher)
                 End Using
+
             End Using
 
         End Function
@@ -2878,6 +2889,21 @@ Namespace Streams
         ''' </summary>
         ''' <param name="CancellationToken">Token used to cancel the operation.</param>
         Public Overloads Function ToArrayAsync(Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Byte())
+
+            If Options.CurrentChunkWriteCaching Then
+
+                Return RunUnderStateLockAsync(CancellationToken,
+                    Async Function() As Task(Of Byte())
+
+                        If _PendingChunkPlain IsNot Nothing Then
+                            Await CommitPendingChunkAsync(RunAsync:=True, CancellationToken:=CancellationToken).ConfigureAwait(False)
+                        End If
+
+                        Return Await ToArrayCoreAsync(CancellationToken).ConfigureAwait(False)
+
+                    End Function)
+
+            End If
 
             Return RunUnderReadLockAsync(CancellationToken, Function() ToArrayCoreAsync(CancellationToken))
 
@@ -2918,10 +2944,20 @@ Namespace Streams
         Public Function ToArray(Offset As Long,
                                 Length As Integer) As Byte()
 
-            Using EnterReadLock()
+            ' See the logical Read overload's remarks on why this upgrades to the exclusive lock
+            ' only when Options.CurrentChunkWriteCaching is in use.
+            Dim LockScope As IDisposable = If(Options.CurrentChunkWriteCaching, EnterStateLock(), EnterReadLock())
+
+            Using LockScope
+
+                If Options.CurrentChunkWriteCaching Then
+                    FlushPendingChunkBeforeReadAsync(Offset, Length, RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+                End If
+
                 Using Cipher = CreateChunkCipher()
                     Return ToArrayCore(Offset, Length, Cipher)
                 End Using
+
             End Using
 
         End Function
@@ -2969,6 +3005,19 @@ Namespace Streams
         Public Overloads Function ToArrayAsync(Offset As Long,
                                                Length As Integer,
                                                Optional CancellationToken As Threading.CancellationToken = Nothing) As Task(Of Byte())
+
+            If Options.CurrentChunkWriteCaching Then
+
+                Return RunUnderStateLockAsync(CancellationToken,
+                    Async Function() As Task(Of Byte())
+
+                        Await FlushPendingChunkBeforeReadAsync(Offset, Length, RunAsync:=True, CancellationToken:=CancellationToken).ConfigureAwait(False)
+
+                        Return Await ToArrayCoreAsync(Offset, Length, CancellationToken).ConfigureAwait(False)
+
+                    End Function)
+
+            End If
 
             Return RunUnderReadLockAsync(CancellationToken, Function() ToArrayCoreAsync(Offset, Length, CancellationToken))
 
@@ -4273,6 +4322,13 @@ Namespace Streams
 
             Try
 
+                ' A pending write-cache buffer isn't reflected in _Extents yet, and both the
+                ' source range being cloned from and the target insertion point resolve through
+                ' it, so it must be materialised first.
+                If _PendingChunkPlain IsNot Nothing Then
+                    Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+                End If
+
                 Dim ActualLength =
                     Math.Min(CloneLength,
                              _Length - SourceLogicalOffset)
@@ -4498,6 +4554,12 @@ Namespace Streams
 
             Try
 
+                ' A pending write-cache buffer isn't reflected in _Extents yet, and Insert always
+                ' resolves LogicalOffset through it.
+                If _PendingChunkPlain IsNot Nothing Then
+                    Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+                End If
+
                 Dim NewExtents = Await BuildExtentsFromBufferAsync(Data,
                                                                   DataOffset,
                                                                   Count,
@@ -4581,6 +4643,13 @@ Namespace Streams
 
             Try
 
+                ' A pending write-cache buffer isn't reflected in _Extents yet, and both the
+                ' source range being cloned from and the target insertion point resolve through
+                ' it, so it must be materialised first.
+                If _PendingChunkPlain IsNot Nothing Then
+                    Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+                End If
+
                 Dim ActualLength = Math.Min(CloneLength, _Length - SourceLogicalOffset)
                 Dim CloneExtents = Await BuildCloneExtentsAsync(SourceLogicalOffset, ActualLength, RunAsync, CancellationToken).ConfigureAwait(False)
 
@@ -4662,6 +4731,13 @@ Namespace Streams
                 Throw New ArgumentOutOfRangeException(
                     NameOf(Count),
                     "The clear range extends beyond the logical stream length.")
+            End If
+
+            ' A pending write-cache buffer isn't reflected in _Extents yet, and Clear always
+            ' resolves LogicalOffset through it. The non-sparse branch below goes through
+            ' DeferPublish(), which already flushes first; only the sparse branch needs its own.
+            If _PendingChunkPlain IsNot Nothing Then
+                Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
             End If
 
             If Options.StoreSparseChunks Then
@@ -4818,6 +4894,12 @@ Namespace Streams
                 Throw New ArgumentOutOfRangeException(
                     NameOf(Count),
                     "The insert would exceed the maximum supported logical length.")
+            End If
+
+            ' A pending write-cache buffer isn't reflected in _Extents yet, and InsertNullBytes
+            ' always resolves LogicalOffset through it.
+            If _PendingChunkPlain IsNot Nothing Then
+                Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
             End If
 
             If Options.StoreSparseChunks Then
@@ -5066,6 +5148,18 @@ Namespace Streams
                                                    RunAsync As Boolean,
                                                    CancellationToken As Threading.CancellationToken) As Task
 
+            '
+            ' Deliberately does NOT flush a pending write-cache buffer here: this runs at the end
+            ' of every ordinary Write() call, including ones that legitimately left bytes buffered,
+            ' so flushing unconditionally here would silently defeat Options.CurrentChunkWriteCaching
+            ' on every single call. Publishing _Length ahead of what _Extents actually covers is
+            ' safe - OpenFromHeaderCandidate already treats a stored Length that disagrees with the
+            ' extent chain's span as a repairable AutoRepair, not corruption, which is exactly the
+            ' documented trade-off of buffering: an uncommitted tail can be lost, but never mistaken
+            ' for a corrupt file. Every place that actually resolves a specific logical offset
+            ' through _Extents (Read, ToArray, Clone, Insert, ApplyOptions, and so on) already
+            ' flushes first in its own right, which is the guarantee that actually matters.
+            '
             Return PersistPagedMetadataAsync(IndexOffset, Durable, RunAsync, CancellationToken)
 
         End Function

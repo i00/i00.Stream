@@ -275,6 +275,11 @@ Namespace Streams
 
             ThrowIfDisposed()
 
+            ' Deliberately does not flush a pending write-cache buffer before the UpdateHeader
+            ' calls below - see PersistIndexAndHeaderAsync's remarks on why publishing _Length
+            ' ahead of _Extents' actual span is a safe, already-tolerated inconsistency (a
+            ' repairable AutoRepair on next open, not corruption), and this method never resolves
+            ' any specific logical offset through _Extents itself.
             If NewValue Is Nothing Then
                 If _FileMasterKey IsNot Nothing Then
                     WrapFileMasterKey(MasterKeyWrapModes.PublicWrap, Nothing)

@@ -270,6 +270,12 @@ Namespace Streams
                     "An anchor must identify the start of existing logical data.")
             End If
 
+            ' A pending write-cache buffer isn't reflected in _Extents yet, and LogicalOffset may
+            ' fall within it.
+            If _PendingChunkPlain IsNot Nothing Then
+                Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+            End If
+
             If FindAnchorIdAtLogicalOffset(LogicalOffset) > 0 Then
                 Throw New InvalidOperationException(
                     $"An anchor already exists at logical offset {LogicalOffset}.")
@@ -371,6 +377,15 @@ Namespace Streams
             ThrowIfFaulted()
 
             Try
+
+                ' A pending write-cache buffer isn't reflected in _Extents yet, and this always
+                ' appends at the current _Length - which the buffer, if any, is the tail of.
+                ' (Unlike WriteCoreAsync's append path, this does not itself participate in write
+                ' coalescing - it always creates a fresh anchored extent - so flushing first rather
+                ' than extending into it is the correct behaviour here, not just an approximation.)
+                If _PendingChunkPlain IsNot Nothing Then
+                    Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+                End If
 
                 Dim AnchorOffset = _Length
                 Dim AnchorId = AllocateAnchorId()

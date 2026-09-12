@@ -29,6 +29,13 @@ Namespace Streams
                     Throw New InvalidOperationException("Repair cannot run while metadata publishing is deferred.")
                 End If
 
+                ' A pending write-cache buffer isn't reflected in _Extents/_PhysicalRecords, so it
+                ' must be materialised before repairing anything - the report may have been built
+                ' before more (buffered) writes happened.
+                If _PendingChunkPlain IsNot Nothing Then
+                    CommitPendingChunkAsync(RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+                End If
+
                 Try
                     Return ExecuteRepairCore(Report, Selector)
                 Catch

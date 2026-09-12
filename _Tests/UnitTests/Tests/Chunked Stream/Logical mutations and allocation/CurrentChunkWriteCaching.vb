@@ -356,6 +356,133 @@ Namespace Tests
 
             End Sub
 
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ToArrayFlushesThePendingBufferFirst()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.CurrentChunkWriteCaching = True
+                        Cs.Write(0, New Byte() {1, 2, 3})
+
+                        AssertTrue(Cs.Debug_HasPendingChunkWriteCache(), "Sanity check: the write should still be buffered.")
+
+                        Dim Whole = Cs.ToArray()
+                        AssertBytesEqual(New Byte() {1, 2, 3}, Whole, "ToArray() should see the buffered data.")
+                        AssertFalse(Cs.Debug_HasPendingChunkWriteCache(), "ToArray() should have flushed the pending buffer.")
+
+                        Cs.Write(3, New Byte() {4, 5})
+                        Dim Ranged = Cs.ToArray(3, 2)
+                        AssertBytesEqual(New Byte() {4, 5}, Ranged, "ToArray(Offset, Length) should see buffered data in range too.")
+                        AssertFalse(Cs.Debug_HasPendingChunkWriteCache(), "ToArray(Offset, Length) should have flushed the pending buffer.")
+
+                    End Using
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CloneFlushesThePendingBufferFirst()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.CurrentChunkWriteCaching = True
+                        Cs.Write(0, New Byte() {1, 2, 3})
+
+                        AssertTrue(Cs.Debug_HasPendingChunkWriteCache(), "Sanity check: the write should still be buffered.")
+
+                        ' Clones the buffered [0,3) range and appends the copy at the end.
+                        Cs.Clone(0, 3, 3)
+
+                        AssertFalse(Cs.Debug_HasPendingChunkWriteCache(), "Clone should have flushed the pending buffer before resolving the source range.")
+
+                        Dim ReadBack(5) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        AssertBytesEqual(New Byte() {1, 2, 3, 1, 2, 3}, ReadBack, "The cloned range should match the original.")
+
+                    End Using
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CreateAnchorFlushesThePendingBufferFirst()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.CurrentChunkWriteCaching = True
+                        Cs.Write(0, New Byte() {1, 2, 3})
+
+                        AssertTrue(Cs.Debug_HasPendingChunkWriteCache(), "Sanity check: the write should still be buffered.")
+
+                        Dim NewAnchor = Cs.CreateAnchor(New Byte() {9, 9})
+
+                        AssertFalse(Cs.Debug_HasPendingChunkWriteCache(), "CreateAnchor should have flushed the pending buffer before appending the anchored data.")
+                        AssertEqual(3L, Cs.GetAnchorOffset(NewAnchor.AnchorId), "The new anchor should sit right after the previously-buffered data.")
+
+                        Dim ReadBack(4) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        AssertBytesEqual(New Byte() {1, 2, 3, 9, 9}, ReadBack, "Both the buffered and anchored data should be intact.")
+
+                    End Using
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub InsertFlushesThePendingBufferFirst()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.CurrentChunkWriteCaching = True
+                        Cs.Write(0, New Byte() {1, 2, 3})
+
+                        AssertTrue(Cs.Debug_HasPendingChunkWriteCache(), "Sanity check: the write should still be buffered.")
+
+                        ' Inserts in the middle of the still-buffered range.
+                        Cs.Insert(1, New Byte() {9})
+
+                        AssertFalse(Cs.Debug_HasPendingChunkWriteCache(), "Insert should have flushed the pending buffer before resolving the insertion point.")
+
+                        Dim ReadBack(3) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        AssertBytesEqual(New Byte() {1, 9, 2, 3}, ReadBack, "The insertion should have landed correctly within the previously-buffered data.")
+
+                    End Using
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub OrdinaryWritesStayBufferedAcrossMultiplePublishes()
+
+                ' Regression guard: an earlier attempt at a defence-in-depth flush inside the
+                ' shared metadata-publish primitive broke caching outright, since WriteCoreAsync
+                ' publishes at the end of every call - including ones that legitimately left bytes
+                ' buffered - which would have force-flushed the buffer every single time.
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.CurrentChunkWriteCaching = True
+
+                        Cs.Write(0, New Byte() {1})
+                        AssertTrue(Cs.Debug_HasPendingChunkWriteCache(), "The first write should still be buffered after its own publish.")
+
+                        Cs.Write(1, New Byte() {2})
+                        AssertTrue(Cs.Debug_HasPendingChunkWriteCache(), "The second write should still be buffered after its own publish.")
+                        AssertEqual(0, Cs.Debug_GetPhysicalRecordCount(), "Nothing should have committed across either publish.")
+
+                    End Using
+                End Using
+
+            End Sub
+
         End Class
 
     End Class
