@@ -73,6 +73,21 @@ them risked a false corruption report or worse.
   `DeferPublish` publish both confirming the pre-scope buffered data survives correctly. 387/387
   passing.
 
+**Second flush-site audit (`9915203`) - the first pass was not actually exhaustive:** prompted by
+asking "is it safe everywhere - ToArray, reading, etc", a systematic sweep of every
+`EnterReadLock`/`RunUnderReadLockAsync`/`EnterStateLock`/`RunUnderStateLockAsync` call site (not
+just the ones already suspected) found real remaining gaps: `ToArray`/`ToArrayAsync` (both
+overloads call `ReadCore`/`ReadCoreAsync` directly, bypassing the earlier fix entirely), `Clone`,
+`CloneInsert`, `Insert`, `Clear`'s sparse branch, `InsertNullBytes`'s sparse branch, `CreateAnchor`
+(both overloads), and `ValidationReport.Repair`. All fixed the same way as the first pass.
+- Also tried and **reverted**: putting the flush inside `PersistIndexAndHeaderAsync` itself as a
+  catch-all. This broke caching outright, since `WriteCoreAsync` publishes at the end of every
+  call including ones that legitimately left bytes buffered. The "problem" it solved -
+  `_Length` briefly ahead of `_Extents`' actual span in a published header - turns out to already
+  be safe (`OpenFromHeaderCandidate` treats that mismatch as a repairable `AutoRepair`, not
+  corruption - exactly buffering's documented trade-off). Reverted the same mistake in
+  `Options_EncryptionInfoChangedCore`. 5 more tests including a regression guard. 392/392 total.
+
 **Only remaining follow-up:** carrying the CDC rolling-hash scan across the buffer (currently
 fixed-size only, targets `Options.ChunkSize` regardless of `ChunkSizeVariance`) - the piece that
 fully closes the original EFS/dedup-alignment gap this was built to fix.
