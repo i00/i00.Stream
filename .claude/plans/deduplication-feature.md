@@ -1,11 +1,13 @@
 # Content-Addressed Deduplication — Design & Implementation Plan (written retrospectively)
 
-**Status: shipped, plus one production-incident fix.** This documents the deduplication feature as
-designed and built across eight commits (`0b1c7dd` → `c08fbf1`), 401/401 tests green. It's written
-after the fact, in plan form, because the feature was built incrementally through conversation
-rather than from an upfront written plan — this is that plan, reconstructed for the record, and
-kept up to date as real-world use turned up a genuine bug in what §6 originally called an accepted
-limitation (see §2.2's follow-up and §4 stage 8).
+**Status: shipped, plus two production-incident fixes.** This documents the deduplication feature
+as designed and built across nine commits (`0b1c7dd` → `d45c172`), 403/403 tests green. It's
+written after the fact, in plan form, because the feature was built incrementally through
+conversation rather than from an upfront written plan — this is that plan, reconstructed for the
+record, and kept up to date as real-world use turned up first a genuine bug in what §6 originally
+called an accepted limitation (§2.2's `c08fbf1` follow-up, §4 stage 8), then a second incident
+where a *symptom* of an as-yet-unfound bug (a torn dedup index) was itself refusing to let the
+archive open at all (§2.6's `d45c172` follow-up, §4 stage 9).
 
 ## 1. Goal
 
@@ -163,6 +165,25 @@ tier (by analogy with `IndexDirectoryEntryCount`), was reserved in the header
 (`DedupIndexDirectoryEntryCountOffset`, still unused) but turned out unnecessary once the format
 settled on the hole directory's simpler single-tier shape.
 
+**Follow-up, `d45c172` — a torn dedup index page used to refuse Open entirely.** Reported live: a
+`KeyNotFoundException` during a `Deduplication` + `CurrentChunkWriteCaching` upload (root cause not
+found - see §5's note on this) left the archive's dedup index pages torn on disk, and the *next*
+`Open` attempt threw `CryptographicException: Dedup index page MAC invalid` and aborted before
+anything else loaded - an otherwise perfectly healthy, fully-readable archive refused to open at
+all over damage to one explicitly non-authoritative structure. This directly contradicted §2.5's
+own already-established precedent (an unrecoverable dedup *key* is non-fatal), which just hadn't
+been extended to the index *pages* themselves. Fixed the same way: `ReadPagedMetadata` now catches
+`CryptographicException`/`InvalidDataException` around the dedup-page read and discards the whole
+index (starts empty, same as a stream that never used deduplication) rather than propagating the
+failure. Deliberately **unconditional**, not gated behind the `Tolerate` flag
+`ReadPhysicalRecordPages` uses for its own, narrower class of inconsistency (duplicate entries from
+a torn ordinal move) - a strict, first-attempt open must not fail over this one rebuildable
+structure regardless of whether the caller is in some special recovery mode. Also resets
+`_DedupCoveredUpToRecordId` to 0 when this fires, matching what `DedupRebuild(Soft:=False)` already
+does when it discards the whole index for a different reason (key rotation) - otherwise a later
+catch-up scan would wrongly believe everything up to the old mark was still indexed. Records an
+`AutoRepair("DedupIndex", ...)` so the discard is visible, not silent.
+
 ### 2.7 Catch-up coverage: a high-water mark, not an entry-count comparison
 
 The first idea for "does this stream need a dedup catch-up pass" was: compare the index's entry
@@ -272,9 +293,16 @@ truncated search) made this a standing rule for the rest of the work.
    instead of one repeated key - the one case an upsert can't rescue). Added
    `ReclaimingAndRewritingTheSameContentManyTimesDoesNotDuplicateItsDedupEntry` to
    `DedupWritePath.vb`, reproducing the exact crash pattern as a permanent regression guard.
+9. **`d45c172`** — Production-incident fix: a torn dedup index page no longer refuses `Open`
+   entirely (§2.6 follow-up) - the index is discarded and the archive opens normally, degraded but
+   working, exactly the state a stream that never used deduplication would be in. Added
+   `Debug_CorruptFirstDedupIndexPage` and `OpeningToleratesACorruptDedupIndexPageAndDegradesGracefully`
+   to `DedupIndexPersistence.vb`. The root cause of *why* the index was torn in the first place
+   (see §5) was not found in this pass - deliberately deferred at the user's own request, so this
+   stage only closes the open-time symptom, not the underlying trigger.
 
 Testing throughout: each stage built, tested in isolation, and committed before the next began.
-401 tests pass at completion, up from the pre-feature baseline; every stage's own test file is
+403 tests pass at completion, up from the pre-feature baseline; every stage's own test file is
 still in the tree (`ExtendibleHashTable.vb`, `DedupKeyLifecycle.vb`, `DedupIndexPersistence.vb`,
 `DedupWritePath.vb`, `DedupApplyOptions.vb`, `DedupRebuild.vb`, under
 `_Tests/UnitTests/Tests/Chunked Stream/Deduplication/`).
@@ -284,7 +312,8 @@ still in the tree (`ExtendibleHashTable.vb`, `DedupKeyLifecycle.vb`, `DedupIndex
 Limitation 1 below was identified during the initial work and closed in a follow-up (`dc1412d`) —
 kept here for the record, since the plan predates the fix. Limitation 2's root cause was later
 closed too, by a separate feature (`write-coalescing`) built for its own reasons - kept here
-because the specific EFS-level guarantee it implies has not been re-verified end-to-end:
+because the specific EFS-level guarantee it implies has not been re-verified end-to-end. Limitation
+3 is genuinely open - a real production crash whose trigger has not yet been found:
 
 1. ~~**Intra-batch parallel-write dedup.**~~ **Fixed in `dc1412d`.** Two identical chunks written
    within the *same* `BuildExtentsInParallelAsync` call couldn't dedupe against each other —
@@ -345,6 +374,25 @@ because the specific EFS-level guarantee it implies has not been re-verified end
    fixed-size chunks to an absolute stream position has side effects elsewhere (overwrite
    semantics, defrag, bisection) hasn't been investigated, so it's flagged here rather than
    assumed safe.
+
+3. **OPEN, not yet reproduced — `Deduplication` + `CurrentChunkWriteCaching` together threw
+   `KeyNotFoundException` on a real upload (`C:\Windows\System32\mrt.exe`, ~250MB, through
+   `EmbeddedFileSystemSample`) and left the dedup index torn on disk (see `d45c172`, stage 9 above,
+   which fixes only the resulting open-time refusal, not this).** Deliberately deferred at the
+   user's own request rather than guessed at. Ruled out so far: the sample's exact options
+   (Lz4 compression, both features on, `MaxCryptoParallelism` etc.) with dedup-friendly repeated
+   content through the real `EmbeddedFileSystem`/`FileStreamView` API; a 3000-operation randomized
+   fuzz test (sequential appends, mid-file overwrites, explicit flushes, single-call and bursty
+   writes) - both ran clean. One real finding from the investigation: with
+   `CurrentChunkWriteCaching = True`, a plain append no longer ever reaches the parallel crypto
+   path (`BuildExtentsInParallelAsync`) regardless of size - `AppendThroughWriteCacheAsync` now
+   absorbs the whole append serially, one chunk at a time. This means the sample's own
+   `WriteBufferFlushThreshold` tuning (deliberately set above `ChunkSize * ParallelChunkCryptoMinChunks`
+   to reach the parallel path) is now a no-op for appends, though still relevant for overwrites.
+   The next root-cause attempt should focus on `AppendThroughWriteCacheAsync`'s loop,
+   `CommitPendingChunkAsync`, and their interaction with dedup's reclaim/registration - not the
+   parallel path, which write-caching bypasses entirely for appends. Needs the actual crashed file
+   (not just a description) to make further progress efficiently.
 
 ## 6. Explicitly out of scope
 
