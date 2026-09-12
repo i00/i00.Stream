@@ -112,6 +112,18 @@ Namespace Streams
                 ThrowIfDisposed()
                 ThrowIfFaulted()
 
+                '
+                ' The scope's rollback reloads from the backing store rather than an in-memory
+                ' snapshot, so a pending write-cache buffer - which exists only in memory and was
+                ' never published - would simply vanish on a rollback, as if the Write() calls
+                ' that produced it had never happened. Commit and publish it now (the same as an
+                ' explicit FlushCurrentChunkWriteCache), so entering the scope starts from a clean
+                ' baseline a rollback can actually see.
+                '
+                If _PendingChunkPlain IsNot Nothing Then
+                    FlushCurrentChunkWriteCacheCoreAsync(RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+                End If
+
                 If _DeferPublishDepth = 0 Then
                     _DeferPublishRequested = False
                 End If

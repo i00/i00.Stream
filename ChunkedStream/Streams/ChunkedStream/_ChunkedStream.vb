@@ -4116,6 +4116,13 @@ Namespace Streams
 
             Try
 
+                ' A pending write-cache buffer isn't reflected in _Extents yet, and Replace always
+                ' resolves logical offsets through it (removing the old range, then inserting the
+                ' new one), so it must be materialised first.
+                If _PendingChunkPlain IsNot Nothing Then
+                    Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+                End If
+
                 Dim ActualLength =
                     If(LogicalOffset < _Length,
                        Math.Min(Length, _Length - LogicalOffset),
@@ -5385,6 +5392,16 @@ Namespace Streams
             _PendingReclaimedPhysicalRecords.Clear()
             _CompactMetadataWriteOffset = Nothing
             _CompactMetadataWriteLimit = Nothing
+
+            '
+            ' A pending write-cache buffer exists only in memory and was never published, so it
+            ' has no relation to the reloaded image below - keeping it would mean applying bytes
+            ' that predate this recovery on top of extents/records that postdate it. Discarded
+            ' silently, the same as every other not-yet-persisted mutation this reload replaces.
+            '
+            _PendingChunkPlain = Nothing
+            _PendingChunkStart = 0
+            _PendingChunkSourceRecordId = SparsePhysicalRecordId
 
             ClearFreeSpaceMap()
             For Each pair In Source._FreeSpaces.CloneSpaces()

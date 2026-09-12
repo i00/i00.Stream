@@ -156,6 +156,12 @@ Namespace Streams
                 Throw New InvalidOperationException("Defragmentation cannot be performed while metadata publishing is deferred.")
             End If
 
+            ' A pending write-cache buffer isn't reflected in _Extents/_PhysicalRecords, so it must
+            ' be materialised before anything below scans or relocates the live record set.
+            If _PendingChunkPlain IsNot Nothing Then
+                CommitPendingChunkAsync(RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+            End If
+
             '
             ' Drop any physical record that no live extent points at before compacting.
             ' Move and Sequence only ever relocate referenced records, and the live

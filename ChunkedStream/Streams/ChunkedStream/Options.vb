@@ -920,6 +920,14 @@ Namespace Streams
                 Throw New InvalidOperationException("ApplyOptions cannot be performed while metadata publishing is deferred.")
             End If
 
+            ' A pending write-cache buffer isn't reflected in _Extents/_PhysicalRecords, so it must
+            ' be materialised first - RunApplyOptions below iterates the live physical-record table
+            ' directly, and the newly-committed chunk should get the same chance to be considered
+            ' as everything else already on disk.
+            If _PendingChunkPlain IsNot Nothing Then
+                CommitPendingChunkAsync(RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+            End If
+
             InvalidateChunkCache()
 
             Dim Result As New ApplyOptionsResult With {
@@ -983,6 +991,13 @@ Namespace Streams
 
             If _DeferPublishDepth > 0 Then
                 Throw New InvalidOperationException("DedupRebuild cannot be performed while metadata publishing is deferred.")
+            End If
+
+            ' See ApplyOptionsCore's remarks - the catch-up pass this runs afterward iterates the
+            ' live physical-record table directly, which a pending write-cache buffer isn't part
+            ' of yet.
+            If _PendingChunkPlain IsNot Nothing Then
+                CommitPendingChunkAsync(RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
             End If
 
             Dim Result As New ApplyOptionsResult With {

@@ -343,6 +343,13 @@ Namespace Streams
                 Throw New InvalidOperationException("A checkpoint cannot be created while metadata publishing is deferred.")
             End If
 
+            ' A pending write-cache buffer isn't reflected in _Extents/_PhysicalRecords, so it must
+            ' be materialised before the checkpoint's rollback baseline is captured below -
+            ' otherwise rolling back later would have no record of it ever having existed.
+            If _PendingChunkPlain IsNot Nothing Then
+                CommitPendingChunkAsync(RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+            End If
+
             Dim Checkpoint = New ChunkedStreamCheckpoint(Me, _CheckpointStack.Count + 1)
 
             _CheckpointStack.Add(Checkpoint)

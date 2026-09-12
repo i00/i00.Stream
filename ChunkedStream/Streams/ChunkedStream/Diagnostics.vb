@@ -308,6 +308,16 @@ Namespace Streams
 
             ThrowIfDisposed()
 
+            '
+            ' A pending write-cache buffer isn't reflected in _Extents/_PhysicalRecords at all, so
+            ' a snapshot taken while one is open would see _Length ahead of what the extent list
+            ' actually accounts for - a false corruption report. Materialise it first; the caller
+            ' already holds the exclusive state lock here.
+            '
+            If _PendingChunkPlain IsNot Nothing Then
+                CommitPendingChunkAsync(RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+            End If
+
             Return New DiagnosticsSnapshot With {
                 .LogicalLength = _Length,
                 .DataEnd = GetDataEndFromIndex(),

@@ -204,6 +204,158 @@ Namespace Tests
 
             End Sub
 
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ValidateAndGetStructureFlushThePendingBufferFirst()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.CurrentChunkWriteCaching = True
+                        Cs.Write(0, New Byte() {1, 2, 3})
+
+                        AssertTrue(Cs.Debug_HasPendingChunkWriteCache(), "Sanity check: the write should still be buffered.")
+
+                        Dim Report = Cs.Validate()
+                        Report.ThrowIfErrors()
+
+                        AssertFalse(Cs.Debug_HasPendingChunkWriteCache(), "Validate should have flushed the pending buffer first.")
+
+                        Dim StreamStructure = Cs.GetStructure()
+                        AssertEqual(3L, StreamStructure.LogicalLength, "GetStructure should see the (now committed) full length.")
+
+                    End Using
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ApplyOptionsFlushesThePendingBufferFirst()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.CurrentChunkWriteCaching = True
+                        Cs.Options.CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate
+
+                        Cs.Write(0, New Byte() {1, 2, 3})
+
+                        Cs.ApplyOptions(ChunkedStream.ApplyOptionTypes.Compression)
+
+                        AssertFalse(Cs.Debug_HasPendingChunkWriteCache(), "ApplyOptions should have flushed the pending buffer before scanning physical records.")
+
+                        Dim ReadBack(2) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        AssertBytesEqual(New Byte() {1, 2, 3}, ReadBack, "The data should be intact after ApplyOptions ran.")
+
+                    End Using
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DefragmentFlushesThePendingBufferFirst()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.CurrentChunkWriteCaching = True
+                        Cs.Write(0, New Byte() {1, 2, 3})
+
+                        Cs.Defragment()
+
+                        AssertFalse(Cs.Debug_HasPendingChunkWriteCache(), "Defragment should have flushed the pending buffer first.")
+
+                        Dim ReadBack(2) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        AssertBytesEqual(New Byte() {1, 2, 3}, ReadBack, "The data should be intact after defragmenting.")
+
+                    End Using
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ReplaceFlushesThePendingBufferFirst()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.CurrentChunkWriteCaching = True
+                        Cs.Write(0, New Byte() {1, 2, 3})
+
+                        Cs.Replace(0, 3, New Byte() {7, 8, 9})
+
+                        AssertFalse(Cs.Debug_HasPendingChunkWriteCache(), "Replace should have flushed the pending buffer before resolving the range to replace.")
+
+                        Dim ReadBack(2) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        AssertBytesEqual(New Byte() {7, 8, 9}, ReadBack, "The replacement should have applied correctly.")
+
+                    End Using
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CreateCheckpointFlushesThePendingBufferFirstAndSurvivesRollback()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.CurrentChunkWriteCaching = True
+                        Cs.Write(0, New Byte() {1, 2, 3})
+
+                        Using Checkpoint = Cs.CreateCheckpoint()
+
+                            AssertFalse(Cs.Debug_HasPendingChunkWriteCache(), "Creating a checkpoint should have flushed the pending buffer into its baseline.")
+
+                            Cs.Write(3, New Byte() {4, 5})
+                            Checkpoint.Rollback()
+
+                        End Using
+
+                        Dim ReadBack(2) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        AssertBytesEqual(New Byte() {1, 2, 3}, ReadBack, "The pre-checkpoint data should survive the rollback.")
+                        AssertEqual(3L, Cs.Length, "The post-checkpoint write should have been rolled back.")
+
+                    End Using
+                End Using
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DeferPublishFlushesThePendingBufferFirst()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.CurrentChunkWriteCaching = True
+                        Cs.Write(0, New Byte() {1, 2, 3})
+
+                        Using Scope = Cs.DeferPublish()
+
+                            AssertFalse(Cs.Debug_HasPendingChunkWriteCache(), "Opening a DeferPublish scope should have flushed and published the pending buffer first.")
+
+                            Cs.Write(3, New Byte() {4, 5})
+                            Scope.Publish()
+
+                        End Using
+
+                        Dim ReadBack(4) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        AssertBytesEqual(New Byte() {1, 2, 3, 4, 5}, ReadBack, "Both the pre-scope and in-scope data should be intact.")
+
+                    End Using
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

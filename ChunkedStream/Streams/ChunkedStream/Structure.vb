@@ -147,6 +147,13 @@ Namespace Streams
 
             ThrowIfDisposed()
 
+            ' See CaptureDiagnosticsSnapshotCore's remarks - a pending write-cache buffer isn't
+            ' reflected in _Extents/_PhysicalRecords, so it must be materialised before a snapshot
+            ' is taken. The caller already holds the exclusive state lock here.
+            If _PendingChunkPlain IsNot Nothing Then
+                CommitPendingChunkAsync(RunAsync:=False, CancellationToken:=Nothing).GetAwaiter().GetResult()
+            End If
+
             Dim Result = New StructureSnapshot With {
                 .LogicalLength = _Length,
                 .PhysicalLength = BaseStream.Length,
