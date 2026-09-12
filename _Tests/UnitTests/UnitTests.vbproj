@@ -117,6 +117,7 @@
     <Compile Include="Tests\Chunked Stream\Developer confidence\Visualization.vb" />
     <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\Allocation.vb" />
     <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\Anchors.vb" />
+    <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\ContentDefinedWriteCoalescing.vb" />
     <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\CopyOnWrite.vb" />
     <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\CurrentChunkWriteCaching.vb" />
     <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\ExtentOperations.vb" />

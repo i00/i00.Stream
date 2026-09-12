@@ -245,32 +245,167 @@ Namespace Streams
         End Sub
 
         ''' <summary>
-        ''' True when the stream's current last extent wholly (from its own offset 0) and
-        ''' exclusively (RefCount = 1) references a non-sparse record that still has room below
-        ''' Options.ChunkSize - the one condition under which growing that record in place, rather
-        ''' than starting a new one, is safe. A shared or dedup-matched record has other extents
-        ''' relying on its exact current content; a sub-range reference isn't "the whole chunk" to
-        ''' begin with.
+        ''' Result of <see cref="TryGetExtendableLastChunkAsync"/>: whether the stream's current
+        ''' last extent is eligible to grow in place, and - when it is - the record it references
+        ''' plus (only under <see cref="ChunkedStreamOptions.ChunkSizeVariance"/>, where checking
+        ''' eligibility already requires decrypting it) its plaintext, so callers never decrypt
+        ''' the same record twice.
         ''' </summary>
-        Private Function TryGetExtendableLastChunk(ByRef Record As PhysicalRecordEntry) As Boolean
+        Private Structure ExtendableLastChunkResult
+            Public Eligible As Boolean
+            Public Record As PhysicalRecordEntry
+            Public Plain As Byte()
+        End Structure
 
-            Record = Nothing
+        ''' <summary>
+        ''' True when the stream's current last extent wholly (from its own offset 0) and
+        ''' exclusively (RefCount = 1) references a non-sparse record that is still open to grow -
+        ''' the one condition under which extending it in place, rather than starting a new chunk,
+        ''' is safe. A shared or dedup-matched record has other extents relying on its exact
+        ''' current content; a sub-range reference isn't "the whole chunk" to begin with.
+        ''' </summary>
+        ''' <remarks>
+        ''' Under fixed-size chunking (<see cref="ChunkedStreamOptions.ChunkSizeVariance"/> = 0)
+        ''' "still open" just means shorter than <see cref="ChunkedStreamOptions.ChunkSize"/>, the
+        ''' same check this used to be. Under content-defined chunking it means more: the record's
+        ''' plaintext must not already end on a genuine Gear-hash boundary or
+        ''' <see cref="ChunkedStreamOptions.MaxChunkSize"/> - otherwise appending to it would
+        ''' produce a chunk a one-shot write of the combined bytes would never have produced (see
+        ''' <see cref="IsChunkClosedByCdcBoundary"/>). Checking that requires decrypting the
+        ''' record, so this returns the plaintext too when eligible, rather than making
+        ''' <see cref="TryExtendLastChunkAsync"/>/<see cref="OpenPendingChunkAsync"/> decrypt it a
+        ''' second time.
+        ''' </remarks>
+        Private Async Function TryGetExtendableLastChunkAsync(RunAsync As Boolean, CancellationToken As Threading.CancellationToken) As Task(Of ExtendableLastChunkResult)
 
-            If _Extents.Count = 0 Then Return False
+            If _Extents.Count = 0 Then Return New ExtendableLastChunkResult()
 
             Dim LastExtent = _Extents(_Extents.Count - 1)
 
-            If LastExtent.PhysicalRecordId = SparsePhysicalRecordId Then Return False
-            If LastExtent.PhysicalRecordOffset <> 0 Then Return False
+            If LastExtent.PhysicalRecordId = SparsePhysicalRecordId Then Return New ExtendableLastChunkResult()
+            If LastExtent.PhysicalRecordOffset <> 0 Then Return New ExtendableLastChunkResult()
 
             Dim Candidate = GetPhysicalRecord(LastExtent.PhysicalRecordId)
 
-            If Candidate.RefCount <> 1 Then Return False
-            If Candidate.PlainLength <> LastExtent.LogicalLength Then Return False
-            If Candidate.PlainLength >= Options.ChunkSize Then Return False
+            If Candidate.RefCount <> 1 Then Return New ExtendableLastChunkResult()
+            If Candidate.PlainLength <> LastExtent.LogicalLength Then Return New ExtendableLastChunkResult()
 
-            Record = Candidate
-            Return True
+            If Options.ChunkSizeVariance <= 0 Then
+
+                If Candidate.PlainLength >= Options.ChunkSize Then Return New ExtendableLastChunkResult()
+
+                Return New ExtendableLastChunkResult With {.Eligible = True, .Record = Candidate}
+
+            End If
+
+            Dim Plain As Byte()
+
+            If RunAsync Then
+                Plain = Await ReadPhysicalRecordPlainAsync(Candidate, CancellationToken).ConfigureAwait(False)
+            Else
+                Plain = ReadPhysicalRecordPlain(Candidate)
+            End If
+
+            If IsChunkClosedByCdcBoundary(Plain, Plain.Length) Then Return New ExtendableLastChunkResult()
+
+            Return New ExtendableLastChunkResult With {.Eligible = True, .Record = Candidate, .Plain = Plain}
+
+        End Function
+
+        ''' <summary>
+        ''' Replays the same Gear-hash accumulation <see cref="DetermineNextSegmentLength"/> would
+        ''' perform over Plain's first Length bytes if they were the start of a chunk, returning
+        ''' the hash state at that point. Bytes before <see cref="ChunkedStreamOptions.MinChunkSize"/>
+        ''' never enter the hash, matching <see cref="DetermineNextSegmentLength"/> exactly - see
+        ''' its own remarks.
+        ''' </summary>
+        Private Function ComputeChunkHashState(Plain As IReadOnlyList(Of Byte), Length As Integer) As ULong
+
+            Dim MinChunkSize = Options.MinChunkSize
+            Dim Hash As ULong = 0
+
+            For WrittenLength = 1 To Length
+                If WrittenLength >= MinChunkSize Then
+                    Hash = GearHash.Roll(Hash, Plain(WrittenLength - 1))
+                End If
+            Next
+
+            Return Hash
+
+        End Function
+
+        ''' <summary>
+        ''' True when Plain's first Length bytes represent a chunk a content-defined scan would
+        ''' treat as genuinely closed - by <see cref="ChunkedStreamOptions.MaxChunkSize"/> or a
+        ''' Gear-hash threshold trip at exactly Length - rather than one that merely ran out of
+        ''' data at the time it was written. Only a chunk that stopped for the latter reason is
+        ''' safe to extend in place or keep buffering: appending to one that already closed for
+        ''' real would produce a chunk a one-shot write of the combined bytes would never have
+        ''' produced. Assumes Plain is self-consistent (produced by this same chunking logic), so
+        ''' it never checks for a boundary strictly before Length - only content this class itself
+        ''' wrote is ever a candidate for extension.
+        ''' </summary>
+        Private Function IsChunkClosedByCdcBoundary(Plain As IReadOnlyList(Of Byte), Length As Integer) As Boolean
+
+            If Length >= Options.MaxChunkSize Then Return True
+            If Length < Options.MinChunkSize Then Return False
+
+            Return ComputeChunkHashState(Plain, Length) < Options.SplitHashThreshold
+
+        End Function
+
+        ''' <summary>
+        ''' CDC counterpart to the plain byte-count cap (<see cref="ChunkedStreamOptions.ChunkSize"/>)
+        ''' used when extending the current last chunk in place or filling the write-cache buffer:
+        ''' given ExistingLength bytes already part of the chunk (ExistingPlain, assumed not
+        ''' already closed - see <see cref="IsChunkClosedByCdcBoundary"/>) plus new bytes about to
+        ''' be appended (Input/DataOffset/Count), returns how many of the new bytes to absorb
+        ''' before the chunk should close - a Gear-hash content boundary or
+        ''' <see cref="ChunkedStreamOptions.MaxChunkSize"/>, whichever comes first, or all of Count
+        ''' if neither is reached. Runs the same scan <see cref="DetermineNextSegmentLength"/> runs
+        ''' over a single buffer, just resuming mid-chunk instead of starting one from scratch, so
+        ''' a stream built up through many small appends chunks identically to the same bytes
+        ''' written in one call.
+        ''' </summary>
+        Private Function DetermineChunkExtensionLength(ExistingPlain As IReadOnlyList(Of Byte),
+                                                       ExistingLength As Integer,
+                                                       Input As Byte(),
+                                                       DataOffset As Integer,
+                                                       Count As Integer) As Integer
+
+            If Options.ChunkSizeVariance <= 0 Then
+                Return Math.Max(0, Math.Min(Options.ChunkSize - ExistingLength, Count))
+            End If
+
+            Dim MinChunkSize = Options.MinChunkSize
+            Dim MaxChunkSize = Options.MaxChunkSize
+            Dim Threshold = Options.SplitHashThreshold
+
+            Dim RoomLeft = MaxChunkSize - ExistingLength
+            If RoomLeft <= 0 Then Return 0
+
+            Dim Cap = Math.Min(RoomLeft, Count)
+            Dim Hash = ComputeChunkHashState(ExistingPlain, ExistingLength)
+            Dim WrittenLength = ExistingLength
+            Dim Absorbed = 0
+
+            While Absorbed < Cap
+
+                Dim DataByte = Input(DataOffset + Absorbed)
+                Absorbed += 1
+                WrittenLength += 1
+
+                If WrittenLength >= MinChunkSize Then
+
+                    Hash = GearHash.Roll(Hash, DataByte)
+
+                    If Hash < Threshold OrElse WrittenLength >= MaxChunkSize Then Return Absorbed
+
+                End If
+
+            End While
+
+            Return Absorbed
 
         End Function
 
@@ -310,8 +445,9 @@ Namespace Streams
         ''' <returns>
         ''' The number of leading bytes of Input (starting at DataOffset) actually absorbed into
         ''' the extended chunk - 0 if nothing was eligible to extend (an empty stream, a sparse or
-        ''' shared or already-full last chunk, or one only partially referenced by its extent).
-        ''' Never more than Count, and never more than the room remaining up to Options.ChunkSize.
+        ''' shared or already-closed last chunk, or one only partially referenced by its extent).
+        ''' Never more than Count, and never more than the room remaining up to
+        ''' Options.ChunkSize/MaxChunkSize or the next content-defined boundary.
         ''' </returns>
         Private Async Function TryExtendLastChunkAsync(Input As Byte(),
                                                        DataOffset As Integer,
@@ -321,19 +457,23 @@ Namespace Streams
 
             If Count <= 0 Then Return 0
 
-            Dim Record As PhysicalRecordEntry = Nothing
-            If TryGetExtendableLastChunk(Record) = False Then Return 0
+            Dim Eligibility = Await TryGetExtendableLastChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
+            If Eligibility.Eligible = False Then Return 0
 
-            Dim RoomLeft = Options.ChunkSize - Record.PlainLength
-            Dim AbsorbCount = Math.Min(RoomLeft, Count)
+            Dim Record = Eligibility.Record
 
             Dim OldPlain As Byte()
 
-            If RunAsync Then
+            If Eligibility.Plain IsNot Nothing Then
+                OldPlain = Eligibility.Plain
+            ElseIf RunAsync Then
                 OldPlain = Await ReadPhysicalRecordPlainAsync(Record, CancellationToken).ConfigureAwait(False)
             Else
                 OldPlain = ReadPhysicalRecordPlain(Record)
             End If
+
+            Dim AbsorbCount = DetermineChunkExtensionLength(OldPlain, OldPlain.Length, Input, DataOffset, Count)
+            If AbsorbCount <= 0 Then Return 0
 
             Dim Combined(OldPlain.Length + AbsorbCount - 1) As Byte
             Buffer.BlockCopy(OldPlain, 0, Combined, 0, OldPlain.Length)
@@ -353,26 +493,29 @@ Namespace Streams
 
         ''' <summary>
         ''' Opens <see cref="_PendingChunkPlain"/>, seeding it from the stream's current last
-        ''' chunk when that chunk is eligible to grow (see <see cref="TryGetExtendableLastChunk"/>)
-        ''' or starting it empty otherwise. Only ever called when no buffer is already open.
+        ''' chunk when that chunk is eligible to grow (see
+        ''' <see cref="TryGetExtendableLastChunkAsync"/>) or starting it empty otherwise. Only
+        ''' ever called when no buffer is already open.
         ''' </summary>
         Private Async Function OpenPendingChunkAsync(RunAsync As Boolean, CancellationToken As Threading.CancellationToken) As Task
 
-            Dim Record As PhysicalRecordEntry = Nothing
+            Dim Eligibility = Await TryGetExtendableLastChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
 
-            If TryGetExtendableLastChunk(Record) Then
+            If Eligibility.Eligible Then
 
                 Dim SeedPlain As Byte()
 
-                If RunAsync Then
-                    SeedPlain = Await ReadPhysicalRecordPlainAsync(Record, CancellationToken).ConfigureAwait(False)
+                If Eligibility.Plain IsNot Nothing Then
+                    SeedPlain = Eligibility.Plain
+                ElseIf RunAsync Then
+                    SeedPlain = Await ReadPhysicalRecordPlainAsync(Eligibility.Record, CancellationToken).ConfigureAwait(False)
                 Else
-                    SeedPlain = ReadPhysicalRecordPlain(Record)
+                    SeedPlain = ReadPhysicalRecordPlain(Eligibility.Record)
                 End If
 
                 _PendingChunkPlain = New List(Of Byte)(SeedPlain)
                 _PendingChunkStart = _Extents(_Extents.Count - 1).LogicalOffset
-                _PendingChunkSourceRecordId = Record.RecordId
+                _PendingChunkSourceRecordId = Eligibility.Record.RecordId
 
             Else
 
@@ -456,10 +599,12 @@ Namespace Streams
         ''' <summary>
         ''' Routes a genuine end-of-stream append through the deferred write cache: opens
         ''' <see cref="_PendingChunkPlain"/> if nothing is buffered yet, appends as many bytes as
-        ''' fit below Options.ChunkSize, commits and starts a fresh buffer whenever it fills, and
-        ''' repeats for however many chunks' worth Count spans. _Length advances immediately as
-        ''' each byte is buffered, so the stream's reported length is never behind what Write()
-        ''' already returned to the caller.
+        ''' fit before the chunk closes - <see cref="ChunkedStreamOptions.ChunkSize"/>, or under
+        ''' content-defined chunking whichever of a Gear-hash boundary or
+        ''' <see cref="ChunkedStreamOptions.MaxChunkSize"/> comes first - commits and starts a
+        ''' fresh buffer whenever it closes, and repeats for however many chunks' worth Count
+        ''' spans. _Length advances immediately as each byte is buffered, so the stream's reported
+        ''' length is never behind what Write() already returned to the caller.
         ''' </summary>
         Private Async Function AppendThroughWriteCacheAsync(Input As Byte(),
                                                              DataOffset As Integer,
@@ -476,8 +621,7 @@ Namespace Streams
                     Await OpenPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
                 End If
 
-                Dim RoomLeft = Options.ChunkSize - _PendingChunkPlain.Count
-                Dim AbsorbCount = Math.Min(RoomLeft, Remaining)
+                Dim AbsorbCount = DetermineChunkExtensionLength(_PendingChunkPlain, _PendingChunkPlain.Count, Input, CurrentDataOffset, Remaining)
 
                 If AbsorbCount > 0 Then
 
@@ -491,7 +635,12 @@ Namespace Streams
 
                 End If
 
-                If _PendingChunkPlain.Count >= Options.ChunkSize Then
+                Dim ChunkIsClosed =
+                    If(Options.ChunkSizeVariance <= 0,
+                       _PendingChunkPlain.Count >= Options.ChunkSize,
+                       IsChunkClosedByCdcBoundary(_PendingChunkPlain, _PendingChunkPlain.Count))
+
+                If ChunkIsClosed Then
                     Await CommitPendingChunkAsync(RunAsync, CancellationToken).ConfigureAwait(False)
                 End If
 

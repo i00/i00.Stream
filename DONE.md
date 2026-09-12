@@ -6,7 +6,7 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ## 2026-09-12
 
-### Write coalescing / current-chunk write caching — DONE (except CDC-awareness)
+### Write coalescing / current-chunk write caching — DONE
 
 Every `Write()` call used to decide its own chunk boundaries in total isolation - two sequential
 appends, even fully contiguous ones, always got two independent physical records (traced through
@@ -88,9 +88,62 @@ overloads call `ReadCore`/`ReadCoreAsync` directly, bypassing the earlier fix en
   corruption - exactly buffering's documented trade-off). Reverted the same mistake in
   `Options_EncryptionInfoChangedCore`. 5 more tests including a regression guard. 392/392 total.
 
-**Only remaining follow-up:** carrying the CDC rolling-hash scan across the buffer (currently
-fixed-size only, targets `Options.ChunkSize` regardless of `ChunkSizeVariance`) - the piece that
-fully closes the original EFS/dedup-alignment gap this was built to fix.
+**Stage 3 (content-defined-chunking awareness) - closing the original EFS/dedup-alignment gap:**
+Stages 1-2 always targeted a fixed `Options.ChunkSize` cap, ignoring `Options.ChunkSizeVariance`
+entirely - so a stream built up through many small appends would chunk differently than the same
+final bytes written in one shot whenever CDC was in use, defeating the whole point of write
+coalescing for EFS/dedup alignment. Fixed by making both `TryExtendLastChunkAsync` and
+`AppendThroughWriteCacheAsync` run the same Gear-hash scan `DetermineNextSegmentLength` runs for a
+one-shot write, just resuming mid-chunk instead of starting one from scratch:
+- `TryGetExtendableLastChunk` became `TryGetExtendableLastChunkAsync`: under fixed-size chunking
+  the eligibility check is unchanged (cheap, metadata-only), but under CDC it now decrypts the
+  candidate record (once - returned alongside the eligibility result so neither caller decrypts it
+  a second time) and calls the new `IsChunkClosedByCdcBoundary` to tell a chunk that's merely
+  short of `ChunkSize` apart from one that's *genuinely closed* - already ended on a real
+  Gear-hash boundary or `Options.MaxChunkSize`. Only the latter distinction matters for CDC: a
+  chunk closed by content should never be extended further, even if it's short of `ChunkSize`,
+  because a one-shot write of the combined bytes would never have extended it either - it would
+  have started a fresh chunk (Hash resets to 0) right where the old one ended. That fresh-chunk
+  case is already handled for free: `TryExtendLastChunkAsync`'s caller in `WriteCoreAsync` already
+  routes anything past `ExtendedCount` through the ordinary `BuildExtentsFromBufferAsync`/
+  `DetermineNextSegmentLength` path, so no restructuring was needed there at all.
+- `IsChunkClosedByCdcBoundary(Plain, Length)`: `Length >= MaxChunkSize` is always closed;
+  `Length < MinChunkSize` is always open (the hash never even engages that early - see
+  `DetermineNextSegmentLength`'s own remarks); otherwise replays `ComputeChunkHashState` and
+  checks whether the threshold trips at exactly `Length`. Assumes the plaintext is self-consistent
+  (produced by this same chunking logic) rather than re-checking for an earlier trip - only
+  content this class itself wrote is ever a candidate for extension.
+- `DetermineChunkExtensionLength(ExistingPlain, ExistingLength, Input, DataOffset, Count)`: the
+  CDC counterpart to the plain `ChunkSize - ExistingLength` room calculation. Primes the rolling
+  hash to the state a from-scratch scan would have reached by `ExistingLength` (via
+  `ComputeChunkHashState`, replaying only bytes from `MinChunkSize` onward - matching
+  `DetermineNextSegmentLength` exactly), then continues rolling into the new bytes, stopping at a
+  threshold trip, `MaxChunkSize`, or `Count`, whichever comes first. Used by both
+  `TryExtendLastChunkAsync` (replacing its old `ChunkSize - PlainLength` cap) and
+  `AppendThroughWriteCacheAsync`'s per-iteration fill amount (replacing its old
+  `ChunkSize - _PendingChunkPlain.Count` cap) - the latter also swaps its old
+  `_PendingChunkPlain.Count >= ChunkSize` commit check for `IsChunkClosedByCdcBoundary` under CDC,
+  so a boundary found mid-buffer commits immediately rather than only once the buffer happens to
+  reach `ChunkSize`.
+- All three helpers accept `IReadOnlyList(Of Byte)` rather than `Byte()`, so
+  `AppendThroughWriteCacheAsync` can pass `_PendingChunkPlain` (a `List(Of Byte)`) directly with no
+  copy, while `TryExtendLastChunkAsync` passes a plain decrypted array.
+- At `ChunkSizeVariance = 0` every one of these takes the same cheap, hashing-free fixed-size path
+  they always did - this is purely additive for CDC users, zero behavioural or performance change
+  otherwise.
+- Added `ContentDefinedWriteCoalescing.vb` (4 tests, `Logical mutations and allocation`): a
+  byte-at-a-time incrementally-written stream and a bursty, buffered
+  (`CurrentChunkWriteCaching = True`) one both produce **exactly** the same extent-length sequence
+  as a one-shot write of the identical bytes under CDC (`Debug_GetExtentCount`/
+  `Debug_GetExtentLength`, both new); non-tail chunks close on a real Gear-hash boundary short of
+  `MaxChunkSize`, not just always at the cap; and appending past a chunk closed that way (proven by
+  truncating a one-shot write exactly at its first chunk's own boundary, which is guaranteed
+  closed - only a write's true final chunk can end merely because data ran out) starts a genuinely
+  new record rather than growing the closed one. 396/396 total.
+
+This closes the original EFS/dedup-alignment gap write coalescing was built to fix: streamed and
+one-shot writes of the same bytes now chunk identically under content-defined chunking, the same
+way they already did under fixed-size chunking.
 
 ---
 

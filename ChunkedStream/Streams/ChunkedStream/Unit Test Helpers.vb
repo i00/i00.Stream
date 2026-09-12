@@ -186,6 +186,26 @@
 
         End Function
 
+        ''' <summary>Number of logical extent entries currently in the stream's extent table.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_GetExtentCount() As Integer
+
+            Return _Extents.Count
+
+        End Function
+
+        ''' <summary>
+        ''' The logical length of the extent at Index in the stream's extent table - lets a test
+        ''' compare exact chunk-boundary sequences between two streams (e.g. one written
+        ''' incrementally, one in one shot).
+        ''' </summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_GetExtentLength(Index As Integer) As Integer
+
+            Return _Extents(Index).LogicalLength
+
+        End Function
+
         ''' <summary>Current reference count of a physical record - lets a test confirm deduplication shares a record without over- or under-counting its references.</summary>
         <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
         Friend Function Debug_GetPhysicalRecordRefCount(RecordId As Long) As Integer

@@ -220,14 +220,16 @@ depth-assert.
 - **Reader concurrency** — lock-free parallel reads — *done (see DONE.md).* `_StateLock` is a
   writer-preference `AsyncReaderWriterLock`; the large positional reads take it shared with a
   per-call `ChunkCipher`.
-- **Write coalescing / current-chunk write caching** — *done (see DONE.md):* a genuine
-  end-of-stream append now grows the stream's last chunk in place instead of always starting a
-  new one, unconditionally; `Options.CurrentChunkWriteCaching` (off by default) additionally
-  defers that commit across several small appends, and every entry point that reads or resolves
-  offsets through the extent table (`ApplyOptions`/`Defragment`/`Validate`/`GetStructure`/
-  `Replace`/checkpoints/`DeferPublish`) flushes a pending buffer first. Follow-up: carry the CDC
-  rolling-hash scan across the buffer (currently fixed-size-only, targets `Options.ChunkSize`) -
-  the only piece left, and the one that fully closes the original EFS/dedup-alignment gap.
+- **Write coalescing / current-chunk write caching** — *done (see DONE.md).* A genuine
+  end-of-stream append grows the stream's last chunk in place instead of always starting a new
+  one, unconditionally; `Options.CurrentChunkWriteCaching` (off by default) additionally defers
+  that commit across several small appends; every entry point that reads or resolves offsets
+  through the extent table (`ApplyOptions`/`Defragment`/`Validate`/`GetStructure`/`Replace`/
+  checkpoints/`DeferPublish`/`ToArray`/`Clone`/`Insert`/`CreateAnchor`/`Repair`/...) flushes a
+  pending buffer first; and both extend-in-place and the write-cache buffer are
+  content-defined-chunking-aware, stopping at the same Gear-hash boundary a one-shot write of the
+  identical bytes would choose instead of always targeting a fixed `Options.ChunkSize` - closing
+  the original EFS/dedup-alignment gap this was built to fix.
 - **Multi-chunk read cache** — *done (see DONE.md).* `Options.ChunkReadBlockCache` (default 32)
   is a record-id-keyed MRU set. Eviction is per-record (hooked into
   `DetachReclaimedPhysicalRecord`), so a write only drops the records it supersedes; both the
