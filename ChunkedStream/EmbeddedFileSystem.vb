@@ -730,8 +730,30 @@ Namespace Streams
                     Return
                 End If
 
-                Dim Child = GetAnchor(Location.Entry.ChildAnchorId)
-                Dim ChildType = ReadType(Child)
+                Dim Child As ChunkedStream.Anchor = Nothing
+                Dim ChildType As DataType
+                Try
+                    Child = GetAnchor(Location.Entry.ChildAnchorId)
+                    ChildType = ReadType(Child)
+                Catch ex As Exception When IsCorruptionFault(ex) OrElse TypeOf ex Is KeyNotFoundException
+                    '
+                    ' The child anchor is gone, or its record's own DataType tag cannot be trusted -
+                    ' most often because a prior Repair(IncludeDataLoss) zero-filled an unreadable
+                    ' range that happened to reach the record's own header, which Mark() has no way
+                    ' to avoid since it operates below the EFS layer. Whether or not this entry was
+                    ' ever flagged CorruptFile / CorruptDirectory, we can no longer tell file from
+                    ' directory here, so take the same remedy as an already-flagged CorruptDirectory:
+                    ' drop the entry and reclaim whatever span we can still identify. Any descendants
+                    ' this orphans are picked up by RecoverPendingFiles, which scans every anchor.
+                    '
+                    RemoveEntry(Location)
+                    If TypeOf ex IsNot KeyNotFoundException Then
+                        Dim ClaimedLength = Math.Max(FileHeaderSize + Location.Entry.LengthOfDataAtEntry, CLng(FileHeaderSize))
+                        ChunkedStream.Remove(Child.Offset, Math.Min(ClaimedLength, ChunkedStream.Length - Child.Offset))
+                    End If
+                    Scope.Publish()
+                    Return
+                End Try
                 If ChildType = DataType.Directory Then
                     Dim Children = ReadEntries(Child).ToList()
                     For Index = Children.Count - 1 To 0 Step -1

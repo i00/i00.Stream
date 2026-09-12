@@ -47,6 +47,7 @@ Public NotInheritable Class Autoexec
                 .AutoRecoverOnFault = True,
                 .EncryptionInfo = EncryptionInfo,
                 .ChunkSize = 4 * 1024 * 1024,
+                .Deduplication = True,
                 .MaxCryptoParallelism = 8,
                 .MaxPhysicalReadParallelism = 8,
                 .MaxPhysicalWriteParallelism = 8,

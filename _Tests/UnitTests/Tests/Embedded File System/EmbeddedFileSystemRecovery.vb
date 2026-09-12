@@ -283,6 +283,52 @@ Namespace Tests
             End Sub
 
             ''' <summary>
+            ''' <see cref="ChunkedStream.ValidationReport.Repair" /> operates below the EFS layer, so a
+            ''' zero-filled unreadable range has no way to avoid also covering a record's own leading
+            ''' <see cref="EmbeddedFileSystem.DataType" /> tag - this reproduces that outcome directly by
+            ''' overwriting just the tag in place. Before the fix, <see cref="EmbeddedFileSystem.DeleteEntry" />
+            ''' threw InvalidDataException("Unsupported data type.") from deep inside its unconditional
+            ''' header read, leaving the entry permanently stuck even though Mark() never flagged it
+            ''' (this class of damage is invisible to chunk-level validation - the bytes are readable and
+            ''' authentic, they just no longer mean what the EFS layer expects).
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub AFileWithAnUnreadableHeaderCanStillBeDeleted()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+                        Using Efs As New EmbeddedFileSystem(Cs)
+
+                            Dim KeepId = Efs.CreateFile(Efs.RootAnchorId, "keep.bin", CreateAsPending:=False)
+                            Dim KeepData = GenerateRandomData(300, 6700)
+                            Basics.WriteWholeFile(Efs, KeepId, KeepData)
+
+                            Dim BadId = Efs.CreateFile(Efs.RootAnchorId, "bad.bin", CreateAsPending:=False)
+                            Basics.WriteWholeFile(Efs, BadId, GenerateRandomData(500, 6701))
+
+                            ' Zero just the DataType tag in place - a normal, fully-authenticated write,
+                            ' not simulated physical corruption - so it decodes to neither Directory nor
+                            ' File. Validation has nothing to flag here; only DeleteEntry ever looks at it.
+                            Dim BadAnchor = Cs.GetAnchor(BadId)
+                            Cs.Write(BadAnchor.Offset, New Byte(7) {})
+
+                            Cs.Validate().ThrowIfErrors()
+
+                            Efs.DeleteEntry(Efs.RootAnchorId, "bad.bin")
+
+                            Dim Names = Efs.GetRootEntries().Select(Function(entry) entry.Name).OrderBy(Function(name) name).ToArray()
+                            AssertEqual("keep.bin", String.Join("|", Names), "bad.bin should have been removed despite its unreadable header.")
+                            AssertBytesEqual(KeepData, Basics.ReadWholeFile(Efs, KeepId), "The healthy sibling file was disturbed.")
+
+                            Cs.Validate().ThrowIfErrors()
+
+                        End Using
+                    End Using
+                End Using
+
+            End Sub
+
+            ''' <summary>
             ''' A validation problem that lands inside a directory's own content list must not abort
             ''' the <see cref="EmbeddedFileSystem.Mark" /> walk: the directory is flagged
             ''' <see cref="EmbeddedFileSystem.EntryTypes.CorruptDirectory" />, the rest of the tree
