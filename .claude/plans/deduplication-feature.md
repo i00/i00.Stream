@@ -1,9 +1,11 @@
 # Content-Addressed Deduplication — Design & Implementation Plan (written retrospectively)
 
-**Status: shipped.** This documents the deduplication feature as designed and built across six
-commits (`0b1c7dd` → `8c4c6f4`), 369/369 tests green. It's written after the fact, in plan form,
-because the feature was built incrementally through conversation rather than from an upfront
-written plan — this is that plan, reconstructed for the record.
+**Status: shipped, plus one production-incident fix.** This documents the deduplication feature as
+designed and built across eight commits (`0b1c7dd` → `c08fbf1`), 401/401 tests green. It's written
+after the fact, in plan form, because the feature was built incrementally through conversation
+rather than from an upfront written plan — this is that plan, reconstructed for the record, and
+kept up to date as real-world use turned up a genuine bug in what §6 originally called an accepted
+limitation (see §2.2's follow-up and §4 stage 8).
 
 ## 1. Goal
 
@@ -50,6 +52,32 @@ tracing the bit arithmetic by hand rather than guessing. A `MaxGlobalDepth = 24`
 also replaced a naive "stop at 256 bits" threshold, which OOM'd instead of failing cleanly (the
 directory *doubles in size* every step, so 256 levels is astronomically past any real memory
 budget).
+
+**Follow-up, `c08fbf1` — a production crash traced back to `Insert`'s own contract.** Reported
+live: `EmbeddedFileSystemSample` with `Options.Deduplication = True` threw
+`InvalidOperationException: Extendible hash table directory depth exceeded its safety limit - this
+points at duplicate or non-random keys, not normal growth.` mid-upload, on a real 256MB archive.
+`Insert`'s doc comment required the caller to have already ruled out an existing entry via
+`TryGetValue` — reasonable in isolation, except a "miss" from the write path's own
+`TryDeduplicateWriteAsync` is ambiguous: it means either no entry for this key ever existed, *or*
+an entry exists but points at a physical record reclaimed since (§6 originally filed this as an
+accepted, harmless limitation — "a stale entry can shadow a fresher live entry"). The write path
+treated both misses identically and called `Insert` unconditionally, so the stale case planted a
+**second** entry for an already-present key. Because the key is a content hash and "the same small
+set of distinct contents gets reclaimed and rewritten at one offset many times" is ordinary upload
+churn, the same key recurs indefinitely — and, exactly like the bit-ordering bug above, a bucket
+holding several entries that all share one identical key can *never* be split apart no matter how
+many more bits are examined, so it grew the directory forever and tripped `MaxGlobalDepth`.
+
+Reproduced first with a minimal, targeted repro (write X twice, reclaim it, rewrite X again,
+watch the index gain a *second* entry for X's own hash) before writing any fix, then confirmed
+against a copy of the actual reported archive. Fixed by making `Insert` an upsert: it now scans
+its target bucket for an existing entry with the same key before appending, and updates the value
+in place if found. Unconditionally safe (`TryGetValue` only ever returns the first entry it finds
+for a key anyway, so two entries for one key were never useful even before this bug), and it
+permanently closes the "stale entry shadows a fresher live entry" limitation §6 originally
+accepted — see §4 stage 8 for the fix's own tests, and §6 for the corrected status of that
+limitation.
 
 ### 2.3 Entry format: HMAC-SHA256(plaintext) → PhysicalRecordId, no stored MAC
 
@@ -234,9 +262,19 @@ truncated search) made this a standing rule for the rest of the work.
    before `Options.Deduplication` was turned on.
 6. **`8c4c6f4`** — `DedupRebuild` (§2.9), completing the feature as originally scoped.
 7. **`dc1412d`** — Intra-batch parallel-write dedup (§2.8 follow-up), closing limitation #1 below.
+8. **`c08fbf1`** — Production-incident fix: `ExtendibleHashTable.Insert` is now an upsert (§2.2
+   follow-up), closing the "stale entry shadows a fresher live entry" limitation §6 originally
+   accepted. The pre-existing `InsertingManyIdenticalKeysThrowsRatherThanHanging` test had
+   asserted the *bug itself* as correct behaviour and had to be replaced, not patched: split into
+   `InsertingTheSameKeyManyTimesUpdatesItsValueWithoutGrowing` (proves the upsert directly) and
+   `InsertingManyKeysSharingALongCommonPrefixThrowsRatherThanHanging` (keeps the real
+   `MaxGlobalDepth` safety net under test, using genuinely distinct keys that share a long prefix
+   instead of one repeated key - the one case an upsert can't rescue). Added
+   `ReclaimingAndRewritingTheSameContentManyTimesDoesNotDuplicateItsDedupEntry` to
+   `DedupWritePath.vb`, reproducing the exact crash pattern as a permanent regression guard.
 
 Testing throughout: each stage built, tested in isolation, and committed before the next began.
-370 tests pass at completion, up from the pre-feature baseline; every stage's own test file is
+401 tests pass at completion, up from the pre-feature baseline; every stage's own test file is
 still in the tree (`ExtendibleHashTable.vb`, `DedupKeyLifecycle.vb`, `DedupIndexPersistence.vb`,
 `DedupWritePath.vb`, `DedupApplyOptions.vb`, `DedupRebuild.vb`, under
 `_Tests/UnitTests/Tests/Chunked Stream/Deduplication/`).
@@ -244,8 +282,9 @@ still in the tree (`ExtendibleHashTable.vb`, `DedupKeyLifecycle.vb`, `DedupIndex
 ## 5. Known, accepted limitations
 
 Limitation 1 below was identified during the initial work and closed in a follow-up (`dc1412d`) —
-kept here for the record, since the plan predates the fix. Limitation 2 remains open, deliberately
-left unaddressed as an explicit scoping decision, not an oversight:
+kept here for the record, since the plan predates the fix. Limitation 2's root cause was later
+closed too, by a separate feature (`write-coalescing`) built for its own reasons - kept here
+because the specific EFS-level guarantee it implies has not been re-verified end-to-end:
 
 1. ~~**Intra-batch parallel-write dedup.**~~ **Fixed in `dc1412d`.** Two identical chunks written
    within the *same* `BuildExtentsInParallelAsync` call couldn't dedupe against each other —
@@ -258,13 +297,25 @@ left unaddressed as an explicit scoping decision, not an oversight:
    sized to one batch's chunk count, an in-memory byte compare instead of a decrypt), independent
    of `ChunkSizeVariance`.
 
-2. **EFS write-pattern dependency.** Two EFS files with identical content only dedupe reliably if
-   both were written via the same *shape* of `Write()` calls (both one-shot, or both streamed
-   identically), because `WriteFile` appends via the ordinary `Write()`/`Insert()` path and content-defined
-   chunking's rolling hash resets at the start of every `Write()` call — it has no visibility into
-   where the previous call left off.
+2. **EFS write-pattern dependency — root cause fixed by a separate feature, `write-coalescing`,
+   not re-verified against actual EFS traffic.** This plan originally described the gap as: two
+   EFS files with identical content only dedupe reliably if both were written via the same *shape*
+   of `Write()` calls, because `WriteFile` appends via the ordinary `Write()`/`Insert()` path and
+   content-defined chunking's rolling hash reset at the start of every `Write()` call, with no
+   visibility into where the previous call left off. Candidate fix (a) below - carrying rolling-hash
+   state across contiguous `Write()` calls - is exactly what the `write-coalescing` feature (a
+   separate, later effort; see `TODO.md`/`DONE.md`, no `.claude/plans` document of its own) ended
+   up building, in three stages: unconditional extend-in-place, opt-in
+   `Options.CurrentChunkWriteCaching` buffering, and content-defined-chunking awareness (its own
+   "stage 3") that specifically carries the Gear-hash accumulator across separate `Write()` calls
+   the way (a) below describes. It also closed the fixed-size grid-alignment gap noted at the
+   bottom of this limitation, as a side effect of the same mechanism. **Not specifically
+   re-verified end-to-end against real EFS `WriteFile` traffic** (write-coalescing's own tests
+   exercise `ChunkedStream.Write()` directly) - worth a targeted EFS-level dedup test if cross-file
+   dedup reliability matters again. Candidate fix (b) (buffering whole-file writes at the EFS
+   layer) was not pursued once (a) was addressed generally.
 
-   *Two candidate fixes discussed, with different risk profiles:*
+   *Original discussion, kept for the record:*
 
    - **(a) General fix — carry rolling-hash state across contiguous `Write()` calls.** Persist the
      Gear-hash accumulator and any buffered, not-yet-boundaried tail bytes, and continue them into
@@ -299,8 +350,15 @@ left unaddressed as an explicit scoping decision, not an oversight:
 
 - Any change to how EFS decides *when* to write (this plan only covers what dedup does once bytes
   reach `ChunkedStream`).
-- Cleaning up stale index entries automatically on reclaim (accepted dead weight; `DedupRebuild`
-  is the answer, run explicitly, not automatically).
-- A stale index entry shadowing a fresher live entry with the same key is a known, accepted
-  consequence of never cleaning up on reclaim (`ExtendibleHashTable.TryGetValue` returns whichever
-  entry it finds first). `DedupRebuild(Soft:=True)` fixes it when run; nothing does automatically.
+- Cleaning up stale index entries automatically on reclaim, in general, remains out of scope: a
+  hash whose content is never written again keeps a dead entry sitting in the index forever
+  (harmless disk/memory weight, not a correctness risk) until an explicit `DedupRebuild` drops it.
+  This is still accepted, unchanged dead weight.
+- ~~A stale index entry shadowing a fresher live entry with the same key is a known, accepted
+  consequence of never cleaning up on reclaim.~~ **This was not actually harmless - see §2.2's
+  `c08fbf1` follow-up.** A stale entry whose content *is* written again used to plant a second,
+  duplicate entry for that key rather than being repaired, and repeating that cycle enough times
+  crashed the process (`MaxGlobalDepth` exceeded) on real user data. `ExtendibleHashTable.Insert`
+  is now an upsert, so this specific case - the same key recurring - self-heals automatically on
+  the very next write of that content, no `DedupRebuild` needed. `DedupRebuild(Soft:=True)` is
+  still the only way to clean up dead entries whose content never recurs (the bullet above).
