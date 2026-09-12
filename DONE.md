@@ -6,7 +6,7 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ## 2026-09-12
 
-### Write coalescing / current-chunk write caching — stages 1-2 DONE
+### Write coalescing / current-chunk write caching — DONE (except CDC-awareness)
 
 Every `Write()` call used to decide its own chunk boundaries in total isolation - two sequential
 appends, even fully contiguous ones, always got two independent physical records (traced through
@@ -49,11 +49,33 @@ out to matter for this too.
 - `_Length` always reflects buffered-but-uncommitted bytes immediately (never behind what
   `Write()` already returned) - the brand-new-chunk commit path splices its extent directly rather
   than through `InsertExtentsCore`, which would have double-counted it.
-- **Known gap, not yet wired:** `ApplyOptions`, `Defragment`, `Validate`, `GetStructure`,
-  `Replace`, and checkpoint/`DeferPublish` entry points don't yet flush a pending buffer first -
-  combining `CurrentChunkWriteCaching` with any of those today is not yet safe.
 - Tests: `WriteCoalescing.vb` (4, stage 1) + `CurrentChunkWriteCaching.vb` (8, stage 2), all under
   `Logical mutations and allocation`. 381/381 passing.
+
+**Flush-site audit (`9fd6c87`) - closing stage 2's own known gap:**
+`Validate`/`GetFragmentation` (share `CaptureDiagnosticsSnapshotCore`), `GetStructure`
+(`CaptureStructureSnapshotCore`), `ApplyOptions`, `DedupRebuild`, `Defragment`, `Replace`,
+`CreateCheckpoint`, and `DeferPublish` all now materialise a pending buffer first - every one of
+them reads or resolves offsets through `_Extents`/`_PhysicalRecords` directly, which a buffered
+tail isn't part of until committed. Before this, combining `CurrentChunkWriteCaching` with any of
+them risked a false corruption report or worse.
+- `CreateCheckpoint` and `DeferPublish` needed the strongest treatment: their rollback mechanisms
+  (a captured baseline; reload-from-disk, respectively) would otherwise have no record of a buffer
+  that predates them, silently losing it on a later rollback even though it was never touched by
+  whatever gets rolled back. `DeferPublish` additionally *publishes* the commit (the same as an
+  explicit `FlushCurrentChunkWriteCache`), not just materialises it, since its rollback reloads
+  from what's actually on the backing store, not an in-memory snapshot.
+- `AdoptLoadedImage` (the `AutoRecoverOnFault` reload path) discards a pending buffer outright
+  rather than leaving it stale against a wholesale-replaced extent table - a faulted stream's
+  not-yet-persisted mutations are already expected to be lost, same as everywhere else that reload
+  touches.
+- 6 more tests in `CurrentChunkWriteCaching.vb`, including a checkpoint rollback and a
+  `DeferPublish` publish both confirming the pre-scope buffered data survives correctly. 387/387
+  passing.
+
+**Only remaining follow-up:** carrying the CDC rolling-hash scan across the buffer (currently
+fixed-size only, targets `Options.ChunkSize` regardless of `ChunkSizeVariance`) - the piece that
+fully closes the original EFS/dedup-alignment gap this was built to fix.
 
 ---
 
