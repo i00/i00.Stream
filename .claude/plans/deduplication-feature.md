@@ -1,13 +1,15 @@
 # Content-Addressed Deduplication — Design & Implementation Plan (written retrospectively)
 
-**Status: shipped, plus two production-incident fixes.** This documents the deduplication feature
-as designed and built across nine commits (`0b1c7dd` → `d45c172`), 403/403 tests green. It's
-written after the fact, in plan form, because the feature was built incrementally through
-conversation rather than from an upfront written plan — this is that plan, reconstructed for the
-record, and kept up to date as real-world use turned up first a genuine bug in what §6 originally
-called an accepted limitation (§2.2's `c08fbf1` follow-up, §4 stage 8), then a second incident
-where a *symptom* of an as-yet-unfound bug (a torn dedup index) was itself refusing to let the
-archive open at all (§2.6's `d45c172` follow-up, §4 stage 9).
+**Status: shipped, plus four production-incident fixes - all now closed.** This documents the
+deduplication feature as designed and built across thirteen commits (`0b1c7dd` → `9c267cb`),
+412/412 tests green. It's written after the fact, in plan form, because the feature was built
+incrementally through conversation rather than from an upfront written plan — this is that plan,
+reconstructed for the record, and kept up to date as real-world use turned up first a genuine bug
+in what §6 originally called an accepted limitation (§2.2's `c08fbf1` follow-up, §4 stage 8), then
+a symptom of an as-yet-unfound bug (a torn dedup index) refusing to let the archive open at all
+(§2.6's `d45c172` follow-up, §4 stage 9), and finally - after the user re-raised it with a concrete
+deterministic repro against the actual reported file - the root cause of that torn index itself,
+which turned out to be two separate bugs (§5, limitation 3; §4 stages 10-11).
 
 ## 1. Goal
 
@@ -166,8 +168,9 @@ tier (by analogy with `IndexDirectoryEntryCount`), was reserved in the header
 settled on the hole directory's simpler single-tier shape.
 
 **Follow-up, `d45c172` — a torn dedup index page used to refuse Open entirely.** Reported live: a
-`KeyNotFoundException` during a `Deduplication` + `CurrentChunkWriteCaching` upload (root cause not
-found - see §5's note on this) left the archive's dedup index pages torn on disk, and the *next*
+`KeyNotFoundException` during a `Deduplication` + `CurrentChunkWriteCaching` upload (root cause
+found later - two bugs, see §5 limitation 3 and §4 stages 10-11) left the archive's dedup index
+pages torn on disk, and the *next*
 `Open` attempt threw `CryptographicException: Dedup index page MAC invalid` and aborted before
 anything else loaded - an otherwise perfectly healthy, fully-readable archive refused to open at
 all over damage to one explicitly non-authoritative structure. This directly contradicted §2.5's
@@ -183,6 +186,11 @@ structure regardless of whether the caller is in some special recovery mode. Als
 does when it discards the whole index for a different reason (key rotation) - otherwise a later
 catch-up scan would wrongly believe everything up to the old mark was still indexed. Records an
 `AutoRepair("DedupIndex", ...)` so the discard is visible, not silent.
+
+**Extended in `c48c020`** to also discard `.DedupPageDescriptors` (where the old, now-untrusted
+pages lived on disk) in the same `Catch` block - the original fix above left them populated from
+the same corrupted region, which corrupted the free-space allocator on the next publish. See §5
+limitation 3.
 
 ### 2.7 Catch-up coverage: a high-water mark, not an entry-count comparison
 
@@ -300,12 +308,48 @@ truncated search) made this a standing rule for the rest of the work.
    to `DedupIndexPersistence.vb`. The root cause of *why* the index was torn in the first place
    (see §5) was not found in this pass - deliberately deferred at the user's own request, so this
    stage only closes the open-time symptom, not the underlying trigger.
+10. **`c48c020`** — Production-incident fix, first of two closing limitation 3 (§5): stage 9's
+    torn-index discard reset the in-memory entries but left `.DedupPageDescriptors` populated from
+    the same corrupted metadata region - untouched, never independently validated. The next
+    publish's "free any old dedup page not reused this time" cleanup then defer-freed whatever
+    offset/length those stale descriptors happened to claim, colliding with space the free-space
+    allocator already correctly held as free and corrupting its bookkeeping - surfacing much later,
+    confusingly, as the reported `KeyNotFoundException`. Fixed by discarding the descriptors in the
+    same `Catch` block that discards the entries. Also added a permanent O(1) self-check to
+    `FreeSpaceAllocator.Insert` (throws immediately on a would-be double-registration instead of
+    silently corrupting one of its five parallel indexes) and
+    `DiscardedDedupIndexAlsoDiscardsItsStalePageDescriptors` to `DedupIndexPersistence.vb`.
+    Reproduced and verified directly against the actual reported `Test.efs` (533MB), not a
+    synthetic repro - see the full story in `dedup-stale-key-crash` memory, third incident.
+11. **`9c267cb`** — Production-incident fix, second of two closing limitation 3 (§5) - and the
+    likely *true* original root cause, upstream of stage 10's bug: `GetActiveMetadataRanges`
+    (`Storage.vb`), the single list every free-space computation treats as "currently spoken for,"
+    listed extent pages, physical-record pages, their directories, hole-directory pages and the
+    metadata root - but never dedup index pages, since the feature shipped. A live dedup page's
+    on-disk space was therefore invisible to the per-allocation safety check, the scan-based
+    free-space rebuild (used by `DeferPublish` rollback, `Defragment`, a cancelled `ApplyOptions`
+    rewrite, and `BestFit`/`FirstFit`'s own fallback scan), and `Defragment`'s own hole/trim
+    accounting - eligible to be silently overwritten by an ordinary write, or truncated away during
+    metadata compaction, tearing a dedup page that was never actually superseded. Fixed by adding
+    dedup pages to that one function, the same treatment every other page type already had. Added
+    `Debug_GetDedupPageDescriptorRanges`/`Debug_GetFreeSpaces` and
+    `DedupIndexPagesAreNeverTreatedAsFreeSpace` to `DedupIndexPersistence.vb`. Both this stage and
+    stage 10 were found by writing a small standalone repro harness against the user's actual
+    reported file rather than guessing - see `dedup-stale-key-crash` memory, fourth incident, for
+    the full diagnostic trail (including why `DeferPublish` rollback, which prompted the
+    investigation, turned out to already be safe).
+12. **`cfd93e1`** — Characterization test, not a fix: `DedupCheckpointInteraction.vb`'s
+    `RollingBackAWrittenCheckpointLeavesDedupSafe` proves checkpoint rollback - which (unlike
+    `DeferPublish` rollback) never touches the dedup hash table at all, so a registration made
+    inside a rolled-back checkpoint becomes a permanently stale entry - stays safe anyway, because
+    `TryDeduplicateWriteAsync` always re-verifies a hit before trusting it and a rolled-back
+    record's id is never reissued. Prompted by the same investigation as stages 10-11.
 
 Testing throughout: each stage built, tested in isolation, and committed before the next began.
-403 tests pass at completion, up from the pre-feature baseline; every stage's own test file is
+412 tests pass at completion, up from the pre-feature baseline; every stage's own test file is
 still in the tree (`ExtendibleHashTable.vb`, `DedupKeyLifecycle.vb`, `DedupIndexPersistence.vb`,
-`DedupWritePath.vb`, `DedupApplyOptions.vb`, `DedupRebuild.vb`, under
-`_Tests/UnitTests/Tests/Chunked Stream/Deduplication/`).
+`DedupWritePath.vb`, `DedupApplyOptions.vb`, `DedupRebuild.vb`, `DedupCloneAndSplit.vb`,
+`DedupCheckpointInteraction.vb`, under `_Tests/UnitTests/Tests/Chunked Stream/Deduplication/`).
 
 ## 5. Known, accepted limitations
 
@@ -313,7 +357,9 @@ Limitation 1 below was identified during the initial work and closed in a follow
 kept here for the record, since the plan predates the fix. Limitation 2's root cause was later
 closed too, by a separate feature (`write-coalescing`) built for its own reasons - kept here
 because the specific EFS-level guarantee it implies has not been re-verified end-to-end. Limitation
-3 is genuinely open - a real production crash whose trigger has not yet been found:
+3 was genuinely open for a while - a real production crash whose trigger resisted both targeted
+repro attempts and a 3000-operation fuzz run - until the user re-raised it days later with a
+concrete, deterministic repro against the actual reported file, which led to it being fully closed:
 
 1. ~~**Intra-batch parallel-write dedup.**~~ **Fixed in `dc1412d`.** Two identical chunks written
    within the *same* `BuildExtentsInParallelAsync` call couldn't dedupe against each other —
@@ -375,24 +421,34 @@ because the specific EFS-level guarantee it implies has not been re-verified end
    semantics, defrag, bisection) hasn't been investigated, so it's flagged here rather than
    assumed safe.
 
-3. **OPEN, not yet reproduced — `Deduplication` + `CurrentChunkWriteCaching` together threw
-   `KeyNotFoundException` on a real upload (`C:\Windows\System32\mrt.exe`, ~250MB, through
-   `EmbeddedFileSystemSample`) and left the dedup index torn on disk (see `d45c172`, stage 9 above,
-   which fixes only the resulting open-time refusal, not this).** Deliberately deferred at the
-   user's own request rather than guessed at. Ruled out so far: the sample's exact options
-   (Lz4 compression, both features on, `MaxCryptoParallelism` etc.) with dedup-friendly repeated
-   content through the real `EmbeddedFileSystem`/`FileStreamView` API; a 3000-operation randomized
-   fuzz test (sequential appends, mid-file overwrites, explicit flushes, single-call and bursty
-   writes) - both ran clean. One real finding from the investigation: with
-   `CurrentChunkWriteCaching = True`, a plain append no longer ever reaches the parallel crypto
-   path (`BuildExtentsInParallelAsync`) regardless of size - `AppendThroughWriteCacheAsync` now
-   absorbs the whole append serially, one chunk at a time. This means the sample's own
-   `WriteBufferFlushThreshold` tuning (deliberately set above `ChunkSize * ParallelChunkCryptoMinChunks`
-   to reach the parallel path) is now a no-op for appends, though still relevant for overwrites.
-   The next root-cause attempt should focus on `AppendThroughWriteCacheAsync`'s loop,
-   `CommitPendingChunkAsync`, and their interaction with dedup's reclaim/registration - not the
-   parallel path, which write-caching bypasses entirely for appends. Needs the actual crashed file
-   (not just a description) to make further progress efficiently.
+3. ~~**OPEN, not yet reproduced — `Deduplication` + `CurrentChunkWriteCaching` together threw
+   `KeyNotFoundException` on a real upload and left the dedup index torn on disk.**~~ **FIXED
+   (`c48c020`, `9c267cb`) - two separate bugs, found by reproducing directly against the actual
+   reported `Test.efs` (533MB) once the user supplied a concrete, deterministic repro path (running
+   the browser sample's "Extended Scan" against the real file) instead of a description.** Full
+   diagnostic trail in `dedup-stale-key-crash` memory (third and fourth incidents); summary:
+   - **The likely true original cause** (`9c267cb`, §4 stage 11): `GetActiveMetadataRanges`
+     (`Storage.vb`) - the list every free-space computation treats as "currently occupied" - never
+     included dedup index pages, since the feature shipped. A live dedup page's space was therefore
+     invisible to the per-write safety check, the scan-based free-space rebuild, and `Defragment`'s
+     own accounting - eligible to be silently overwritten by an ordinary write or truncated away
+     during metadata compaction. This plausibly explains the torn index directly, on an otherwise
+     healthy archive, independent of anything dedup-specific going wrong.
+   - **A second, related bug this exposed** (`c48c020`, §4 stage 10): once an index *was* torn and
+     `d45c172` (stage 9) correctly discarded its in-memory entries on Open, it left the on-disk page
+     *descriptors* (where the old pages supposedly lived) populated from the same corrupted region,
+     unvalidated. The next publish's cleanup pass then defer-freed whatever those stale descriptors
+     claimed, colliding with space already correctly free and corrupting the free-space allocator's
+     bookkeeping - the actual mechanism behind the reported `KeyNotFoundException`.
+   - Also verified while investigating: `DeferPublish` rollback (which prompted the whole
+     re-investigation) is safe for dedup - it fully reloads via `Open`, adopting every dedup field
+     wholesale. Checkpoint rollback is *not* dedup-aware (never touches the hash table on rollback),
+     but stays safe because `TryDeduplicateWriteAsync` always re-verifies before trusting a hit and
+     a rolled-back record id is never reissued - proven by `RollingBackAWrittenCheckpointLeavesDedupSafe`
+     (§4 stage 12), not itself a bug.
+   - The earlier finding that `CurrentChunkWriteCaching` never reached the parallel crypto path for
+     appends was real but unrelated to this crash - fixed separately in `write-coalescing`'s own
+     commit `4761075` (see `write-coalescing` memory), not part of this feature's own history.
 
 ## 6. Explicitly out of scope
 

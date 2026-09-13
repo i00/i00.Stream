@@ -6,15 +6,125 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ## 2026-09-13
 
+### Dedup index pages were invisible to free-space accounting entirely — likely the true root cause of "Dedup index page MAC invalid" — FIXED
+
+Found by checking whether `DeferPublish`'s rollback path (reload-from-disk, see
+`PerformImageReload`/`AdoptLoadedImage`) handles dedup state correctly, prompted by a direct
+question about it. `AdoptLoadedImage` turned out to be fine - it adopts every dedup field,
+including `_DedupHashTable` itself, wholesale from the freshly reloaded image, so a DeferPublish
+rollback is safe for dedup. But following that trail into `AdoptLoadedImage`'s own
+`BuildFreeSpaceMapCore()` call surfaced something much more serious: `GetActiveMetadataRanges`
+(`Storage.vb`) - the single "what space is currently spoken for" list every free-space computation
+is built from - lists extent pages, physical-record pages, their directory pages, hole-directory
+pages and the metadata root, but never dedup index pages. A live dedup page's on-disk space was
+therefore invisible to `IsRangeSafeForStorage`'s per-allocation safety check, the scan-based
+free-space rebuild (`BuildFreeSpaceMapCore`, used by `DeferPublish` rollback, `Defragment`, a
+cancelled `ApplyOptions` chunk-size rewrite, and `BestFit`/`FirstFit`'s own fallback scan), and
+`Defragment`'s own hole/trim accounting - eligible to be silently handed out to an ordinary write,
+or to have the backing stream trimmed right through it during metadata compaction, tearing a dedup
+page that was never actually superseded.
+
+This is a strong root-cause candidate for the "Dedup index page MAC invalid" symptom this entire
+investigation thread started from, independent of the free-space-descriptor bug fixed below (that
+one only fires after an index is *already* torn; this one plausibly tears it in the first place).
+Fixed by adding `_DedupPageDescriptors` to `GetActiveMetadataRanges` - the exact same treatment
+every other metadata page type already had. Added `Debug_GetDedupPageDescriptorRanges` and
+`Debug_GetFreeSpaces`, and `DedupIndexPagesAreNeverTreatedAsFreeSpace` to
+`DedupIndexPersistence.vb`: persists a real dedup index page, calls the public `BuildFreeSpaceMap()`
+directly, and asserts no resulting free span overlaps a live dedup page's range. Confirmed
+non-vacuous by reverting and watching it fail with a concrete overlapping span. Re-verified end to
+end against the actual reported `Test.efs` alongside the fix below, no regression. 411/411 passing.
+
+### Root cause of the KeyNotFoundException found and fixed: discarding a torn dedup index kept its stale page descriptors — FIXED
+
+Follow-up to the entry below (the open-time tolerance fix) - this is the *original* crash's root
+cause, found by reproducing directly against the user's actual reported `Test.efs` (533MB) rather
+than blind fuzzing. Running the browser sample's "Extended Scan" (`Validate` → `Mark` →
+`Repair(IncludeDataLoss)` → `RecoverPendingFiles`) against the real file threw `KeyNotFoundException:
+The given key was not present in the dictionary.` from `FreeSpaceAllocator.RemoveSpan`/`TryAllocate`
+during an unrelated later write - a free-space bookkeeping corruption, not a dedup bug at all,
+despite always appearing alongside dedup index corruption.
+
+Root cause: the open-time fix below correctly discards a torn/MAC-invalid dedup index's *entries*,
+but `.DedupPageDescriptors` was still populated unconditionally from `Root.DedupPageDescriptors` -
+the on-disk page-location list read from the same corrupted metadata region, never independently
+validated, and just as untrustworthy as the entries it sits next to. The next publish's "free any
+old dedup page not reused this time" cleanup (`PersistPagedMetadataAsync`) then defer-freed
+whatever offset/length those stale descriptors happened to claim. On a real, churned archive that
+offset collided with space the free-space allocator already correctly held as free, silently
+corrupting its five parallel indexes (`FreeSpaceAllocator`'s `_OffsetIndex`/`_LengthByOffset`/
+`_StartByEnd`/`_OffsetsByLength`/`_DistinctLengths`) - which only surfaced much later, confusingly,
+as a `KeyNotFoundException` out of an unrelated allocation.
+
+Fixed by discarding the page descriptors in the same `Catch` block that discards the entries -
+costs leaking the old pages' physical space until a `Defragment(Rebuild)` reclaims it, the same
+trade-off already accepted for the entries themselves. Diagnosed with two temporary
+self-consistency checks in `FreeSpaceAllocator` (removed once the exact corrupted call site was
+found); one - an O(1) check in `Insert` that throws immediately if a span would overwrite an
+already-registered free span - was kept permanently, since it catches this whole class of
+double-free-shaped bug at the point of corruption instead of leaving it to surface later as a
+confusing `KeyNotFoundException` somewhere unrelated. Added `Debug_GetDedupPageDescriptorCount`
+and `DiscardedDedupIndexAlsoDiscardsItsStalePageDescriptors` to `DedupIndexPersistence.vb`: corrupts
+a real, durably-published dedup index page, reopens, confirms the page descriptor count (not just
+the entry count) drops to 0, then performs further writes and `Validate()` to confirm nothing
+throws. Confirmed non-vacuous by temporarily reverting the fix and watching the assertion fail.
+Confirmed the fix itself by re-running the exact Extended Scan repro against the exact same real
+file end to end with no exception. 410/410 passing.
+
+### CurrentChunkWriteCaching silently disabled parallel crypto/placement for large writes — FIXED
+
+Found while chasing the `KeyNotFoundException` investigation (still unresolved, see the
+deduplication-feature plan): `AppendThroughWriteCacheAsync` looped through
+`CommitPendingChunkAsync` one chunk at a time for the *entire* length of a `Write()` call, however
+large. Unlike the unconditional (non-cached) extend-in-place path - whose own remainder always
+went through the parallel-capable `BuildExtentsFromBufferAsync` - a large buffered upload with
+`CurrentChunkWriteCaching = True` never reached `BuildExtentsInParallelAsync`, or its batched
+`PlaceChunkRecordsAsync` disk-write overlap, at all - silently falling back to fully serial
+per-chunk crypto and placement regardless of `Options.MaxCryptoParallelism`/
+`MaxPhysicalWriteParallelism`. This meant the sample app's own deliberate `WriteBufferFlushThreshold`
+tuning (raised specifically to reach the parallel path for large uploads) had become a no-op the
+moment write-caching was turned on alongside it.
+
+Fixed by only ever handling the *first*, possibly-seeded chunk through the buffer directly;
+anything left over in the same call now goes through the same `BuildExtentsFromBufferAsync`
+remainder call the non-cached path already used (with `AllowGrowableTail:=True`, so the new tail
+stays open to a later small append exactly like the buffer's own seed always was) - which is what
+actually decides whether to parallelise. `AppendThroughWriteCacheAsync`'s own loop is gone
+entirely; it only ever needs to run once now, since the remainder call handles however many
+further chunks `Count` spans internally.
+
+Also replaced the hardcoded `ParallelChunkCryptoMinChunks` constant (always 8) with
+`Options.MinChunksForParallelCrypto`, a real per-stream setting - same default, same behaviour
+unless changed, but now tunable per the request that prompted this. Updated both the write-side
+and read-side parallel checks and the sample's own reference to the removed constant.
+
+Added `Debug_ParallelBuildInvocationCount` (increments each time `BuildExtentsInParallelAsync`
+actually runs) since the existing dedup tests only ever inferred "the parallel path ran" indirectly
+from record counts - which can't distinguish a serial one-chunk-at-a-time commit sequence from a
+parallel batch when both happen to produce identical final data. `LargeCachedWritesStillReachTheParallelBuildPath`
+and `MinChunksForParallelCryptoControlsTheThreshold` added to `Concurrency.vb`. 405/405 passing.
+
+**Locking/threading review, prompted by the user asking whether recent work increased locking or
+disabled threading elsewhere:** re-audited every change from this session (write-coalescing
+stages 1-3, the sparse-remainder fix, both dedup fixes) specifically for this. Found only the one
+regression above (now fixed) and one pre-existing, already-documented, deliberate trade-off worth
+restating: `Options.CurrentChunkWriteCaching` makes `Read`/`ReadAsync`/both `ToArray` overloads
+upgrade from the shared read lock to the exclusive state lock *whenever the option is on*,
+regardless of whether a write is actually in flight - necessary because a read may need to commit
+the pending buffer, which mutates shared state unsafely under a lock a concurrent reader might
+also hold. A stream that never uses the option is completely unaffected; nothing else found
+increases lock contention or disables threading.
+
 ### Deduplication index: a torn/MAC-invalid page used to refuse Open entirely — FIXED
 
 Reported live, a follow-up to the previous day's stale-key crash: after `Options.Deduplication`
 and `Options.CurrentChunkWriteCaching` were both turned on and an upload failed with
 `KeyNotFoundException`, the archive could no longer even be **opened** afterward -
 `ChunkedStream.Open` threw `CryptographicException: Dedup index page MAC invalid.` and aborted
-before anything else loaded. Root cause of the original crash not yet pinned down (deferred at
-the user's own request - a large fuzz test matching the reported settings ran clean, so it needs
-a real repro first rather than more guessing) - this entry is about the *open-time* failure only.
+before anything else loaded. Root cause of the original crash not pinned down at the time (deferred
+at the user's own request - a large fuzz test matching the reported settings ran clean, so it
+needed a real repro first rather than more guessing) - this entry is about the *open-time* failure
+only. **Root cause since found and fixed - see the entry above, dated the same day.**
 
 The dedup index is documented, repeatedly, as explicitly not the source of truth - a rebuildable
 hint the write path always verifies by decrypting and comparing before trusting (see
