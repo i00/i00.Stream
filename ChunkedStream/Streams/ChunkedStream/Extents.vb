@@ -1436,9 +1436,10 @@ Namespace Streams
         ''' to extend (see TryGetExtendableLastChunkAsync) - producing a chunk boundary one byte
         ''' earlier than a one-shot write of the same bytes would have, and shifting every later
         ''' content-defined boundary for the rest of the stream. Never applied to any segment but
-        ''' the last, or to anything built via <see cref="BuildExtentsInParallelAsync"/>'s own
-        ''' planning loop - every other segment already closed on its own terms (a content
-        ''' boundary or <see cref="ChunkedStreamOptions.ChunkSize"/>/<see cref="ChunkedStreamOptions.MaxChunkSize"/>),
+        ''' the last - forwarded as-is when this call dispatches to
+        ''' <see cref="BuildExtentsInParallelAsync"/>, which applies the identical last-segment
+        ''' check in its own planning loop. Every other segment already closed on its own terms (a
+        ''' content boundary or <see cref="ChunkedStreamOptions.ChunkSize"/>/<see cref="ChunkedStreamOptions.MaxChunkSize"/>),
         ''' exactly like a one-shot write's non-final chunks always do; only the true tail can ever
         ''' be ambiguous between "closed" and "merely out of data for now".
         ''' </param>
@@ -1450,7 +1451,7 @@ Namespace Streams
                                                           Optional AllowGrowableTail As Boolean = False) As Task(Of List(Of ExtentIndexEntry))
 
             If ShouldBuildChunksInParallel(Count) Then
-                Return Await BuildExtentsInParallelAsync(Input, InputOffset, Count, RunAsync, CancellationToken).ConfigureAwait(False)
+                Return Await BuildExtentsInParallelAsync(Input, InputOffset, Count, RunAsync, CancellationToken, AllowGrowableTail).ConfigureAwait(False)
             End If
 
             Dim Result As New List(Of ExtentIndexEntry)()
@@ -1593,11 +1594,17 @@ Namespace Streams
         ' allocation, physical-record table and ordinal map are only ever touched from one
         ' thread. Each worker takes its own ChunkCipher.
         '
+        ' AllowGrowableTail mirrors BuildExtentsFromBufferAsync's own parameter of the same name
+        ' (see its doc comment) - true only when the caller may still append to the very last
+        ' segment produced later on. Applied only to the last plan in Plans, exactly as the serial
+        ' path applies it only to its own last segment.
+        '
         Private Async Function BuildExtentsInParallelAsync(Input As Byte(),
                                                           InputOffset As Integer,
                                                           Count As Integer,
                                                           RunAsync As Boolean,
-                                                          CancellationToken As Threading.CancellationToken) As Task(Of List(Of ExtentIndexEntry))
+                                                          CancellationToken As Threading.CancellationToken,
+                                                          Optional AllowGrowableTail As Boolean = False) As Task(Of List(Of ExtentIndexEntry))
 
             _Debug_ParallelBuildInvocationCount += 1
 
@@ -1630,9 +1637,16 @@ Namespace Streams
                 Dim Segment(SegmentLength - 1) As Byte
                 Buffer.BlockCopy(Input, CurrentInputOffset, Segment, 0, SegmentLength)
 
+                ' Same last-segment carve-out BuildExtentsFromBufferAsync's serial path applies -
+                ' see AllowGrowableTail's doc comment there. A tail that hasn't genuinely closed
+                ' must not freeze as a sparse extent, since a sparse extent can never itself extend.
+                Dim IsGrowableTail = AllowGrowableTail AndAlso
+                                     SegmentLength = Remaining AndAlso
+                                     IsChunkClosedByCdcBoundary(Segment, SegmentLength) = False
+
                 Dim Plan As New ChunkBuildPlan With {
                     .Segment = Segment,
-                    .IsSparse = StoreSparse AndAlso IsAllZero(Segment, SegmentLength)}
+                    .IsSparse = IsGrowableTail = False AndAlso StoreSparse AndAlso IsAllZero(Segment, SegmentLength)}
 
                 If Plan.IsSparse = False Then
 

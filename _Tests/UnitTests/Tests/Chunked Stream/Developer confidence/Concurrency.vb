@@ -1205,6 +1205,78 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' BuildExtentsFromBufferAsync's AllowGrowableTail carve-out (see its doc comment) used
+            ''' to apply only to its own serial planning loop - BuildExtentsInParallelAsync silently
+            ''' dropped it, so a write large enough to dispatch straight to the parallel path could
+            ''' still freeze a not-yet-closed trailing chunk as a permanent sparse extent the moment
+            ''' that tail happened to be all zero. A sparse extent is never itself eligible to
+            ''' extend (TryGetExtendableLastChunkAsync), so a later small append would have started
+            ''' a brand new record right next to it instead of coalescing into it - exactly the kind
+            ''' of chunk-boundary drift write coalescing exists to prevent. Fixed by forwarding
+            ''' AllowGrowableTail into BuildExtentsInParallelAsync and applying the identical
+            ''' last-segment check there.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ParallelBuildKeepsAGrowableTailOpenInsteadOfFreezingItSparse()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.ChunkSize = 64
+                        Cs.Options.ChunkSizeVariance = 0
+                        Cs.Options.MaxCryptoParallelism = 4
+                        Cs.Options.MinChunksForParallelCrypto = 1
+
+                        ' 3 full chunks of random data plus a trailing 10 zero bytes that hasn't
+                        ' closed (10 < ChunkSize) - the exact tail AllowGrowableTail protects. Total
+                        ' size (202 bytes) is above ChunkSize * MinChunksForParallelCrypto (64), so
+                        ' this dispatches straight to BuildExtentsInParallelAsync.
+                        Dim RandomPart = GenerateRandomData(64 * 3, 601)
+                        Dim Data1(RandomPart.Length + 10 - 1) As Byte
+                        Buffer.BlockCopy(RandomPart, 0, Data1, 0, RandomPart.Length)
+
+                        Cs.Write(0, Data1)
+
+                        AssertTrue(Cs.Debug_ParallelBuildInvocationCount() > 0, "Sanity check: this write should have reached the parallel chunk-build path.")
+                        AssertEqual(4, Cs.Debug_GetExtentCount(), "Sanity check: 3 full chunks plus one still-open zero tail.")
+
+                        ' Append a few more, non-zero bytes right after the open zero tail.
+                        Dim Data2 = GenerateRandomData(5, 602)
+                        Cs.Write(CLng(Data1.Length), Data2)
+
+                        AssertEqual(4, Cs.Debug_GetExtentCount(), "The zero tail should still have been open to grow into, not frozen as a sparse extent by the parallel path.")
+
+                        Dim FullData(Data1.Length + Data2.Length - 1) As Byte
+                        Buffer.BlockCopy(Data1, 0, FullData, 0, Data1.Length)
+                        Buffer.BlockCopy(Data2, 0, FullData, Data1.Length, Data2.Length)
+
+                        Using MsOneShot As New MemoryStream()
+                            Using CsOneShot = ChunkedStream.Open(MsOneShot)
+
+                                CsOneShot.Options.ChunkSize = 64
+                                CsOneShot.Options.ChunkSizeVariance = 0
+
+                                CsOneShot.Write(0, FullData)
+
+                                AssertEqual(CsOneShot.Debug_GetExtentCount(), Cs.Debug_GetExtentCount(), "The two-call growable-tail write should chunk identically to a one-shot write.")
+
+                                For Index = 0 To Cs.Debug_GetExtentCount() - 1
+                                    AssertEqual(CsOneShot.Debug_GetExtentLength(Index), Cs.Debug_GetExtentLength(Index), $"Extent {Index} length should match a one-shot write.")
+                                Next
+
+                            End Using
+                        End Using
+
+                        Dim ReadBack(FullData.Length - 1) As Byte
+                        Cs.Read(0, ReadBack)
+                        AssertBytesEqual(FullData, ReadBack, "The two-call write should read back correctly.")
+
+                    End Using
+                End Using
+
+            End Sub
+
         End Class
 
     End Class
