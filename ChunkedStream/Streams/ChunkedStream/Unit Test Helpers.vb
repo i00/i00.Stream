@@ -106,6 +106,26 @@
 
         End Function
 
+        ''' <summary>Every dedup index page's current (Offset, Length) on the backing store.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_GetDedupPageDescriptorRanges() As List(Of (Offset As Long, Length As Long))
+
+            Return _DedupPageDescriptors.Values.
+                Select(Function(d) (Offset:=d.Offset, Length:=CLng(d.Length))).
+                ToList()
+
+        End Function
+
+        ''' <summary>Every span the free-space allocator currently believes is free, as (Offset, Length) pairs.</summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_GetFreeSpaces() As List(Of (Offset As Long, Length As Long))
+
+            Return _FreeSpaces.CloneSpaces().
+                Select(Function(pair) (Offset:=pair.Key, Length:=pair.Value)).
+                ToList()
+
+        End Function
+
         <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
         Friend Sub Debug_CorruptPhysicalRecordMetadataRefCount(RecordId As Long,
                                                                NewRefCount As Integer)

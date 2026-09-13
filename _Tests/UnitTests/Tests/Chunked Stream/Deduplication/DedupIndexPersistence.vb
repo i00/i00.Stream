@@ -310,6 +310,63 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' GetActiveMetadataRanges (Storage.vb) - the "what space is currently spoken for"
+            ''' list every free-space computation (BuildFreeSpaceMapCore's scan-based rebuild,
+            ''' IsRangeSafeForStorage's per-allocation safety check, and Defragment's own hole/
+            ''' trim accounting) is built from - covered extent pages, physical-record pages,
+            ''' their directory pages, hole-directory pages and the metadata root, but never
+            ''' dedup index pages. A live dedup page's on-disk space was therefore invisible to
+            ''' every one of those - eligible to be handed out as "free" to an ordinary write, or
+            ''' to have the backing stream trimmed right through it during a metadata compaction -
+            ''' silently tearing a dedup page that was never actually superseded. This is the most
+            ''' likely genuine root cause of "Dedup index page MAC invalid" corruption reported in
+            ''' production (see dedup-stale-key-crash memory), not just a downstream consequence
+            ''' of it. Fixed by adding _DedupPageDescriptors to GetActiveMetadataRanges, the same
+            ''' treatment every other metadata page type already had.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DedupIndexPagesAreNeverTreatedAsFreeSpace()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.Deduplication = True
+
+                        For Index = 0 To 49
+                            Cs.Write(CLng(Index) * 1000, GenerateRandomData(64, 300 + Index))
+                        Next
+
+                        Cs.Flush()
+
+                        Dim DedupRanges = Cs.Debug_GetDedupPageDescriptorRanges()
+                        AssertTrue(DedupRanges.Count > 0, "Sanity check: at least one dedup index page should have been persisted.")
+
+                        ' The exact scan-based rebuild GetActiveMetadataRanges' omission affected -
+                        ' reachable directly via the public API, not just indirectly through a
+                        ' DeferPublish rollback or BestFit/FirstFit fallback.
+                        Cs.BuildFreeSpaceMap()
+
+                        Dim FreeSpans = Cs.Debug_GetFreeSpaces()
+
+                        For Each DedupRange In DedupRanges
+                            For Each FreeSpan In FreeSpans
+
+                                Dim Overlaps =
+                                    FreeSpan.Offset < DedupRange.Offset + DedupRange.Length AndAlso
+                                    DedupRange.Offset < FreeSpan.Offset + FreeSpan.Length
+
+                                AssertFalse(Overlaps,
+                                    $"Free span [{FreeSpan.Offset}, {FreeSpan.Offset + FreeSpan.Length}) must not overlap live dedup index page [{DedupRange.Offset}, {DedupRange.Offset + DedupRange.Length}) - it would be handed out to an ordinary write, silently tearing the dedup page.")
+
+                            Next
+                        Next
+
+                    End Using
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

@@ -351,6 +351,12 @@ Namespace Streams
                 End If
             Next
 
+            For Each Descriptor In _DedupPageDescriptors.Values
+                If Descriptor.Offset > 0 AndAlso Descriptor.Length > 0 Then
+                    Result.Add(Tuple.Create(Descriptor.Offset, Descriptor.Offset + CLng(Descriptor.Length)))
+                End If
+            Next
+
             If _MetadataRootOffset > 0 AndAlso _MetadataRootLength > 0 Then
                 Result.Add(Tuple.Create(_MetadataRootOffset, _MetadataRootOffset + CLng(_MetadataRootLength)))
             End If
