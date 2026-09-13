@@ -106,6 +106,7 @@
     <Compile Include="Tests\Chunked Stream\Correctness and survival\Recovery.vb" />
     <Compile Include="Tests\Chunked Stream\Correctness and survival\Validation.vb" />
     <Compile Include="Tests\Chunked Stream\Deduplication\DedupApplyOptions.vb" />
+    <Compile Include="Tests\Chunked Stream\Deduplication\DedupCheckpointInteraction.vb" />
     <Compile Include="Tests\Chunked Stream\Deduplication\DedupCloneAndSplit.vb" />
     <Compile Include="Tests\Chunked Stream\Deduplication\DedupIndexPersistence.vb" />
     <Compile Include="Tests\Chunked Stream\Deduplication\DedupKeyLifecycle.vb" />
