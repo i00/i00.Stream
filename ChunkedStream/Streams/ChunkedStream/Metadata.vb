@@ -1228,6 +1228,7 @@ Namespace Streams
             ' structure is damaged.
             '
             Dim DedupEntries As List(Of (Key As Byte(), Value As Long))
+            Dim DedupPageDescriptorsRead As List(Of MetadataPageDescriptor) = Root.DedupPageDescriptors
 
             Try
 
@@ -1236,6 +1237,22 @@ Namespace Streams
             Catch ex As Exception When TypeOf ex Is CryptographicException OrElse TypeOf ex Is InvalidDataException
 
                 DedupEntries = New List(Of (Key As Byte(), Value As Long))()
+
+                '
+                ' The descriptors themselves come from the same metadata root region as the
+                ' page content that just failed to read - not independently validated, so they
+                ' are exactly as untrustworthy as the entries. Discarding the entries but
+                ' keeping the descriptors would let the very next publish's "free any old dedup
+                ' page not reused this time" cleanup (see PersistPagedMetadataAsync) defer-free
+                ' whatever offsets these torn descriptors happen to claim - potentially space
+                ' that a torn write already left free, already reused, or that never belonged to
+                ' a dedup page at all - corrupting the free-space allocator's bookkeeping instead
+                ' of actually freeing anything real. Discarding both keeps this recovery
+                ' unconditionally safe at the cost of leaking the old pages' physical space until
+                ' a Defragment(Rebuild) reclaims it - the same trade-off already accepted for the
+                ' entries themselves.
+                '
+                DedupPageDescriptorsRead = New List(Of MetadataPageDescriptor)()
 
                 Repairs.Add(New AutoRepair("DedupIndex", 1, 0,
                     $"the deduplication index could not be read ({ex.Message}) and was discarded - " &
@@ -1292,7 +1309,7 @@ Namespace Streams
                 .PhysicalRecordDirectoryPageDescriptors = Root.PhysicalRecordDirectoryPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
                 .HoleDirectoryPageDescriptors = Root.HoleDirectoryPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
                 .HoleRecords = HoleRecords,
-                .DedupPageDescriptors = Root.DedupPageDescriptors.ToDictionary(Function(descriptor) descriptor.PageNumber),
+                .DedupPageDescriptors = DedupPageDescriptorsRead.ToDictionary(Function(descriptor) descriptor.PageNumber),
                 .DedupEntries = DedupEntries
             }
 

@@ -49,7 +49,26 @@ Namespace Streams
             Private ReadOnly _OffsetsByLength As New Dictionary(Of Long, SortedSet(Of Long))()
             Private ReadOnly _DistinctLengths As New SortedSet(Of Long)()
 
+            '
+            ' A genuinely free span can never already be registered at its own start offset -
+            ' Add's boundary-tag merges only ever combine with a neighbour that touches at an
+            ' exact edge (_StartByEnd/_LengthByOffset lookups just above this call), never with
+            ' one that already occupies the incoming span's own start. Reaching this with Offset
+            ' already a key means some caller freed (or deferred freeing) a range that overlaps
+            ' space already marked free - a double-free-shaped bug upstream, not a legitimate
+            ' state - and silently overwriting the old entry would corrupt every other index in
+            ' this class in a way that only surfaces later, confusingly, as a KeyNotFoundException
+            ' out of TryAllocate/RemoveSpan for an unrelated allocation. Catching it here, right
+            ' at the point of corruption, is an O(1) dictionary lookup - cheap next to the
+            ' allocation/merge work Insert already does.
+            '
             Private Sub Insert(Offset As Long, Length As Long)
+
+                Dim ExistingLength As Long
+                If _LengthByOffset.TryGetValue(Offset, ExistingLength) Then
+                    Throw New InvalidDataException(
+                        $"Free-space bookkeeping is inconsistent: a span of length {Length} was about to be registered at offset {Offset}, which already holds a free span of length {ExistingLength}.")
+                End If
 
                 _OffsetIndex.Add(Offset)
                 _LengthByOffset(Offset) = Length
@@ -475,6 +494,7 @@ Namespace Streams
         Private Sub DeferFreeSpace(Offset As Long, Length As Long)
             If Offset < DataStartOffset Then Return
             If Length <= 0 Then Return
+
             _DeferredFreeRanges.Add(New DeferredFreeRange With {
                 .Offset = Offset,
                 .Length = Length,

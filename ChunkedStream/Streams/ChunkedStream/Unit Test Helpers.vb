@@ -91,6 +91,21 @@
 
         End Function
 
+        ''' <summary>
+        ''' Number of dedup index pages this stream currently believes are its own, on-disk,
+        ''' still-live pages - the set a later publish will defer-free anything not reused from.
+        ''' A discarded (torn/MAC-invalid) dedup index read on Open must leave this at 0, exactly
+        ''' like the entries themselves: keeping a stale, unvalidated descriptor here would let a
+        ''' later publish defer-free whatever offset it happens to claim, regardless of whether
+        ''' that offset is still real - see the "DedupIndex" AutoRepair's own remarks.
+        ''' </summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Function Debug_GetDedupPageDescriptorCount() As Integer
+
+            Return _DedupPageDescriptors.Count
+
+        End Function
+
         <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
         Friend Sub Debug_CorruptPhysicalRecordMetadataRefCount(RecordId As Long,
                                                                NewRefCount As Integer)

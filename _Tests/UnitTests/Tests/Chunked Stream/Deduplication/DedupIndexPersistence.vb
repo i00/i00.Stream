@@ -250,6 +250,66 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' A follow-up production incident: discarding a torn/MAC-invalid dedup index on
+            ''' Open reset the in-memory entries but kept the on-disk page *descriptors* Root
+            ''' read back - untouched, unvalidated leftovers from the very same corrupted region.
+            ''' The next publish's "free any old dedup page not reused this time" cleanup
+            ''' (PersistPagedMetadataAsync) would then defer-free whatever offset/length those
+            ''' stale descriptors happened to claim, even though nothing about them was ever
+            ''' confirmed real - on a real, churned archive this collided with space the free-space
+            ''' allocator already correctly considered free, corrupting its bookkeeping (a
+            ''' KeyNotFoundException out of an unrelated later allocation) rather than freeing
+            ''' anything. Fixed by discarding the descriptors in the same Catch block that
+            ''' discards the entries - both are equally untrustworthy once the read has failed.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub DiscardedDedupIndexAlsoDiscardsItsStalePageDescriptors()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Cs.Options.Deduplication = True
+
+                        ' Enough distinct dedup-registered content to force at least one real,
+                        ' durably published dedup index page with a real on-disk descriptor.
+                        For Index = 0 To 49
+                            Cs.Write(CLng(Index) * 1000, GenerateRandomData(64, 100 + Index))
+                        Next
+
+                        Cs.Flush()
+
+                        AssertTrue(Cs.Debug_GetDedupPageDescriptorCount() > 0, "Sanity check: at least one dedup index page should have been persisted.")
+
+                        Cs.Debug_CorruptFirstDedupIndexPage()
+
+                    End Using
+
+                    Ms.Position = 0
+
+                    Using Reopened = ChunkedStream.Open(Ms)
+
+                        AssertTrue(Reopened.AutoRepairs.Any(Function(r) r.Field = "DedupIndex"), "The discard should be recorded as an AutoRepair.")
+                        AssertEqual(0, Reopened.Debug_DedupIndexCount(), "A corrupt dedup index should be discarded on open.")
+                        AssertEqual(0, Reopened.Debug_GetDedupPageDescriptorCount(), "The stale page descriptors must be discarded along with the entries - keeping them would let the next publish defer-free an unvalidated offset/length pair.")
+
+                        ' Enough further churn (fresh writes, each publishing) to exercise several
+                        ' more metadata publishes - each one runs the "free any old dedup page not
+                        ' reused this time" cleanup this bug lived in. Must not throw.
+                        Reopened.Options.Deduplication = True
+                        For Index = 0 To 19
+                            Reopened.Write(CLng(Index) * 1000, GenerateRandomData(64, 200 + Index))
+                        Next
+
+                        Reopened.Validate().ThrowIfErrors()
+
+                    End Using
+
+                End Using
+
+            End Sub
+
         End Class
 
     End Class
