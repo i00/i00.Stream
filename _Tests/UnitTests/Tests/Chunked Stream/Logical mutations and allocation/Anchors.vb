@@ -362,6 +362,62 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' An anchor only ever sits at the very start of whichever extent currently holds it
+            ''' (Anchor.Offset literally is that extent's LogicalOffset) - so SplitExtentAt, used
+            ''' internally by Insert to carve out room for the new data, can never cut through an
+            ''' anchor's own position: it always splits strictly inside an extent, and an anchored
+            ''' extent's anchor is always already at that extent's own start, hence always on the
+            ''' left (kept) side of any split of it. This inserts well past an existing anchor but
+            ''' still inside the same underlying extent, forcing a split of the anchored extent
+            ''' itself for placement purposes - unrelated to the anchor's own offset - and confirms
+            ''' the anchor is completely undisturbed by it.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub InsertSplittingAnAnchoredExtentFurtherAlongLeavesTheAnchorAlone()
+
+                Using Ms As New MemoryStream()
+
+                    Using Cs = ChunkedStream.Open(Ms)
+
+                        Dim OriginalData = GeneratePatternData(4096, 1)
+                        Cs.Write(0, OriginalData)
+
+                        ' Splits the one big extent into [0,500) unanchored and [500,4096)
+                        ' anchored - the anchor now sits at the very start of that second extent.
+                        Dim Anchor = Cs.CreateAnchor(500)
+
+                        Dim InsertedData = GeneratePatternData(300, 2)
+
+                        ' 700 falls inside the anchored [500,4096) extent, well after its own
+                        ' start - splitting it here for insertion has nothing to do with the
+                        ' anchor's own position.
+                        Cs.Insert(
+                            700,
+                            InsertedData,
+                            ChunkedStream.AnchorActionsAtLogicalOffset.TransformAway)
+
+                        AssertEqual(
+                            500L,
+                            Anchor.Offset,
+                            "An anchor elsewhere in a split extent must be unaffected by an unrelated insert splitting that same extent further along.")
+
+                        Dim ReadBack(CInt(Cs.Length) - 1) As Byte
+                        Cs.Read(0, ReadBack)
+
+                        Dim Expected(CInt(Cs.Length) - 1) As Byte
+                        Buffer.BlockCopy(OriginalData, 0, Expected, 0, 700)
+                        Buffer.BlockCopy(InsertedData, 0, Expected, 700, InsertedData.Length)
+                        Buffer.BlockCopy(OriginalData, 700, Expected, 700 + InsertedData.Length, OriginalData.Length - 700)
+
+                        AssertBytesEqual(Expected, ReadBack, "Data before and after the split/insertion point should be intact, with the new data spliced in at offset 700.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
 #End Region
 
 #Region "Remove behaviour"
