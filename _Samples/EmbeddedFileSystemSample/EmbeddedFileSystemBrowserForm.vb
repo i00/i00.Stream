@@ -418,6 +418,15 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private ReadOnly _SearchResults As New List(Of SearchHit)()
     Private ReadOnly _SearchItemInfo As New Dictionary(Of ListViewItem, SearchHit)()
     Private ReadOnly _PathColumn As New ColumnHeader() With {.Text = "Path", .Width = 260}
+
+    ''' <summary>
+    ''' Backs lvFiles in virtual mode: the single source of truth for every row currently shown. The
+    ''' same <see cref="ListViewItem"/> instances are handed back from <see cref="lvFiles_RetrieveVirtualItem"/>
+    ''' every time, so ordinary mutations (.Text, .Tag, .SubItems, .ForeColor) keep working exactly as
+    ''' they did when items lived in lvFiles.Items - only selection/focus (owned by the native control,
+    ''' keyed by row index) need the index-based helpers below.
+    ''' </summary>
+    Private ReadOnly _DisplayedItems As New List(Of ListViewItem)()
     'Private WithEvents _SearchTimer As New System.Windows.Forms.Timer() With {.Interval = 400}
     Private _HistoryIndex As Integer = -1
     Private _ApplyingLocation As Boolean
@@ -458,6 +467,13 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         lvFiles.ListViewItemSorter = _ListSorter
         lvFiles.LabelEdit = True
 
+        ' Virtual mode: lvFiles.Items is never touched again - rows come from _DisplayedItems via
+        ' lvFiles_RetrieveVirtualItem. This is what keeps large result sets (eg. searching a big
+        ' archive for *.exe) fast - the native control only ever materialises the rows it paints,
+        ' instead of holding a real ListViewItem per match. Must be set before anything populates
+        ' the list, and Tile view (unsupported in virtual mode) is guarded in SetFileListView.
+        lvFiles.VirtualMode = True
+
         ' The menus (defined in the designer) are shown explicitly from the MouseDown handlers.
         lvFiles.ContextMenuStrip = Nothing
         tvFolders.ContextMenuStrip = Nothing
@@ -486,6 +502,107 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Return _FileSystem
         End Get
     End Property
+
+    ' ===================================================================================================
+    ' Virtual-mode backing store for lvFiles
+    ' ===================================================================================================
+    '
+    ' lvFiles.Items is unusable once VirtualMode is on (Add/Insert/Remove/Clear all throw); the control
+    ' instead asks for row data on demand via RetrieveVirtualItem, and _DisplayedItems is what answers
+    ' that. Handing back the SAME ListViewItem instance every time (rather than building a fresh one per
+    ' request) is what makes ordinary item mutation continue to work unchanged elsewhere in this file:
+    ' the first time the control retrieves a row it links that exact object to itself (its Text/Tag/
+    ' SubItems/ForeColor already match what the code set), so later code can still just write
+    ' Item.Text = "..." and have it stick.
+    '
+    ' Selection and focus are the one thing that does NOT ride along for free - those are native state
+    ' keyed by row index, not by our objects, so anything that used to loop "For Each Item In lvFiles.Items"
+    ' and flip .Selected/.Focused/.Bounds has to go through SelectedIndices / lvFiles.Items(i) / RedrawItems
+    ' instead (see ApplySelectionByAnchor, SortDisplayedItems, SelectListItemByName, InvalidateEntry,
+    ' InvalidateThumbnailItem).
+
+    Private Sub lvFiles_RetrieveVirtualItem(Sender As Object, EventArgs As RetrieveVirtualItemEventArgs) Handles lvFiles.RetrieveVirtualItem
+        EventArgs.Item = _DisplayedItems(EventArgs.ItemIndex)
+    End Sub
+
+    ''' <summary>Replaces every row shown in the file list in one repaint pass (folder navigation, a fresh search).</summary>
+    Private Sub SetDisplayedItems(NewItems As IEnumerable(Of ListViewItem))
+        lvFiles.BeginUpdate()
+        Try
+            ' Drop to 0 first so the native control forgets per-row selection state before the same
+            ' indices are reused for unrelated items, rather than a stale selection reappearing on
+            ' whatever happens to land at the same row.
+            lvFiles.VirtualListSize = 0
+            _DisplayedItems.Clear()
+            _DisplayedItems.AddRange(NewItems)
+            lvFiles.VirtualListSize = _DisplayedItems.Count
+        Finally
+            lvFiles.EndUpdate()
+        End Try
+    End Sub
+
+    ''' <summary>Appends rows without disturbing the existing selection - used for incremental search batches.</summary>
+    Private Sub AppendDisplayedItems(NewItems As IEnumerable(Of ListViewItem))
+        lvFiles.BeginUpdate()
+        Try
+            _DisplayedItems.AddRange(NewItems)
+            lvFiles.VirtualListSize = _DisplayedItems.Count
+        Finally
+            lvFiles.EndUpdate()
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Re-sorts the displayed rows in place using <see cref="_ListSorter"/>, restoring the selection and
+    ''' focus by anchor ID afterwards. A resort reorders the backing list but the native control's
+    ''' selection is tracked by row index, so without this the selection would silently jump to whatever
+    ''' ends up at the same index instead of following the item.
+    ''' </summary>
+    Private Sub SortDisplayedItems()
+        Dim SelectedAnchors = lvFiles.SelectedIndices.
+                                      Cast(Of Integer)().
+                                      Select(Function(i) AnchorOf(_DisplayedItems(i))).
+                                      Where(Function(a) a <> 0).
+                                      ToList()
+        Dim FocusedAnchor = If(lvFiles.FocusedItem IsNot Nothing, AnchorOf(lvFiles.FocusedItem), 0L)
+
+        lvFiles.BeginUpdate()
+        Try
+            _DisplayedItems.Sort(Function(X, Y) _ListSorter.Compare(X, Y))
+            ApplySelectionByAnchor(SelectedAnchors, FocusedAnchor)
+        Finally
+            lvFiles.EndUpdate()
+        End Try
+        lvFiles.Invalidate()
+    End Sub
+
+    ''' <summary>
+    ''' Selects/focuses displayed rows by anchor ID - the only identity that survives a resort or reload
+    ''' in virtual mode, since native selection is tracked by row index.
+    ''' </summary>
+    Private Sub ApplySelectionByAnchor(SelectedAnchors As IEnumerable(Of Long), FocusedAnchor As Long)
+        Dim Wanted As New HashSet(Of Long)(If(SelectedAnchors, Enumerable.Empty(Of Long)()))
+        lvFiles.SelectedIndices.Clear()
+        For Index = 0 To _DisplayedItems.Count - 1
+            Dim Anchor = AnchorOf(_DisplayedItems(Index))
+            If Anchor = 0 Then Continue For
+            If Wanted.Contains(Anchor) Then lvFiles.SelectedIndices.Add(Index)
+            If Anchor = FocusedAnchor Then lvFiles.Items(Index).Focused = True
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' The displayed rows currently selected. <see cref="ListView.SelectedItems"/> itself throws
+    ''' ("Cannot access the selected items collection when the ListView is in virtual mode") once
+    ''' VirtualMode is on - SelectedIndices is the only selection collection still readable, so every
+    ''' former SelectedItems read goes through this instead.
+    ''' </summary>
+    Private Function GetSelectedDisplayedItems() As List(Of ListViewItem)
+        Return lvFiles.SelectedIndices.
+                       Cast(Of Integer)().
+                       Select(Function(Index) _DisplayedItems(Index)).
+                       ToList()
+    End Function
 
     Public Sub RefreshFileSystemView()
 
@@ -941,11 +1058,11 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
     ''' <summary>Updates the file-list row for an entry after a rename, if that folder's contents are shown.</summary>
     Private Sub UpdateListItemName(ChildAnchorId As Long, NewName As String)
-        For Each Item As ListViewItem In lvFiles.Items
+        For Each Item In _DisplayedItems
             Dim Entry = TryCast(Item.Tag, EmbeddedFileSystem.ContentListEntry)
             If Entry IsNot Nothing AndAlso Entry.ChildAnchorId = ChildAnchorId Then
                 Item.Text = NewName
-                lvFiles.Sort()
+                SortDisplayedItems()
                 Return
             End If
         Next
@@ -954,9 +1071,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     ' ---- File list label editing -------------------------------------------------------------------
 
     Private Sub RenameSelectedListEntry(Sender As Object, EventArgs As EventArgs) Handles tsiRename.Click
-        If lvFiles.SelectedItems.Count <> 1 Then Return
+        If lvFiles.SelectedIndices.Count <> 1 Then Return
         lvFiles.Select()
-        lvFiles.SelectedItems(0).BeginEdit()
+        lvFiles.Items(lvFiles.SelectedIndices(0)).BeginEdit()
     End Sub
 
     Private Sub lvFiles_BeforeLabelEdit(Sender As Object, EventArgs As LabelEditEventArgs) Handles lvFiles.BeforeLabelEdit
@@ -1004,7 +1121,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         ' The list keeps the accepted label; just re-sort so it lands in the right place.
         lvFiles.BeginInvoke(Sub()
                                 Item.Text = NewName
-                                lvFiles.Sort()
+                                SortDisplayedItems()
                             End Sub)
     End Sub
 
@@ -1022,26 +1139,19 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                                   OrderBy(Function(x) x.Name, StringComparer.OrdinalIgnoreCase).
                                   ToList()
 
-        lvFiles.BeginUpdate()
-        Try
-            lvFiles.ListViewItemSorter = Nothing
-            lvFiles.Items.Clear()
-            _SearchItemInfo.Clear()
+        Dim NewItems As New List(Of ListViewItem)(Entries.Count)
+        For Each entry In Entries
+            Dim IsDirectory = entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory
+            Dim Item = New ListViewItem(entry.Name) With {.Tag = entry}
+            Item.SubItems.Add(If(IsDirectory, String.Empty, FormatByteLength(entry.LengthOfDataAtEntry)))
+            Item.SubItems.Add(GetEntryStateText(entry.EntryType))
+            If entry.EntryType = EmbeddedFileSystem.EntryTypes.PendingFile Then Item.ForeColor = Drawing.BlendColor(lvFiles.ForeColor, Color.Red)
+            NewItems.Add(Item)
+        Next
 
-            For Each entry In Entries
-                Dim IsDirectory = entry.EntryType = EmbeddedFileSystem.EntryTypes.Directory
-                Dim Item = New ListViewItem(entry.Name) With {.Tag = entry}
-                Item.SubItems.Add(If(IsDirectory, String.Empty, FormatByteLength(entry.LengthOfDataAtEntry)))
-                Item.SubItems.Add(GetEntryStateText(entry.EntryType))
-                If entry.EntryType = EmbeddedFileSystem.EntryTypes.PendingFile Then Item.ForeColor = Drawing.BlendColor(lvFiles.ForeColor, Color.Red)
-                lvFiles.Items.Add(Item)
-            Next
-
-            lvFiles.ListViewItemSorter = _ListSorter
-            lvFiles.Sort()
-        Finally
-            lvFiles.EndUpdate()
-        End Try
+        _SearchItemInfo.Clear()
+        SetDisplayedItems(NewItems)
+        SortDisplayedItems()
 
         UpdateStatus()
     End Sub
@@ -1117,10 +1227,10 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub InvalidateEntry(AnchorId As Long)
-        For Each item As ListViewItem In lvFiles.Items
-            Dim Entry = TryCast(item.Tag, EmbeddedFileSystem.ContentListEntry)
+        For Index = 0 To _DisplayedItems.Count - 1
+            Dim Entry = TryCast(_DisplayedItems(Index).Tag, EmbeddedFileSystem.ContentListEntry)
             If Entry IsNot Nothing AndAlso Entry.ChildAnchorId = AnchorId Then
-                lvFiles.Invalidate(item.Bounds)
+                lvFiles.RedrawItems(Index, Index, True)
                 Return
             End If
         Next
@@ -1134,18 +1244,18 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub UpdateStatus()
-        Dim SelectedCount = lvFiles.SelectedItems.Count
+        Dim SelectedCount = lvFiles.SelectedIndices.Count
         Dim SelectionText = If(SelectedCount = 0, String.Empty, $", {SelectedCount:N0} selected")
 
         If _SearchActive Then
             Dim ProgressText = If(_SearchGeneration = _CompletedSearchGeneration, String.Empty, " (searching...)")
-            StatusLabel.Text = $"Search for '{_CurrentQueryText}': {lvFiles.Items.Count:N0} result{If(lvFiles.Items.Count = 1, "", "s")}{ProgressText}{SelectionText}"
+            StatusLabel.Text = $"Search for '{_CurrentQueryText}': {_DisplayedItems.Count:N0} result{If(_DisplayedItems.Count = 1, "", "s")}{ProgressText}{SelectionText}"
             ' Incremental result batches update this caption faster than the ToolStrip repaints
             ' itself, so force it while a search is on screen.
             StatusLabel.Owner?.Refresh()
         Else
             Dim DirectoryName = If(tvFolders.SelectedNode Is Nothing, "Root", tvFolders.SelectedNode.Text)
-            StatusLabel.Text = $"{DirectoryName}: {lvFiles.Items.Count:N0} items{SelectionText}"
+            StatusLabel.Text = $"{DirectoryName}: {_DisplayedItems.Count:N0} items{SelectionText}"
         End If
     End Sub
 
@@ -1187,8 +1297,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Function
 
     Private Function GetSelectedEntries() As List(Of EmbeddedFileSystem.ContentListEntry)
-        Return lvFiles.SelectedItems.
-                       Cast(Of ListViewItem)().
+        Return GetSelectedDisplayedItems().
                        Select(Function(x) TryCast(x.Tag, EmbeddedFileSystem.ContentListEntry)).
                        Where(Function(x) x IsNot Nothing).
                        ToList()
@@ -1308,8 +1417,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private Sub CaptureCurrentViewState()
         If _HistoryIndex < 0 OrElse _HistoryIndex >= _History.Count Then Return
         Dim Entry = _History(_HistoryIndex)
-        Entry.SelectedAnchors = lvFiles.SelectedItems.
-                                        Cast(Of ListViewItem)().
+        Entry.SelectedAnchors = GetSelectedDisplayedItems().
                                         Select(AddressOf AnchorOf).
                                         Where(Function(anchor) anchor <> 0).
                                         ToList()
@@ -1327,12 +1435,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     ''' repopulated the file list.</summary>
     Private Sub RestoreViewState(Entry As AddressHistoryEntry)
         If Entry.SelectedAnchors IsNot Nothing Then
-            For Each Item As ListViewItem In lvFiles.Items
-                Dim Anchor = AnchorOf(Item)
-                If Anchor = 0 Then Continue For
-                If Entry.SelectedAnchors.Contains(Anchor) Then Item.Selected = True
-                If Anchor = Entry.FocusedAnchor Then Item.Focused = True
-            Next
+            ApplySelectionByAnchor(Entry.SelectedAnchors, Entry.FocusedAnchor)
         End If
 
         SetScrollPosition(lvFiles, Entry.ScrollPosition)
@@ -1504,13 +1607,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim Node = EnsureNodeForPath(Segments)
         If Node Is Nothing Then
             _CurrentDirectoryAnchorId = 0
-            lvFiles.BeginUpdate()
-            Try
-                lvFiles.Items.Clear()
-                _SearchItemInfo.Clear()
-            Finally
-                lvFiles.EndUpdate()
-            End Try
+            _SearchItemInfo.Clear()
+            SetDisplayedItems(Enumerable.Empty(Of ListViewItem)())
             If WasSearching Then ApplySavedFileListView()
             StatusLabel.Text = $"Path not found: \{String.Join("\", Segments)}\"
             StatusLabel.Owner?.Refresh()
@@ -1745,17 +1843,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         _SearchResults.AddRange(Batch)
         If _SearchActive = False Then Return
 
-        lvFiles.BeginUpdate()
-        Try
-            lvFiles.ListViewItemSorter = Nothing
-            For Each Hit In Batch
-                lvFiles.Items.Add(CreateSearchListItem(Hit))
-            Next
-            'lvFiles.ListViewItemSorter = _ListSorter
-            'lvFiles.Sort()
-        Finally
-            lvFiles.EndUpdate()
-        End Try
+        AppendDisplayedItems(Batch.Select(Function(Hit) CreateSearchListItem(Hit)))
         UpdateStatus()
     End Sub
 
@@ -1766,17 +1854,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub PopulateSearchList()
-        lvFiles.BeginUpdate()
-        Try
-            lvFiles.ListViewItemSorter = Nothing
-            lvFiles.Items.Clear()
-            _SearchItemInfo.Clear()
-            lvFiles.Items.AddRange(_SearchResults.Select(Function(x) CreateSearchListItem(x)).ToArray())
-            'lvFiles.ListViewItemSorter = _ListSorter
-            'lvFiles.Sort()
-        Finally
-            lvFiles.EndUpdate()
-        End Try
+        _SearchItemInfo.Clear()
+        SetDisplayedItems(_SearchResults.Select(Function(x) CreateSearchListItem(x)))
     End Sub
 
     Private Function CreateSearchListItem(Hit As SearchHit) As ListViewItem
@@ -1805,9 +1884,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub OpenContainingFolder(Sender As Object, EventArgs As EventArgs) Handles tsiOpenContainingFolder.Click
-        If lvFiles.SelectedItems.Count <> 1 Then Return
+        If lvFiles.SelectedIndices.Count <> 1 Then Return
         Dim Hit As SearchHit = Nothing
-        If _SearchItemInfo.TryGetValue(lvFiles.SelectedItems(0), Hit) = False Then Return
+        If _SearchItemInfo.TryGetValue(_DisplayedItems(lvFiles.SelectedIndices(0)), Hit) = False Then Return
 
         Dim TargetName = Hit.Entry.Name
         SetAddressText(BuildPathForAnchor(Hit.ParentAnchorId))
@@ -1815,11 +1894,12 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub SelectListItemByName(Name As String)
-        For Each Item As ListViewItem In lvFiles.Items
-            If String.Equals(Item.Text, Name, StringComparison.Ordinal) Then
-                Item.Selected = True
-                Item.Focused = True
-                Item.EnsureVisible()
+        For Index = 0 To _DisplayedItems.Count - 1
+            If String.Equals(_DisplayedItems(Index).Text, Name, StringComparison.Ordinal) Then
+                Dim LinkedItem = lvFiles.Items(Index)
+                LinkedItem.Selected = True
+                LinkedItem.Focused = True
+                LinkedItem.EnsureVisible()
                 lvFiles.Select()
                 Return
             End If
@@ -1831,9 +1911,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub lvFiles_MouseDoubleClick(Sender As Object, EventArgs As MouseEventArgs) Handles lvFiles.MouseDoubleClick
-        If EventArgs.Button <> MouseButtons.Left OrElse lvFiles.SelectedItems.Count <> 1 Then Return
+        If EventArgs.Button <> MouseButtons.Left OrElse lvFiles.SelectedIndices.Count <> 1 Then Return
 
-        Dim Entry = TryCast(lvFiles.SelectedItems(0).Tag, EmbeddedFileSystem.ContentListEntry)
+        Dim Entry = TryCast(_DisplayedItems(lvFiles.SelectedIndices(0)).Tag, EmbeddedFileSystem.ContentListEntry)
         If Entry IsNot Nothing AndAlso IsDirectory(Entry) Then
             NavigateToDirectory(Entry.ChildAnchorId)
             Return
@@ -1877,7 +1957,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         lvFiles.Invalidate(New Rectangle(0, 0, 100, 100))
 
         InvalidateHeader(lvFiles)
-        lvFiles.Sort()
+        SortDisplayedItems()
     End Sub
 
     Private Sub lvFiles_ColumnClick(Sender As Object, e As ColumnClickEventArgs) Handles lvFiles.ColumnClick
@@ -2097,6 +2177,10 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     ''' </summary>
     Private Sub SetFileListView(TargetView As View, ThumbnailCellSize As Integer)
         _ThumbnailCellSize = ThumbnailCellSize
+        ' Tile view is not supported by a virtual-mode ListView (setting .View = Tile would throw);
+        ' large icons are the closest equivalent, and Tile is already unreachable from the UI (see
+        ' FileContextMenu_Opening, which disables tsiViewTiles every time the menu opens).
+        Dim EffectiveView = If(TargetView = View.Tile, View.LargeIcon, TargetView)
         lvFiles.BeginUpdate()
         Try
             If ThumbnailCellSize >= 256 Then
@@ -2106,7 +2190,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Else
                 lvFiles.LargeImageList = Large32Sizer
             End If
-            lvFiles.View = If(ThumbnailCellSize > 0, View.LargeIcon, TargetView)
+            lvFiles.View = If(ThumbnailCellSize > 0, View.LargeIcon, EffectiveView)
         Finally
             lvFiles.EndUpdate()
         End Try
@@ -2574,10 +2658,10 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
     Private Sub InvalidateThumbnailItem(AnchorId As Long)
         If _ThumbnailCellSize = 0 Then Return
-        For Each item As ListViewItem In lvFiles.Items
-            Dim Entry = TryCast(item.Tag, EmbeddedFileSystem.ContentListEntry)
+        For Index = 0 To _DisplayedItems.Count - 1
+            Dim Entry = TryCast(_DisplayedItems(Index).Tag, EmbeddedFileSystem.ContentListEntry)
             If Entry IsNot Nothing AndAlso Entry.ChildAnchorId = AnchorId Then
-                lvFiles.Invalidate(item.Bounds)
+                lvFiles.RedrawItems(Index, Index, True)
                 Return
             End If
         Next
@@ -2699,19 +2783,18 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         OnMutatedFileSystem()
 
         'select items just copied:
-        Dim ItemsInFolder = lvFiles.Items.OfType(Of ListViewItem).
-                                          Select(Function(x) New With {.ListViewItem = x,
-                                                                       .ContentListEntry = TryCast(x.Tag, EmbeddedFileSystem.ContentListEntry)}).
-                                          Where(Function(x) x.ContentListEntry IsNot Nothing)
-        Dim ItemsToSelect = ItemsInFolder.Join(PostSelectionItems,
-                                               Function(x) x.ContentListEntry.Name,
-                                               Function(y) IO.Path.GetFileName(y),
-                                               Function(x, y) x.ListViewItem, StringComparer.OrdinalIgnoreCase).
-                                          ToArray()
-        For i = 0 To ItemsToSelect.Count - 1
-            Dim Item = ItemsToSelect(i)
-            Item.Selected = True
-            If i = 0 Then Item.EnsureVisible()
+        Dim ItemsInFolder = _DisplayedItems.
+                             Select(Function(x, Index) New With {.Index = Index,
+                                                                  .ContentListEntry = TryCast(x.Tag, EmbeddedFileSystem.ContentListEntry)}).
+                             Where(Function(x) x.ContentListEntry IsNot Nothing)
+        Dim IndicesToSelect = ItemsInFolder.Join(PostSelectionItems,
+                                                 Function(x) x.ContentListEntry.Name,
+                                                 Function(y) IO.Path.GetFileName(y),
+                                                 Function(x, y) x.Index, StringComparer.OrdinalIgnoreCase).
+                                            ToArray()
+        For i = 0 To IndicesToSelect.Length - 1
+            lvFiles.SelectedIndices.Add(IndicesToSelect(i))
+            If i = 0 Then lvFiles.Items(IndicesToSelect(i)).EnsureVisible()
         Next
     End Sub
 
@@ -3101,8 +3184,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If MsgBox(Me, Prompt, MsgBoxStyle.YesNo Or MsgBoxStyle.Exclamation) <> MsgBoxResult.Yes Then Return
 
         ' Resolve each item's parent on the UI thread (a search result lives outside the current folder).
-        Dim Deletions = lvFiles.SelectedItems.
-                                Cast(Of ListViewItem)().
+        Dim Deletions = GetSelectedDisplayedItems().
                                 Select(Function(item)
                                            Dim entry = TryCast(item.Tag, EmbeddedFileSystem.ContentListEntry)
                                            Dim hit As SearchHit = Nothing
@@ -3268,12 +3350,12 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim HitItem = lvFiles.GetItemAt(EventArgs.X, EventArgs.Y)
         If HitItem IsNot Nothing Then
             If HitItem.Selected = False Then
-                lvFiles.SelectedItems.Clear()
+                lvFiles.SelectedIndices.Clear()
                 HitItem.Selected = True
                 HitItem.Focused = True
             End If
         Else
-            lvFiles.SelectedItems.Clear()
+            lvFiles.SelectedIndices.Clear()
         End If
         FileContextMenu.Show(lvFiles, EventArgs.Location)
     End Sub
@@ -3282,7 +3364,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If EventArgs.Button <> MouseButtons.Left Then Return
         Dim Item = TryCast(EventArgs.Item, ListViewItem)
         If Item IsNot Nothing AndAlso Item.Selected = False Then
-            lvFiles.SelectedItems.Clear()
+            lvFiles.SelectedIndices.Clear()
             Item.Selected = True
         End If
         Dim Entries = GetSelectedEntries()
@@ -3538,7 +3620,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             If tvFolders.Focused AndAlso tvFolders.SelectedNode IsNot Nothing Then
                 RenameSelectedFolder(Me, EventArgs)
                 EventArgs.Handled = True
-            ElseIf lvFiles.Focused AndAlso lvFiles.SelectedItems.Count = 1 AndAlso _SearchActive = False Then
+            ElseIf lvFiles.Focused AndAlso lvFiles.SelectedIndices.Count = 1 AndAlso _SearchActive = False Then
                 RenameSelectedListEntry(Me, EventArgs)
                 EventArgs.Handled = True
             End If
@@ -3546,7 +3628,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End If
 
         If EventArgs.KeyCode = Keys.Delete Then
-            If lvFiles.Focused AndAlso lvFiles.SelectedItems.Count > 0 Then
+            If lvFiles.Focused AndAlso lvFiles.SelectedIndices.Count > 0 Then
                 DeleteSelectedEntries(Me, EventArgs)
                 EventArgs.Handled = True
             ElseIf tvFolders.Focused AndAlso tvFolders.SelectedNode IsNot Nothing AndAlso tvFolders.SelectedNode.Parent IsNot Nothing Then
