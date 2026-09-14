@@ -5,8 +5,6 @@ VisualStudioVersion = 18.9.12120.119 stable
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "i00.Stream", "ChunkedStream\i00.Stream.vbproj", "{4D29CECB-5C0B-4DF4-B97E-90740B76544D}"
 EndProject
-Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "i00.Stream.Unchecked", "i00.Stream.Unchecked\i00.Stream.Unchecked.vbproj", "{28863F05-0B7C-44F1-99E8-805A0390D62A}"
-EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tests", "Tests", "{67743B11-24B8-4C01-A687-05BDCB76E701}"
 EndProject
 Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "UnitTests", "_Tests\UnitTests\UnitTests.vbproj", "{7DD66AFB-3628-40C5-92A8-5CE0FB4FEA32}"
@@ -35,10 +33,6 @@ Global
 		{4D29CECB-5C0B-4DF4-B97E-90740B76544D}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4D29CECB-5C0B-4DF4-B97E-90740B76544D}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4D29CECB-5C0B-4DF4-B97E-90740B76544D}.Release|Any CPU.Build.0 = Release|Any CPU
-		{28863F05-0B7C-44F1-99E8-805A0390D62A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{28863F05-0B7C-44F1-99E8-805A0390D62A}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{28863F05-0B7C-44F1-99E8-805A0390D62A}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{28863F05-0B7C-44F1-99E8-805A0390D62A}.Release|Any CPU.Build.0 = Release|Any CPU
 		{7DD66AFB-3628-40C5-92A8-5CE0FB4FEA32}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{7DD66AFB-3628-40C5-92A8-5CE0FB4FEA32}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{7DD66AFB-3628-40C5-92A8-5CE0FB4FEA32}.Release|Any CPU.ActiveCfg = Release|Any CPU

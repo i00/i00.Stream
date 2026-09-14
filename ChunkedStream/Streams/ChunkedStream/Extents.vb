@@ -1,5 +1,4 @@
 ﻿Imports System.IO
-Imports Unchecked
 
 Namespace Streams
     Partial Class ChunkedStream

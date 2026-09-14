@@ -59,6 +59,7 @@
     <Reference Include="System.Xml.Linq" />
     <Reference Include="System.Data.DataSetExtensions" />
     <Reference Include="System.Net.Http" />
+    <Reference Include="System.Numerics" />
   </ItemGroup>
   <ItemGroup>
     <Import Include="Microsoft.VisualBasic" />
@@ -115,6 +116,7 @@
     <Compile Include="Tests\Chunked Stream\Deduplication\ExtendibleHashTable.vb" />
     <Compile Include="Tests\Chunked Stream\Developer confidence\Concurrency.vb" />
     <Compile Include="Tests\Chunked Stream\Developer confidence\Diagnostics.vb" />
+    <Compile Include="Tests\Chunked Stream\Developer confidence\GearHash.vb" />
     <Compile Include="Tests\Chunked Stream\Developer confidence\Hardening.vb" />
     <Compile Include="Tests\Chunked Stream\Developer confidence\Visualization.vb" />
     <Compile Include="Tests\Chunked Stream\Logical mutations and allocation\Allocation.vb" />

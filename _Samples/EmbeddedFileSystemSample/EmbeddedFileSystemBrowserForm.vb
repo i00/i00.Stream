@@ -2887,14 +2887,14 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             Using SourceStream = workItem.CreateStream()
                 ' A bigger write-buffer threshold means far fewer durable (fsync) publishes for a
                 ' large sequential upload - see the comment on FileStreamView.BufferedEndPosition.
-                ' It must also stay at least ChunkSize * ParallelChunkCryptoMinChunks, or a drain
-                ' never contains enough chunks to reach the parallel crypto path (Options.
+                ' It must also stay at least ChunkSize * Options.MinChunksForParallelCrypto, or a
+                ' drain never contains enough chunks to reach the parallel crypto path (Options.
                 ' MaxCryptoParallelism) and the whole upload silently falls back to serial - this
                 ' bit twice: a 4MB threshold paired with a 4MB ChunkSize gives exactly 1 chunk per
                 ' drain, when 8 are needed. Scales with file size, capped well short of the memory
                 ' a huge file could demand, but never below the parallel-crypto floor.
                 Dim MinBufferFlushThreshold = Math.Max(CLng(EmbeddedFileSystem.FileStreamView.DefaultWriteBufferFlushThreshold),
-                                                            CLng(_FileSystem.ChunkedStream.ChunkSize) * ChunkedStream.ParallelChunkCryptoMinChunks)
+                                                            CLng(_FileSystem.ChunkedStream.ChunkSize) * _FileSystem.ChunkedStream.Options.MinChunksForParallelCrypto)
                 Dim MaxBufferFlushThreshold = Math.Max(MinBufferFlushThreshold, 256L * 1024 * 1024)
                 Dim WriteBufferFlushThreshold = CInt(Math.Min(MaxBufferFlushThreshold,
                                                                     Math.Max(MinBufferFlushThreshold, SourceStream.Length \ 64)))

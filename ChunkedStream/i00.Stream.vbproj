@@ -61,12 +61,6 @@
     <Reference Include="System.Net.Http" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\i00.Stream.Unchecked\i00.Stream.Unchecked.vbproj">
-      <Project>{28863F05-0B7C-44F1-99E8-805A0390D62A}</Project>
-      <Name>i00.Stream.Unchecked</Name>
-    </ProjectReference>
-  </ItemGroup>
-  <ItemGroup>
     <Import Include="Microsoft.VisualBasic" />
     <Import Include="System" />
     <Import Include="System.Collections" />
@@ -81,6 +75,8 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Autoexec.vb" />
+    <Compile Include="ExpressionHelpers\ConvertToUnchecked.vb" />
+    <Compile Include="ExpressionHelpers\ExpressionVisitor.vb" />
     <Compile Include="Streams\ChunkedStream\Anchors.vb" />
     <Compile Include="Streams\ChunkedStream\Checkpoints.vb" />
     <Compile Include="Streams\ChunkedStream\Compression.vb" />
@@ -88,6 +84,7 @@
     <Compile Include="Streams\ChunkedStream\Deduplication.vb" />
     <Compile Include="Streams\ChunkedStream\Diagnostics.vb" />
     <Compile Include="Streams\ChunkedStream\Extents.vb" />
+    <Compile Include="Streams\ChunkedStream\GearHash.vb" />
     <Compile Include="Streams\ChunkedStream\Options.vb" />
     <Compile Include="Streams\Positioned Storage Interface.vb" />
     <Compile Include="Streams\PositionedFileStream.vb" />
