@@ -261,6 +261,12 @@ by `BuildExtentsInParallelAsync`) + serial `PlaceChunkRecordAsync`.
 - Gap **#8** (tamper-rejection in encrypted mode) was deliberately skipped — S1 / S2 are
   accepted by design, so the test would only document a non-guarantee.
   `ValidateFailsWhenChunkMacCorrupted` already covers the real guarantee.
+- **EFS-level cross-file dedup, end to end** (from the deduplication-feature plan's §5
+  limitation 2 residual) — write coalescing's CDC-awareness (stage 3) was built specifically
+  to fix dedup's original EFS write-pattern gap, but its own tests exercise
+  `ChunkedStream.Write()` directly, not `EmbeddedFileSystem.WriteFile`. A test that writes the
+  same file content through EFS twice and asserts the second copy dedupes against the first
+  would close the loop end to end.
 
 ---
 
