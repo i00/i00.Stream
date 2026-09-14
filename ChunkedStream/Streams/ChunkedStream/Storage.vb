@@ -1259,6 +1259,11 @@ Namespace Streams
 
             Dim Ordinal = _PhysicalRecords.Count
 
+            ' Mark dirty before the table adds below - see MovePhysicalRecordOrdinal's
+            ' comment on why this order, not the reverse, is the only safe one under a
+            ' killed thread.
+            MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
+
             _PhysicalRecords.Add(Result.RecordId, Result)
 
             AddPhysicalRecordToIndexes(Result, Ordinal)
@@ -1269,8 +1274,6 @@ Namespace Streams
             If NewRecordEndOffset > _IndexOffset Then
                 _IndexOffset = NewRecordEndOffset
             End If
-
-            MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
 
             Return Result
 
@@ -1319,6 +1322,11 @@ Namespace Streams
 
                 Dim Ordinal = _PhysicalRecords.Count
 
+                ' Mark dirty before the table adds below - see MovePhysicalRecordOrdinal's
+                ' comment on why this order, not the reverse, is the only safe one under a
+                ' killed thread.
+                MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
+
                 _PhysicalRecords.Add(Result.RecordId, Result)
 
                 AddPhysicalRecordToIndexes(Result, Ordinal)
@@ -1329,8 +1337,6 @@ Namespace Streams
                 If NewRecordEndOffset > _IndexOffset Then
                     _IndexOffset = NewRecordEndOffset
                 End If
-
-                MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
 
                 Results.Add(Result)
                 Offsets.Add(NewRecordOffset)

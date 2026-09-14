@@ -147,6 +147,117 @@ Namespace Tests
             End Sub
 
             ' ================================================================================
+            ' Thread-abort hardening
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Regression for a torn physical-record index reaching disk when a worker thread
+            ''' is killed (<see cref="Threading.Thread.Abort"/>) mid churn. This is a
+            ''' different gap than the 2026-09-10 incident's fix
+            ''' (<c>AssertPhysicalRecordIndexConsistent</c>, which catches an ordinal/
+            ''' page-membership tear): <c>MovePhysicalRecordOrdinal</c>,
+            ''' <c>DetachReclaimedPhysicalRecord</c>, <c>PlaceChunkRecordAsync</c>/
+            ''' <c>PlaceChunkRecordsAsync</c> and <c>RelocatePhysicalRecord</c> each used to
+            ''' mutate <c>_PhysicalRecordIdsByPage</c>/<c>_PhysicalRecordOrdinals</c> *before*
+            ''' marking the affected page(s) dirty as a separate, later statement. A kill
+            ''' landing in that gap left a fully self-consistent in-memory image - the assert
+            ''' sees nothing wrong - but silently dropped the dirty mark, so the next publish
+            ''' never rewrote the page that actually changed: a stale on-disk page then
+            ''' disagreed with the header, surfacing later as "Physical record N appears on
+            ''' more than one physical-record page." The fix reorders every one of those
+            ''' sites to mark dirty first, so a kill anywhere in the gap can only produce a
+            ''' spurious (harmless) dirty mark, never a missing one.
+            ''' </summary>
+            ''' <remarks>
+            ''' Kills a real background thread at a randomized point during dense record
+            ''' churn (repeated overwrite - forces reclaim of the old record and placement of
+            ''' a new one every iteration - plus periodic grow/shrink to force ordinal
+            ''' compaction) and requires every reopen afterwards to be a clean strict open
+            ''' (zero AutoRepairs). Thread.Abort's exact timing is inherently non-deterministic,
+            ''' so this is a best-effort stress test rather than a deterministic repro of one
+            ''' specific interleaving - its value is in scanning many different points across
+            ''' many trials.
+            ''' </remarks>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub KillingAWorkerThreadDuringRecordChurnNeverTearsThePhysicalRecordIndex()
+
+                Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                    .ChunkSize = 256,
+                    .IndexPageEntryCount = 4,
+                    .IndexDirectoryEntryCount = 4
+                }
+
+                Dim Rng = CreateDeterministicRandom(24601)
+
+                For Trial = 1 To 60
+
+                    Using Ms As New MemoryStream()
+
+                        Using Seed = ChunkedStream.Open(Ms, Options)
+                            Seed.Write(0, GenerateRandomData(Options.ChunkSize * 4, Trial))
+                            Seed.Flush()
+                        End Using
+
+                        Dim SpinAmount = Rng.Next(0, 200000)
+
+                        Dim Worker As New Threading.Thread(
+                            Sub()
+                                Try
+                                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                                        For Iteration = 1 To 4000
+
+                                            Dim Offset = CLng((Iteration Mod 4) * Options.ChunkSize)
+                                            Dim Data(Options.ChunkSize - 1) As Byte
+                                            Data(0) = CByte(Iteration And &HFF)
+
+                                            Cs.Write(Offset, Data)
+
+                                            If Iteration Mod 5 = 0 Then
+                                                Cs.SetLength(Options.ChunkSize * 2)
+                                                Cs.SetLength(Options.ChunkSize * 4)
+                                            End If
+
+                                            If Iteration Mod 7 = 0 Then Cs.Flush()
+
+                                        Next
+
+                                    End Using
+                                Catch
+                                    ' Any exception here (ThreadAbortException included) is
+                                    ' expected - this test cares about the FILE afterwards,
+                                    ' not the interrupted call.
+                                End Try
+                            End Sub) With {.IsBackground = True}
+
+                        Worker.Start()
+                        Threading.Thread.SpinWait(SpinAmount)
+                        Worker.Abort()
+                        Worker.Join(10000)
+
+                        AssertTrue(Worker.IsAlive = False,
+                                   $"Trial {Trial}: worker thread did not terminate after Abort - " &
+                                   "the state lock was likely left held with no owner able to release it.")
+
+                        Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                            AssertEqual(0, Reopened.AutoRepairs.Count,
+                                        $"Trial {Trial}: a strict reopen needed {Reopened.AutoRepairs.Count} " &
+                                        "auto-repair(s) - a torn physical-record index reached disk.")
+
+                            Dim Report = Reopened.Validate()
+                            Report.Repair(ChunkedStream.RepairScope.IncludeDataLoss)
+                            Reopened.Validate().ThrowIfErrors()
+
+                        End Using
+
+                    End Using
+
+                Next
+
+            End Sub
+
+            ' ================================================================================
             ' Fuzz helpers
             ' ================================================================================
 

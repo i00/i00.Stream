@@ -372,18 +372,22 @@ Namespace Streams
                          NewOffset,
                          OldLength)
 
+            '
+            ' Only the moved physical record entry changed - mark its page dirty before
+            ' mutating the entry below (see MovePhysicalRecordOrdinal's comment): a killed
+            ' thread past this point can at worst leave the page dirty with the entry
+            ' still holding its old offset, never the reverse (a stale, un-rewritten page
+            ' silently disagreeing with an in-memory offset that has already moved on).
+            ' Extents did not change, and the physical-record count did not change.
+            '
+            MarkPhysicalRecordPageDirty(Record.RecordId)
+
             Record.PhysicalOffset = NewOffset
             _PhysicalRecords(Record.RecordId) = Record
 
             UpdatePhysicalRecordLocationIndexes(Record.RecordId,
                                                 OldOffset,
                                                 OldLength)
-
-            '
-            ' Only the moved physical record entry changed.
-            ' Extents did not change, and the physical-record count did not change.
-            '
-            MarkPhysicalRecordPageDirty(Record.RecordId)
 
             '
             ' Publish the moved record metadata so a later crash does not leave committed

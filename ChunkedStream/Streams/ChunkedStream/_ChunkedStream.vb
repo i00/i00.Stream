@@ -1198,9 +1198,50 @@ Namespace Streams
         Private ReadOnly _StateLockDepth As New AsyncLocal(Of Integer)
 
         Private Function EnterStateLock() As IDisposable
-            If _StateLockDepth.Value = 0 Then _StateLock.EnterWriteAsync().GetAwaiter().GetResult()
-            _StateLockDepth.Value += 1
-            Return New StateLockScope(Me)
+
+            Dim AcquiredHere = _StateLockDepth.Value = 0
+            Dim LockAcquired = False
+            Dim DepthBumped = False
+
+            '
+            ' Acquiring the lock (for a fresh acquisition), bumping the reentrancy depth
+            ' and handing the releasing scope back to the caller must all be inside the
+            ' SAME protected region - not just the last of the three. A Thread.Abort (or
+            ' any other asynchronous exception) can land between any two of these
+            ' statements just as easily as after all of them; putting only the Return in
+            ' a Try (an earlier version of this fix did exactly that) leaves the gap
+            ' between acquiring the lock and bumping the depth wide open. Track precisely
+            ' how far this call actually got with two flags, so the Catch below can undo
+            ' exactly what happened and nothing more - leaving either a fully-formed
+            ' scope for the caller, or no trace at all that this call ever ran. Without
+            ' this, a kill landing here leaves the lock held forever with the depth
+            ' counter still reading "not held" (a fresh acquisition) or permanently
+            ' overstated (a reentrant call, whose matching decrement - owned by the
+            ' StateLockScope that never got returned - never happens) - either way, the
+            ' next EnterStateLock on this instance (e.g. a Dispose/rollback path
+            ' unwinding that very same abort) deadlocks trying to re-acquire a lock this
+            ' thread already owns.
+            '
+            Try
+
+                If AcquiredHere Then
+                    _StateLock.EnterWriteAsync().GetAwaiter().GetResult()
+                    LockAcquired = True
+                End If
+
+                _StateLockDepth.Value += 1
+                DepthBumped = True
+
+                Return New StateLockScope(Me)
+
+            Catch
+
+                If DepthBumped Then _StateLockDepth.Value -= 1
+                If LockAcquired Then _StateLock.ExitWrite()
+                Throw
+
+            End Try
+
         End Function
 
         '
@@ -1209,9 +1250,25 @@ Namespace Streams
         ' read path is not reentrant, so no depth counter is kept for it.
         '
         Private Function EnterReadLock() As IDisposable
+
             If _StateLockDepth.Value > 0 Then Return NullScope.Instance
-            _StateLock.EnterReadAsync().GetAwaiter().GetResult()
-            Return New ReadLockScope(Me)
+
+            ' See EnterStateLock's comment: the acquisition itself must be INSIDE the
+            ' protected region, not just the Return after it - an interruption landing
+            ' anywhere from the acquisition onward must release what was just acquired,
+            ' or it leaks held forever (and, for this writer-preference lock, eventually
+            ' deadlocks every future writer once one queues behind it).
+            Dim LockAcquired = False
+
+            Try
+                _StateLock.EnterReadAsync().GetAwaiter().GetResult()
+                LockAcquired = True
+                Return New ReadLockScope(Me)
+            Catch
+                If LockAcquired Then _StateLock.ExitRead()
+                Throw
+            End Try
+
         End Function
 
         Private Async Function RunUnderReadLockAsync(Of TResult)(CancellationToken As Threading.CancellationToken,
@@ -1240,6 +1297,19 @@ Namespace Streams
         ' _StateLockDepth.Value in the method that owns the Try/Finally, where it stays
         ' visible to everything that method calls and unwinds automatically when it
         ' returns. Callers release with _StateLock.ExitWrite() (synchronous, non-blocking).
+        '
+        ' KNOWN RESIDUAL GAP: unlike EnterStateLock/EnterReadLock (hardened below against a
+        ' Thread.Abort landing between acquiring the lock and recording that fact - see
+        ' their comments), this async path and its callers (RunUnderStateLockAsync,
+        ' RunUnderReadLockAsync) still have that same narrow window, and closing it here
+        ' is not just a copy-paste of that fix: the AsyncLocal-does-not-flow-back
+        ' constraint above means the acquisition (in here) and the bookkeeping (in the
+        ' caller) cannot be folded into one atomic-with-respect-to-interruption step the
+        ' way the sync path's were, without a larger restructure. Lower real-world risk in
+        ' practice - a continuation resuming on a different pooled thread is untouched by
+        ' an abort targeting the original thread - but the RunAsync:=False synchronous
+        ' bridge (GetAwaiter().GetResult() throughout, same as the sync path) does not get
+        ' that protection. Not closed in this pass; flagged for follow-up.
         '
         Private Async Function EnterStateLockAsync(RunAsync As Boolean,
                                                   CancellationToken As Threading.CancellationToken) As Task(Of Boolean)

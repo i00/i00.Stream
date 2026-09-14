@@ -4,6 +4,82 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ---
 
+## 2026-09-14
+
+### A second, unrelated Thread.Abort corruption mechanism, plus a genuine self-deadlock in the state lock — both FIXED
+
+Reported: the user thread-aborted a file upload (`EmbeddedFileSystemSample`, real
+`Thread.Abort()` via `frmProgress`, same as the 2026-09-10 incident) and hit the identical
+symptom on reopen — `InconsistentPhysicalRecordPagesException: Physical record 650 appears
+on more than one physical-record page.` Since the 2026-09-10 fix (`AssertPhysicalRecordIndexConsistent`,
+[[torn-physical-record-index]]) was already on `master`, this had to be a *different* gap,
+not a recurrence.
+
+**Bug 1 — dirty-page tracking could desync from the tables it describes.**
+`MovePhysicalRecordOrdinal`, `DetachReclaimedPhysicalRecord`, `PlaceChunkRecordAsync` /
+`PlaceChunkRecordsAsync`, and `RelocatePhysicalRecord` (defrag) each mutated
+`_PhysicalRecordIdsByPage` / `_PhysicalRecordOrdinals` (or, for the defrag case, a record's
+offset) *first*, then marked the affected page(s) dirty in `_DirtyPhysicalRecordPages` as a
+separate, later statement. A `Thread.Abort()` landing in that gap left the in-memory tables
+fully self-consistent — `AssertPhysicalRecordIndexConsistent` sees nothing wrong, since it
+only checks the tables against each other, never against `_DirtyPhysicalRecordPages` — but
+the page that actually changed was never queued for rewrite. The next publish silently kept
+serving the *stale* on-disk copy of that page, which still listed the record under its old
+page while the new page (or the header) had already moved on: exactly
+"appears on more than one physical-record page." Fixed by reordering all four sites to mark
+dirty *before* mutating - a kill anywhere in the (now much narrower) gap can only produce a
+spurious, harmless extra rewrite, never a missing one.
+
+**Bug 2 — a genuine self-deadlock in `EnterStateLock`/`EnterReadLock`, found while stress-testing
+the fix above.** A new Thread.Abort fuzz test (`KillingAWorkerThreadDuringRecordChurnNeverTearsThePhysicalRecordIndex`,
+below) hung a real worker thread forever in ~50% of runs even after Bug 1 was fixed. Root
+cause: `EnterStateLock()` called `_StateLock.EnterWriteAsync().GetAwaiter().GetResult()`
+(acquire) and `_StateLockDepth.Value += 1` (record that fact) as two separate statements. An
+abort landing between them left the custom `AsyncReaderWriterLock` genuinely held by the
+thread, but `_StateLockDepth` still reading 0 ("not held"). Any reentrant call on the same
+thread during the same unwind — e.g. `Dispose()`/`EndDeferPublish`'s own
+`Using EnterStateLock()` — then saw depth 0, believed it needed to acquire fresh, and blocked
+forever on a non-reentrant lock this very thread already owned: a textbook self-deadlock, not
+just a data race. `EnterReadLock` had the same shape (acquire, then a separate `Return` that
+could be interrupted before the caller ever received the releasing scope, leaking the read
+lock held forever - which, against this writer-preference lock, eventually starves every
+future writer too). A first attempt at fixing this only wrapped the `Return` in a
+`Try/Catch`, leaving the acquire-then-bookmark gap itself completely unprotected - confirmed
+by the fuzz test still hanging afterwards. The real fix puts the acquisition *itself* inside
+the `Try`, with two flags (`LockAcquired`, `DepthBumped`) recording exactly how far the call
+got, so the `Catch` can undo precisely what happened - lock release, depth decrement, or both
+- leaving nothing orphaned regardless of where in the sequence the abort lands. The async
+lock path (`EnterStateLockAsync`/`RunUnderStateLockAsync`/`RunUnderReadLockAsync`) has the
+same shape but could not get the identical fix in this pass - `AsyncLocal` writes made
+inside an awaited call do not flow back to the caller, so acquisition and bookkeeping can't
+be folded into one atomic-with-respect-to-interruption step there without a larger
+restructure. Flagged in a code comment for follow-up; lower real-world risk since a
+continuation resuming on a pooled thread is untouched by an abort targeting the original
+thread, and the sync path (confirmed as the user's actual repro) is now fully covered.
+
+**Test:** `KillingAWorkerThreadDuringRecordChurnNeverTearsThePhysicalRecordIndex`
+(`Hardening.vb`) - kills a real background thread at a randomized spin-wait point during
+dense record churn (repeated overwrite forcing reclaim + replacement every iteration, plus
+periodic grow/shrink forcing ordinal compaction), 60 trials, and requires every reopen
+afterwards to be a clean strict open (zero `AutoRepairs`). Before the deadlock fix: hung the
+whole suite in ~50% of runs (diagnosed by temporarily raising the join timeout to 60s and
+confirming the thread never returns even then - not slow, genuinely stuck; a
+`StackTrace(Thread, Boolean)` capture attempt failed with "Thread in invalid state" while
+aborting, which is itself consistent with a thread stuck mid-abort-delivery inside a
+synchronization primitive). After both fixes: 15 consecutive full-suite runs clean,
+415/415.
+
+**User's real file recovered.** Verified end-to-end against a copy of the user's actual
+423 MB `Test.efs` (never the original): the existing 2026-09-10 tolerant-open salvage
+pipeline already handled it correctly without any further library change - opened
+tolerantly (1 duplicate entry / 1 record lost), salvaged table persisted back,
+`Repair(IncludeDataLoss)` zeroed the one unrecoverable extent, `RecoverPendingFiles`
+finalized 3 pending files left over from the interrupted upload, re-`Validate()` clean. User
+chose to run the same recovery themselves via the rebuilt sample app rather than have it
+applied here.
+
+---
+
 ## 2026-09-13
 
 ### Dedup index pages were invisible to free-space accounting entirely — likely the true root cause of "Dedup index page MAC invalid" — FIXED

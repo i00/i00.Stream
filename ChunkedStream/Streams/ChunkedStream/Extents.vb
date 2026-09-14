@@ -817,6 +817,12 @@ Namespace Streams
 
             End If
 
+            ' Mark the page dirty before any table below changes - see MovePhysicalRecordOrdinal's
+            ' comment. A killed thread past this point can at worst leave the page dirty
+            ' with nothing actually removed from it yet; never the reverse.
+            Dim PageNumber = RemovedOrdinal \ _IndexPageEntryCount
+            _DirtyPhysicalRecordPages.Add(PageNumber)
+
             RemoveLivePhysicalRecordOffset(Record)
 
             '
@@ -834,14 +840,11 @@ Namespace Streams
             ' plaintext can never be served again - drop it and free the slot.
             EvictCachedRecord(RecordId)
 
-            Dim PageNumber = RemovedOrdinal \ _IndexPageEntryCount
             Dim PageRecordIds As SortedSet(Of Long) = Nothing
 
             If _PhysicalRecordIdsByPage.TryGetValue(PageNumber, PageRecordIds) Then
                 PageRecordIds.Remove(RecordId)
             End If
-
-            _DirtyPhysicalRecordPages.Add(PageNumber)
 
             Return RemovedOrdinal
 
@@ -935,10 +938,24 @@ Namespace Streams
 
             If OldOrdinal = NewOrdinal Then Return
 
-            _PhysicalRecordOrdinals(RecordId) = NewOrdinal
-
             Dim OldPageNumber = OldOrdinal \ _IndexPageEntryCount
             Dim NewPageNumber = NewOrdinal \ _IndexPageEntryCount
+
+            '
+            ' Mark both pages dirty BEFORE touching any table below. A killed thread
+            ' landing anywhere from here on can only leave a page dirty that turns out
+            ' unchanged (a harmless extra rewrite) - never the reverse, where a page that
+            ' truly changed is left clean and the next publish silently skips it,
+            ' serialising a stale on-disk copy that disagrees with the (self-consistent!)
+            ' in-memory tables. AssertPhysicalRecordIndexConsistent cannot catch that: it
+            ' only checks _PhysicalRecordOrdinals/_PhysicalRecordIdsByPage agree with each
+            ' other, never that _DirtyPhysicalRecordPages covers every page they imply
+            ' changed.
+            '
+            _DirtyPhysicalRecordPages.Add(OldPageNumber)
+            _DirtyPhysicalRecordPages.Add(NewPageNumber)
+
+            _PhysicalRecordOrdinals(RecordId) = NewOrdinal
 
             If OldPageNumber <> NewPageNumber Then
 
@@ -955,9 +972,6 @@ Namespace Streams
                 NewPageRecordIds.Add(RecordId)
 
             End If
-
-            _DirtyPhysicalRecordPages.Add(OldPageNumber)
-            _DirtyPhysicalRecordPages.Add(NewPageNumber)
 
         End Sub
 
