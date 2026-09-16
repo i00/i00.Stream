@@ -5562,6 +5562,15 @@ Namespace Streams
             _CompactMetadataWriteLimit = Nothing
 
             '
+            ' A batched PlaceChunkRecordsAsync call's own Finally already releases whatever it
+            ' reserved, even when it faulted - but this reload is the backstop for the one case
+            ' that can't run its own Finally: the reload IS the recovery from that same fault.
+            ' Nothing this reload adopts depends on it, so an unconditional clear is correct
+            ' regardless of why the fault happened.
+            '
+            _PendingBatchReservations.Clear()
+
+            '
             ' A pending write-cache buffer exists only in memory and was never published, so it
             ' has no relation to the reloaded image below - keeping it would mean applying bytes
             ' that predate this recovery on top of extents/records that postdate it. Discarded

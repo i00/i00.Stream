@@ -308,6 +308,20 @@ Namespace Streams
         '
         Private ReadOnly _DeferredFreeRanges As New List(Of DeferredFreeRange)()
 
+        '
+        ' Offsets a batched PlaceChunkRecordsAsync call has planned to write to but has not
+        ' yet published into _PhysicalRecords - it registers each record only after that
+        ' record's bytes are durably in the backing store, so a killed thread never leaves a
+        ' record visible to reads (or to the next metadata publish) before its data actually
+        ' exists on disk. Allocation planning still needs to know about these ranges before
+        ' they're "live", though: IsRangeSafeForStorage and the BestFitScan/FirstFitScan
+        ' rebuild (BuildFreeSpaceMapCore) both treat them as reserved, exactly like a live
+        ' physical record, so a later record in the same batch can never be handed the same
+        ' offset. Always empty except while a PlaceChunkRecordsAsync call is actually running;
+        ' a reload from a fault (AdoptLoadedImage) clears it unconditionally as a backstop.
+        '
+        Private ReadOnly _PendingBatchReservations As New List(Of Tuple(Of Long, Long))()
+
         Private Shared Function StorageRangesOverlap(Offset1 As Long,
                                                      Length1 As Long,
                                                      Offset2 As Long,
@@ -475,8 +489,27 @@ Namespace Streams
             If Length <= 0 Then Return False
             If RangeOverlapsLivePhysicalRecord(Offset, Length) Then Return False
             If RangeOverlapsActiveMetadata(Offset, Length) Then Return False
+            If RangeOverlapsPendingBatchReservation(Offset, Length) Then Return False
 
             Return True
+
+        End Function
+
+        '
+        ' _PendingBatchReservations is small (at most one Write call's batch of chunk
+        ' records) and short-lived, so a linear scan is simpler than and just as cheap as
+        ' building an index for it.
+        '
+        Private Function RangeOverlapsPendingBatchReservation(Offset As Long,
+                                                              Length As Long) As Boolean
+
+            For Each Reservation In _PendingBatchReservations
+                If StorageRangesOverlap(Offset, Length, Reservation.Item1, Reservation.Item2 - Reservation.Item1) Then
+                    Return True
+                End If
+            Next
+
+            Return False
 
         End Function
 
@@ -744,6 +777,16 @@ Namespace Streams
             Next
 
             ReservedRanges.AddRange(GetActiveMetadataRanges())
+
+            '
+            ' A batched PlaceChunkRecordsAsync call in progress has planned offsets for
+            ' records that are not in _PhysicalRecords yet (registration waits until their
+            ' bytes are durably written - see _PendingBatchReservations). Without this, a
+            ' BestFitScan/FirstFitScan rebuild mid-batch would treat an earlier record's own
+            ' about-to-be-written offset as still free and hand it to a later record in the
+            ' same batch.
+            '
+            ReservedRanges.AddRange(_PendingBatchReservations)
 
             '
             ' Deferred spans are still inside the crash-recovery window, so treat them as
@@ -1281,16 +1324,19 @@ Namespace Streams
 
         '
         ' Batched counterpart of PlaceChunkRecordAsync, used when BuildExtentsInParallelAsync
-        ' has several prepared records to place at once. Allocation and every in-memory
-        ' bookkeeping step (free-space allocator, physical-record table, ordinal map, dirty
-        ' pages) stay single-threaded and run to completion for the WHOLE batch before any
-        ' write is issued - none of that state is safe for concurrent access, and none of it
-        ' needs the write to have physically completed first (nothing here is durable until
-        ' the caller's own metadata publish runs afterwards, same as the single-record path).
-        ' Only the actual backing-store writes are allowed to overlap, and only when doing so
-        ' can help: RunAsync (nothing to overlap on the synchronous bridge - WriteAtEitherAsync
-        ' just calls WriteAt and returns an already-completed task there), more than one record
-        ' to place, Options.MaxPhysicalWriteParallelism > 1, and the backing store declaring
+        ' has several prepared records to place at once. Offset allocation and every
+        ' allocation-planning side effect (the free-space allocator, _IndexOffset,
+        ' _PendingBatchReservations) stay single-threaded and run to completion for the WHOLE
+        ' batch before any write is issued - none of that state is safe for concurrent access.
+        ' Registration into _PhysicalRecords - what makes a record visible to reads and to the
+        ' next metadata publish - is deliberately held back until every write below has
+        ' completed (see the trailing loop): PlaceChunkRecordAsync's single-record sibling
+        ' writes before registering, and a killed thread must not leave a batched record
+        ' visible while pointing at backing-store space its own write never reached. Only the
+        ' actual backing-store writes are allowed to overlap, and only when doing so can help:
+        ' RunAsync (nothing to overlap on the synchronous bridge - WriteAtEitherAsync just
+        ' calls WriteAt and returns an already-completed task there), more than one record to
+        ' place, Options.MaxPhysicalWriteParallelism > 1, and the backing store declaring
         ' PositionedIoCapabilities.LockFreeWrites (otherwise WriteAtAsync serialises on
         ' _PhysicalIoLock regardless, so concurrent Tasks would just queue up for no benefit).
         ' Falls back to the exact original one-at-a-time await otherwise.
@@ -1301,47 +1347,102 @@ Namespace Streams
 
             Dim Results As New List(Of PhysicalRecordEntry)(PreparedRecords.Count)
             Dim Offsets As New List(Of Long)(PreparedRecords.Count)
+            Dim Ordinals As New List(Of Integer)(PreparedRecords.Count)
+            Dim BaseOrdinal = _PhysicalRecords.Count
+            Dim Reservations As New List(Of Tuple(Of Long, Long))(PreparedRecords.Count)
 
-            For Each Prepared In PreparedRecords
+            Try
 
-                If Prepared.StoredCompressionMethod <> ChunkedStreamOptions.CompressionMethods.None Then
-                    MarkCompressionFlag(Prepared.StoredCompressionMethod)
-                End If
+                For Each Prepared In PreparedRecords
 
-                Dim NewRecordOffset =
-                    GetNextWriteOffset(Prepared.StoredRecord.Length, Options.NewChunkWriteLocationPolicy, False)
+                    If Prepared.StoredCompressionMethod <> ChunkedStreamOptions.CompressionMethods.None Then
+                        MarkCompressionFlag(Prepared.StoredCompressionMethod)
+                    End If
 
-                Dim Result =
-                    New PhysicalRecordEntry With {
-                        .RecordId = Prepared.RecordId,
-                        .PhysicalOffset = NewRecordOffset,
-                        .PhysicalLength = Prepared.StoredRecord.Length,
-                        .PlainLength = Prepared.PlainLength,
-                        .RefCount = 1
-                    }
+                    Dim NewRecordOffset =
+                        GetNextWriteOffset(Prepared.StoredRecord.Length, Options.NewChunkWriteLocationPolicy, False)
 
-                Dim Ordinal = _PhysicalRecords.Count
+                    Dim NewRecordEndOffset =
+                        NewRecordOffset + CLng(Prepared.StoredRecord.Length)
 
-                ' Mark dirty before the table adds below - see MovePhysicalRecordOrdinal's
-                ' comment on why this order, not the reverse, is the only safe one under a
-                ' killed thread.
-                MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
+                    '
+                    ' Reserve the range so the NEXT iteration's GetNextWriteOffset (whether via
+                    ' the free-space allocator, a BestFitScan/FirstFitScan rebuild, or the
+                    ' plain append watermark below) can never hand out an offset this batch
+                    ' already claimed - see IsRangeSafeForStorage/BuildFreeSpaceMapCore and the
+                    ' _PendingBatchReservations field comment.
+                    '
+                    Dim Reservation = Tuple.Create(NewRecordOffset, NewRecordEndOffset)
+                    _PendingBatchReservations.Add(Reservation)
+                    Reservations.Add(Reservation)
 
-                _PhysicalRecords.Add(Result.RecordId, Result)
+                    Dim Result =
+                        New PhysicalRecordEntry With {
+                            .RecordId = Prepared.RecordId,
+                            .PhysicalOffset = NewRecordOffset,
+                            .PhysicalLength = Prepared.StoredRecord.Length,
+                            .PlainLength = Prepared.PlainLength,
+                            .RefCount = 1
+                        }
 
-                AddPhysicalRecordToIndexes(Result, Ordinal)
+                    If NewRecordEndOffset > _IndexOffset Then
+                        _IndexOffset = NewRecordEndOffset
+                    End If
 
-                Dim NewRecordEndOffset =
-                    NewRecordOffset + CLng(Prepared.StoredRecord.Length)
+                    Results.Add(Result)
+                    Offsets.Add(NewRecordOffset)
+                    Ordinals.Add(BaseOrdinal + Ordinals.Count)
 
-                If NewRecordEndOffset > _IndexOffset Then
-                    _IndexOffset = NewRecordEndOffset
-                End If
+                Next
 
-                Results.Add(Result)
-                Offsets.Add(NewRecordOffset)
+                Await PlaceChunkRecordsWritesAsync(PreparedRecords, Offsets, RunAsync, CancellationToken).ConfigureAwait(False)
 
-            Next
+                '
+                ' Every write above has now physically completed - only now do these records
+                ' become visible to reads/persistence. Mark dirty before each table add, same
+                ' ordering rule as everywhere else (see MovePhysicalRecordOrdinal's comment). A
+                ' kill anywhere before this point leaves _PhysicalRecords untouched (the Finally
+                ' below releases the reservations either way); a kill here still faults the
+                ' stream and every record whose write already completed is safe to have visible.
+                '
+                For Index = 0 To Results.Count - 1
+
+                    Dim Result = Results(Index)
+                    Dim Ordinal = Ordinals(Index)
+
+                    MarkPhysicalRecordPageDirtyByOrdinal(Ordinal)
+
+                    _PhysicalRecords.Add(Result.RecordId, Result)
+
+                    AddPhysicalRecordToIndexes(Result, Ordinal)
+
+                Next
+
+                Return Results
+
+            Finally
+
+                '
+                ' Release exactly the reservations this call added. On the success path every
+                ' one of these ranges is now covered by _PhysicalRecords itself (registered
+                ' above), so this is a no-op for allocation purposes; on an aborted/faulted
+                ' path it stops the range leaking as permanently-unusable phantom space.
+                ' Tuple(Of Long, Long) has value equality, so Remove finds the same range this
+                ' call added even though it's a different instance than any other batch might
+                ' coincidentally reserve.
+                '
+                For Each Reservation In Reservations
+                    _PendingBatchReservations.Remove(Reservation)
+                Next
+
+            End Try
+
+        End Function
+
+        Private Async Function PlaceChunkRecordsWritesAsync(PreparedRecords As IReadOnlyList(Of PreparedChunkRecord),
+                                                             Offsets As IReadOnlyList(Of Long),
+                                                             RunAsync As Boolean,
+                                                             CancellationToken As Threading.CancellationToken) As Task
 
             If RunAsync AndAlso PreparedRecords.Count > 1 AndAlso
                Options.MaxPhysicalWriteParallelism > 1 AndAlso
@@ -1398,8 +1499,6 @@ Namespace Streams
                 Next
 
             End If
-
-            Return Results
 
         End Function
 

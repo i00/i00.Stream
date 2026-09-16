@@ -258,6 +258,93 @@ Namespace Tests
             End Sub
 
             ' ================================================================================
+            ' Deterministic mid-batch fault injection
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Regression for a batched-write record becoming visible in <c>_PhysicalRecords</c>
+            ''' before its own bytes were actually written to the backing store.
+            ''' <c>PlaceChunkRecordsAsync</c> - the path every multi-chunk <c>Write()</c> call
+            ''' uses to place more than one physical record at once - used to register every
+            ''' record in the batch up front, before issuing any of the batch's writes. A
+            ''' failure landing on the very first of those writes therefore used to leave the
+            ''' *entire* batch registered anyway, even though none of it was ever written -
+            ''' surfacing later as "Physical record N extends beyond the backing stream." on
+            ''' the next read of any of them. The fix defers registration until every write in
+            ''' the batch has completed, with a new <c>_PendingBatchReservations</c> list
+            ''' keeping the <c>BestFitScan</c>/<c>FirstFitScan</c> free-space rebuild (and
+            ''' ordinary hole allocation) from handing two records in the same in-flight batch
+            ''' the same offset in the meantime.
+            ''' </summary>
+            ''' <remarks>
+            ''' Unlike <see cref="KillingAWorkerThreadDuringRecordChurnNeverTearsThePhysicalRecordIndex"/>,
+            ''' this does not rely on real thread-abort timing (confirmed, while developing this
+            ''' fix, to be far too coarse to reliably land inside this specific window - a
+            ''' Thread.Abort-based version of this test kept passing even against the unfixed
+            ''' code). <see cref="FailingMemoryStream"/> instead deterministically fails the very
+            ''' first backing-store write of a fresh stream's first <c>Write()</c> call - large
+            ''' enough to split into several chunk records, so <c>BuildExtentsFromBufferAsync</c>
+            ''' must dispatch to <c>PlaceChunkRecordsAsync</c>'s multi-record batch path, and
+            ''' targeting an empty stream so there is no existing last chunk
+            ''' <c>TryExtendLastChunkAsync</c> could instead absorb the write into (that single-
+            ''' record path already wrote before registering, so it can never reproduce this -
+            ''' an earlier version of this test used a non-empty baseline and, unnoticed at
+            ''' first, exercised only that already-correct path on every run).
+            ''' </remarks>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub AFailedBatchedWriteNeverRegistersAnUnwrittenRecord()
+
+                Dim Backing As New FailingMemoryStream()
+
+                Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                    .ChunkSize = 256,
+                    .ChunkSizeVariance = 0,
+                    .NewChunkWriteLocationPolicy = ChunkedStream.ChunkedStreamOptions.NewWriteLocationPolicies.BestFitScan
+                }
+
+                Using Cs = ChunkedStream.Open(Backing, Options)
+
+                    Dim CountBeforeFailure = Cs.Debug_GetPhysicalRecordCount()
+
+                    ' Fails the very next backing-store write - the first record of the batch
+                    ' this write below must place, since the stream is still empty - so every
+                    ' record GetNextWriteOffset plans for the batch is reserved but not one of
+                    ' them is actually written. 40 chunks' worth guarantees a real multi-record
+                    ' batch regardless of exactly where BuildExtentsFromBufferAsync's own
+                    ' single-record/parallel-build threshold falls.
+                    Backing.FailOnWriteNumber = Backing.WriteCount + 1
+
+                    AssertThrows(Of IOException)(
+                        Sub() Cs.Write(0, GenerateRandomData(Cs.Options.ChunkSize * 40, 71718)),
+                        "Expected the injected backing failure to surface.")
+
+                    Backing.FailOnWriteNumber = 0
+
+                    AssertEqual(CountBeforeFailure, Cs.Debug_GetPhysicalRecordCount(),
+                               "A failed batched write left one or more of its unwritten records " &
+                               "registered in _PhysicalRecords.")
+
+                    Cs.Recover()
+
+                    AssertEqual(0L, Cs.Length,
+                               "Recovering after the failed batched write did not restore the last durable (empty) generation.")
+
+                    ' A further write must succeed and round-trip cleanly, and Validate must
+                    ' stay clean - proof that no reservation from the failed batch was left
+                    ' leaked, permanently blocking its offsets from ever being reused.
+                    Dim FollowUp = GenerateRandomData(Cs.Options.ChunkSize * 4, 71719)
+                    Cs.Write(0, FollowUp)
+
+                    AssertBytesEqual(FollowUp, Cs.ToArray(),
+                                     "A write issued after recovery did not round-trip correctly.")
+
+                    Cs.Validate().ThrowIfErrors()
+
+                End Using
+
+            End Sub
+
+            ' ================================================================================
             ' Fuzz helpers
             ' ================================================================================
 
