@@ -7,8 +7,8 @@
     <ProjectGuid>{60C0284A-8D8E-4C88-9B99-60F03CF68B94}</ProjectGuid>
     <OutputType>WinExe</OutputType>
     <StartupObject>Sub Main</StartupObject>
-    <RootNamespace>EmbeddedFileSystemSample</RootNamespace>
-    <AssemblyName>EmbeddedFileSystemSample</AssemblyName>
+    <RootNamespace>i00.EmbeddedFileSystemSample</RootNamespace>
+    <AssemblyName>i00.EmbeddedFileSystemSample</AssemblyName>
     <FileAlignment>512</FileAlignment>
     <MyType>WindowsFormsWithCustomSubMain</MyType>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
@@ -22,7 +22,7 @@
     <DefineDebug>true</DefineDebug>
     <DefineTrace>true</DefineTrace>
     <OutputPath>bin\Debug\</OutputPath>
-    <DocumentationFile>EmbeddedFileSystemSample.xml</DocumentationFile>
+    <DocumentationFile>i00.EmbeddedFileSystemSample.xml</DocumentationFile>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
@@ -33,7 +33,7 @@
     <DefineTrace>true</DefineTrace>
     <Optimize>true</Optimize>
     <OutputPath>bin\Release\</OutputPath>
-    <DocumentationFile>EmbeddedFileSystemSample.xml</DocumentationFile>
+    <DocumentationFile>i00.EmbeddedFileSystemSample.xml</DocumentationFile>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
   </PropertyGroup>
   <PropertyGroup>
@@ -113,6 +113,7 @@
     <Compile Include="i00CodeLib\ToolStripAsMenu.vb" />
     <Compile Include="i00CodeLib\UsingLambda.vb" />
     <Compile Include="i00CodeLib\VirtualFileDragDrop.vb" />
+    <Compile Include="i00CodeLib\_External\ClipboardMessageFilter.vb" />
     <Compile Include="i00CodeLib\_External\CommandLineParser.vb" />
     <Compile Include="i00CodeLib\_External\MouseNavigationButtonsMessageFilter.vb" />
     <Compile Include="i00CodeLib\_External\MemoizedEnumerable.vb" />

@@ -46,12 +46,9 @@ Public NotInheritable Class Autoexec
                 .CompressionMethod = i00.Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
                 .AutoRecoverOnFault = True,
                 .EncryptionInfo = EncryptionInfo,
-                .ChunkSize = 4 * 1024 * 1024,
+                .ChunkSizeVariance = 0.25,
                 .Deduplication = True,
-                .MaxCryptoParallelism = 8,
-                .MaxPhysicalReadParallelism = 8,
-                .MaxPhysicalWriteParallelism = 8,
-                .MaxSubBlockCryptoParallelism = 8
+                .CurrentChunkWriteCaching = True
             }
             Try
                 Using cs = i00.Streams.ChunkedStream.Open(fs, Options)

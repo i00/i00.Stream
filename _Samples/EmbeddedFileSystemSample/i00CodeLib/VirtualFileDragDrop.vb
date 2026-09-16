@@ -2,7 +2,6 @@
 Imports System.IO
 Imports System.Runtime.InteropServices
 Imports System.Runtime.InteropServices.ComTypes
-Imports System.Windows
 
 'DOWNLOADED FROM http://blogs.msdn.com/b/delay/archive/2009/11/04/creating-something-from-nothing-asynchronously-developer-friendly-virtual-file-implementation-for-net-improved.aspx
 'AND MODIFIED BY i00
@@ -19,7 +18,7 @@ Namespace VirtualDragCopyFiles
     ''' </summary>
     <System.Diagnostics.DebuggerNonUserCode>
     Public NotInheritable Class VirtualFileDataObject
-        Implements System.Runtime.InteropServices.ComTypes.IDataObject
+        Implements IDataObject
         Implements IAsyncOperation
 
 
@@ -78,6 +77,10 @@ Namespace VirtualDragCopyFiles
         End Function
 
         Private Declare Auto Function RegisterClipboardFormat Lib "user32.dll" (<MarshalAs(UnmanagedType.LPTStr)> lpString As String) As UInteger
+
+        Public Shared Function RegisterClipboardDataFormat(FormatName As String) As Short
+            Return ToShort(CInt(RegisterClipboardFormat(FormatName)))
+        End Function
 
         ' Registered clipboard-format ids are in the 0xC000-0xFFFF range, so CShort() on them overflows.
         ' ToShort() reinterprets the low 16 bits (the C# "(short)(ushort)x" idiom) - feed it the raw value.

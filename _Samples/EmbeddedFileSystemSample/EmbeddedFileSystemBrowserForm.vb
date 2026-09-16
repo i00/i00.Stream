@@ -6,7 +6,7 @@ Imports System.IO.Compression
 Imports System.Threading
 Imports System.Runtime.InteropServices
 Imports System.Text.RegularExpressions
-Imports EmbeddedFileSystemSample.VirtualDragCopyFiles
+Imports i00.EmbeddedFileSystemSample.VirtualDragCopyFiles
 
 Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
@@ -305,6 +305,45 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Class
 
     ''' <summary>
+    ''' One paste step sourced from this embedded file system itself, for pasting a Cut or Copy back into
+    ''' the browser (see <see cref="PasteEmbeddedEntries"/>). Reads straight out of the source entry via
+    ''' <see cref="EmbeddedFileReadStream"/> - the same streaming reader <see cref="StreamEmbeddedContent"/>
+    ''' uses for an external drag - so nothing is buffered in memory or spilled to a temp file.
+    ''' </summary>
+    Private NotInheritable Class EmbeddedUploadWorkItem
+        Inherits UploadWorkItem
+
+        Private ReadOnly _FileSystem As EmbeddedFileSystem
+        Private ReadOnly ContentAnchorId As Long
+        Private ReadOnly _LogicalSize As Long
+
+        ''' <summary>A directory step: create <paramref name="Name"/> under <paramref name="RelativeParent"/>.</summary>
+        Public Sub New(RelativeParent As String, Name As String)
+            MyBase.New(RelativeParent, Name, True)
+        End Sub
+
+        ''' <summary>A file step: stream the entry at <paramref name="ContentAnchorId"/> out of <paramref name="FileSystem"/>.</summary>
+        Public Sub New(FileSystem As EmbeddedFileSystem, ContentAnchorId As Long, RelativeParent As String, Name As String, Length As Long)
+            MyBase.New(RelativeParent, Name, False)
+            _FileSystem = FileSystem
+            Me.ContentAnchorId = ContentAnchorId
+            _LogicalSize = Length
+        End Sub
+
+        Public Overrides ReadOnly Property LogicalSize As Long
+            Get
+                Return _LogicalSize
+            End Get
+        End Property
+
+        Public Overrides Function CreateStream() As Stream
+            Dim Source = EmbeddedFileReadStream.TryOpen(_FileSystem, ContentAnchorId, _LogicalSize)
+            If Source Is Nothing Then Throw New IOException($"'{Name}' is no longer available in the embedded file system.")
+            Return Source
+        End Function
+    End Class
+
+    ''' <summary>
     ''' Publishes a total byte count computed on a background thread. Reads and writes are
     ''' interlocked so the copy thread never observes a torn value.
     ''' </summary>
@@ -451,6 +490,17 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     ''' </summary>
     Private _LabelEditRequested As Boolean
 
+    ''' <summary>
+    ''' The selection from the most recent in-app Cut or Copy, kept alongside the identical payload placed
+    ''' on the OS clipboard (see <see cref="CutOrCopySelection"/>) so an in-app Paste can stream directly
+    ''' from one embedded location to another instead of round-tripping through the shell. Cleared once a
+    ''' Cut is actually consumed - by an in-app Paste (<see cref="PasteEmbeddedEntries"/>), or by a paste
+    ''' into Explorer (<see cref="OnStreamedDragFinished"/>, shared with the drag-out path).
+    ''' </summary>
+    Private _ClipboardEntries As List(Of DraggedEntry)
+    Private _ClipboardIsCut As Boolean
+
+    Private WithEvents _ClipboardFilter As New ClipboardMessageFilter()
 
     Public Sub New(FileSystem As EmbeddedFileSystem)
         If FileSystem Is Nothing Then Throw New ArgumentNullException(NameOf(FileSystem))
@@ -462,7 +512,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         InitializeComponent()
 
-        tvFolders.ImageList = _IconProvider.TreeImages
+        'tvFolders.ImageList = _IconProvider.TreeImages
         tvFolders.LabelEdit = True
         lvFiles.ListViewItemSorter = _ListSorter
         lvFiles.LabelEdit = True
@@ -494,6 +544,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         RefreshFileSystemView()
 
         SetAddressText(String.Empty)
+
+        _ClipboardFilter.Attach(Me)
 
     End Sub
 
@@ -912,7 +964,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     ''' Starts a new folder in the current directory as an uncommitted tree node whose name is typed in
     ''' place. Pressing Escape (or leaving it blank) drops the node; a name creates the folder for real.
     ''' </summary>
-    Private Sub BeginNewFolderInline(Sender As Object, EventArgs As EventArgs) Handles tsiNewFolder.Click, tsiFolderNewFolder.Click
+    Private Sub BeginNewFolderInline(Sender As Object, EventArgs As EventArgs) Handles tsiNewFolder.Click
         If _SearchActive Then Return
         Dim ParentAnchorId = _CurrentDirectoryAnchorId
         If ParentAnchorId <= 0 Then Return
@@ -947,7 +999,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         NewNode.BeginEdit()
     End Sub
 
-    Private Sub RenameSelectedFolder(Sender As Object, EventArgs As EventArgs) Handles tsiFolderRename.Click
+    Private Sub RenameSelectedFolder(Sender As Object, EventArgs As EventArgs)
         If tvFolders.SelectedNode Is Nothing Then Return
         tvFolders.Focus()
         _LabelEditRequested = True
@@ -1070,10 +1122,19 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
     ' ---- File list label editing -------------------------------------------------------------------
 
-    Private Sub RenameSelectedListEntry(Sender As Object, EventArgs As EventArgs) Handles tsiRename.Click
+    Private Sub RenameSelectedListEntry(Sender As Object, EventArgs As EventArgs)
         If lvFiles.SelectedIndices.Count <> 1 Then Return
         lvFiles.Select()
         lvFiles.Items(lvFiles.SelectedIndices(0)).BeginEdit()
+    End Sub
+
+    ''' <summary>Rename is the tree's in-place label edit or the list's, depending which one asked.</summary>
+    Private Sub tsiRename_Click(Sender As Object, EventArgs As EventArgs) Handles tsiRename.Click
+        If FileContextMenu.SourceControl Is tvFolders Then
+            RenameSelectedFolder(Sender, EventArgs)
+        Else
+            RenameSelectedListEntry(Sender, EventArgs)
+        End If
     End Sub
 
     Private Sub lvFiles_BeforeLabelEdit(Sender As Object, EventArgs As LabelEditEventArgs) Handles lvFiles.BeforeLabelEdit
@@ -1969,40 +2030,37 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     ' to open at all, even for the gesture that emptied it), then shown with only the relevant items.
     ' ===================================================================================================
 
-    Private Sub FileMenu_Open(Sender As Object, EventArgs As EventArgs) Handles tsiOpen.Click
+    Private Sub OpenSelectedListEntry(Sender As Object, EventArgs As EventArgs)
         Dim Entries = GetSelectedEntries()
         If Entries.Count = 1 AndAlso IsDirectory(Entries(0)) Then NavigateToDirectory(Entries(0).ChildAnchorId)
     End Sub
 
-    Private Sub MiViewXlThumb_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewXlThumb.Click
-        SelectFileListView(View.LargeIcon, 256)
+    ''' <summary>Open is the tree's Expand-and-navigate or the list's navigate-into-the-one-selected-folder.</summary>
+    Private Sub tsiOpen_Click(Sender As Object, EventArgs As EventArgs) Handles tsiOpen.Click
+        If FileContextMenu.SourceControl Is tvFolders Then
+            OpenSelectedDirectory(Sender, EventArgs)
+        Else
+            OpenSelectedListEntry(Sender, EventArgs)
+        End If
     End Sub
 
-    Private Sub MiViewLgThumb_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewLgThumb.Click
-        SelectFileListView(View.LargeIcon, 128)
-    End Sub
-
-    Private Sub MiViewLgIcon_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewLgIcon.Click
-        SelectFileListView(View.LargeIcon, 0)
-    End Sub
-
-    Private Sub MiViewSmIcon_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewSmIcon.Click
-        SelectFileListView(View.SmallIcon, 0)
-    End Sub
-
-    Private Sub MiViewList_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewList.Click
-        SelectFileListView(View.List, 0)
-    End Sub
-
-    Private Sub MiViewDetails_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewDetails.Click
-        SelectFileListView(View.Details, 0)
-    End Sub
-
-    Private Sub MiViewTiles_Click(Sender As Object, EventArgs As EventArgs) Handles tsiViewTiles.Click
-        SelectFileListView(View.Tile, 0)
-    End Sub
-
+    ''' <summary>
+    ''' One shared context menu for both the folder tree and the file list - <see cref="ContextMenuStrip.SourceControl"/>
+    ''' (set by the <c>.Show(control, location)</c> calls in <see cref="lvFiles_MouseDown"/> and
+    ''' <see cref="tvFolders_MouseDown"/>) says which one is asking, so a single set of menu items can
+    ''' cover both instead of keeping two menus - and two implementations of Cut/Copy/Paste - in sync by hand.
+    ''' </summary>
     Private Sub FileContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs) Handles FileContextMenu.Opening
+        If FileContextMenu.SourceControl Is tvFolders Then
+            ConfigureContextMenuForFolderTree(EventArgs)
+        Else
+            ConfigureContextMenuForFileList()
+        End If
+
+        TidySeparators(FileContextMenu.Items)
+    End Sub
+
+    Private Sub ConfigureContextMenuForFileList()
         Dim Entries = GetSelectedEntries()
         Dim One = Entries.Count = 1
         Dim OneDir = One AndAlso IsDirectory(Entries(0))
@@ -2018,12 +2076,63 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         tsiUploadFolder.Available = _SearchActive = False
         tsiNewFolder.Available = _SearchActive = False AndAlso Any = False
         tsiRefresh.Available = True
+
         tsiView.Available = True
-        ' We did use DrawIconViewItem to custom render these - but we are in the process of unifying it all into DrawThumbnailItem...
-        ' so in the meantime these are not avaliable:
-        tsiViewSmIcon.Available = False
-        tsiViewList.Available = False
-        tsiViewTiles.Available = False
+        'ok now lets add the sub items in tsView
+        Dim CreateViewTsi = Function(ListViewViewSetting As ListViewViewSettingAttribute)
+                                Dim Returner = New ToolStripMenuItem(ListViewViewSetting.DisplayName, Nothing,
+                                    Sub(ss, ee)
+                                        Dim tsi = DirectCast(ss, ToolStripMenuItem)
+                                        If tsi.Checked = False Then
+                                            SelectFileListView(ListViewViewSetting.View, ListViewViewSetting.CustomThumbnailSize)
+                                        End If
+                                    End Sub)
+                                Returner.Tag = ListViewViewSetting
+                                Return Returner
+                            End Function
+
+        Dim GetViewItems = Function()
+                               Return tsiView.DropDownItems.
+                                   OfType(Of ToolStripMenuItem).
+                                   Select(Function(x) New With {.tsi = x, .ListViewViewSetting = DirectCast(x.Tag, ListViewViewSettingAttribute)}).
+                                   Where(Function(x) x.ListViewViewSetting IsNot Nothing).
+                                   ToList()
+                           End Function
+
+        Dim ViewItems = GetViewItems()
+        If ViewItems.Any = False Then
+            For Each item In ListViewViewSettingAttribute.Dictionary.Reverse()
+                tsiView.DropDownItems.Add(CreateViewTsi(item.Value))
+            Next
+            tsiView.DropDownItems.Add(New ToolStripSeparator)
+            ViewItems = GetViewItems()
+        End If
+
+        'remove any custom items..
+        ViewItems.ToList.ForEach(Sub(x)
+                                     If x.ListViewViewSetting.InList = False Then
+                                         ViewItems.Remove(x)
+                                         tsiView.DropDownItems.Remove(x.tsi)
+                                     End If
+                                 End Sub)
+
+        Dim ViewSelectedItem = ListViewViewSettingAttribute.FromSettings(lvFiles.View, lvFiles.LargeImageList.ImageSize.Width)
+        Dim ItemChecked = ViewItems.Take(0).FirstOrDefault
+        For Each item In ViewItems
+            Dim Checked = item.ListViewViewSetting Is ViewSelectedItem
+            item.tsi.Checked = Checked
+            If Checked Then
+                ItemChecked = item
+            End If
+        Next
+        If ItemChecked Is Nothing Then
+            'custom
+            Dim tsi = CreateViewTsi(ViewSelectedItem)
+            tsi.Checked = True
+            tsiView.DropDownItems.Add(tsi)
+        End If
+        TidySeparators(tsiView.DropDownItems)
+
 
         tsiSortBy.Available = True
         Static SortByMenuItems As Dictionary(Of Integer, ToolStripMenuItem) =
@@ -2044,34 +2153,36 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         tsiCut.Available = Any
         tsiCopy.Available = Any
-        tsiPaste.Available = True 'TODO: <
-
-        UpdateViewMenuChecks()
-
-        TidySeparators(FileContextMenu)
+        tsiPaste.Available = _SearchActive = False AndAlso CanPaste()
     End Sub
 
-    Private Sub FolderContextMenu_Opening(Sender As Object, EventArgs As CancelEventArgs) Handles FolderContextMenu.Opening
+    Private Sub ConfigureContextMenuForFolderTree(EventArgs As CancelEventArgs)
         If tvFolders.SelectedNode Is Nothing Then
             EventArgs.Cancel = True
             Return
         End If
         Dim IsRoot = GetSelectedDirectoryAnchorId() = _FileSystem.RootAnchorId
 
-        tsiFolderOpen.Available = True
-        tsiFolderUploadFiles.Available = True
-        tsiFolderUploadFolder.Available = True
-        tsiFolderNewFolder.Available = True
-        tsiSaveFolderAs.Available = True
-        tsiFolderRename.Available = IsRoot = False
-        tsiDeleteFolder.Available = IsRoot = False
-        tsiFolderRefresh.Available = True
+        tsiOpen.Available = True
+        tsiOpenContainingFolder.Available = False
+        tsiSaveAs.Available = True
+        tsiSaveAs.Text = "Save Folder As..."
+        tsiRename.Available = IsRoot = False
+        tsiDelete.Available = IsRoot = False
+        tsiUploadFiles.Available = True
+        tsiUploadFolder.Available = True
+        tsiNewFolder.Available = True
+        tsiRefresh.Available = True
+        tsiView.Available = False
+        tsiSortBy.Available = False
 
-        TidySeparators(FolderContextMenu)
+        tsiCut.Available = IsRoot = False
+        tsiCopy.Available = IsRoot = False
+        tsiPaste.Available = CanPaste()
     End Sub
 
     Private Sub ContextMenu_Closed(Sender As Object, EventArgs As ToolStripDropDownClosedEventArgs) _
-            Handles FileContextMenu.Closed, FolderContextMenu.Closed
+            Handles FileContextMenu.Closed
         Dim Menu = TryCast(Sender, ContextMenuStrip)
         If Menu IsNot Nothing Then MakeAllItemsAvailable(Menu.Items)
     End Sub
@@ -2086,10 +2197,10 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     ''' <summary>Hides leading, trailing and doubled-up separators for the currently visible items.</summary>
-    Private Shared Sub TidySeparators(Menu As ContextMenuStrip)
+    Private Shared Sub TidySeparators(ToolstripItems As ToolStripItemCollection)
         Dim PreviousWasContent = False
         Dim LastSeparator As ToolStripSeparator = Nothing
-        For Each Item As ToolStripItem In Menu.Items
+        For Each Item As ToolStripItem In ToolstripItems
             Dim Separator = TryCast(Item, ToolStripSeparator)
             If Separator IsNot Nothing Then
                 Separator.Available = PreviousWasContent
@@ -2105,16 +2216,6 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         If LastSeparator IsNot Nothing Then LastSeparator.Available = False
     End Sub
 
-    Private Sub UpdateViewMenuChecks()
-        tsiViewXlThumb.Checked = _ThumbnailCellSize = 256
-        tsiViewLgThumb.Checked = _ThumbnailCellSize = 128
-        tsiViewLgIcon.Checked = _ThumbnailCellSize = 0 AndAlso lvFiles.View = View.LargeIcon
-        tsiViewSmIcon.Checked = _ThumbnailCellSize = 0 AndAlso lvFiles.View = View.SmallIcon
-        tsiViewList.Checked = _ThumbnailCellSize = 0 AndAlso lvFiles.View = View.List
-        tsiViewDetails.Checked = _ThumbnailCellSize = 0 AndAlso lvFiles.View = View.Details
-        tsiViewTiles.Checked = _ThumbnailCellSize = 0 AndAlso lvFiles.View = View.Tile
-    End Sub
-
     ''' <summary>
     ''' Applies a file-list view and remembers it (view mode plus thumbnail cell size). A search has its
     ''' own persisted view state (<see cref="My.MySettings.SearchListView"/>) separate from a folder's.
@@ -2122,10 +2223,12 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     Private Sub SelectFileListView(TargetView As View, ThumbnailCellSize As Integer)
         SetFileListView(TargetView, ThumbnailCellSize)
         Try
+            Dim ListViewViewSetting = ListViewViewSettingAttribute.FromSettings(TargetView, ThumbnailCellSize)
+
             If _SearchActive Then
-                My.Settings.SearchListView = SerializeFileListView(TargetView, ThumbnailCellSize)
+                My.Settings.SearchListView = ListViewViewSetting.ToEnum
             Else
-                My.Settings.FileListView = SerializeFileListView(TargetView, ThumbnailCellSize)
+                My.Settings.FileListView = ListViewViewSetting.ToEnum
             End If
             My.Settings.Save()
         Catch
@@ -2134,41 +2237,123 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
     End Sub
 
     Private Sub ApplySavedFileListView()
-        Dim Saved As String = Nothing
+        Dim ListViewViewSetting = ListViewViewSettings.Details
         Try
-            Saved = My.Settings.FileListView
+            ListViewViewSetting = DirectCast(My.Settings.FileListView, ListViewViewSettings)
         Catch
         End Try
-        ApplySavedListView(Saved, View.Details)
+        SetFileListView(ListViewViewSettingAttribute.FromEnum(ListViewViewSetting))
     End Sub
 
     ''' <summary>Applies the search result view, which defaults to a plain list.</summary>
     Private Sub ApplySavedSearchListView()
-        Dim Saved As String = Nothing
+        Dim ListViewViewSetting = ListViewViewSettings.Details
         Try
-            Saved = My.Settings.SearchListView
+            ListViewViewSetting = DirectCast(My.Settings.SearchListView, ListViewViewSettings)
         Catch
         End Try
-        ApplySavedListView(Saved, View.List)
+        SetFileListView(ListViewViewSettingAttribute.FromEnum(ListViewViewSetting))
     End Sub
 
-    Private Sub ApplySavedListView(Saved As String, Fallback As View)
-        Select Case Saved
-            Case "Thumbnail256" : SetFileListView(View.LargeIcon, 256)
-            Case "Thumbnail128" : SetFileListView(View.LargeIcon, 128)
-            Case "LargeIcon" : SetFileListView(View.LargeIcon, 0)
-            Case "SmallIcon" : SetFileListView(View.SmallIcon, 0)
-            Case "List" : SetFileListView(View.List, 0)
-            Case "Tile" : SetFileListView(View.Tile, 0)
-            Case "Details" : SetFileListView(View.Details, 0)
-            Case Else : SetFileListView(Fallback, 0)
-        End Select
-    End Sub
+    <AttributeUsage(AttributeTargets.Field)>
+    Friend Class ListViewViewSettingAttribute
+        Inherits Attribute
+        Public ReadOnly Property View As View
+        Public ReadOnly Property CustomThumbnailSize As Integer
+        Public ReadOnly Property DisplayName As String
+        Public ReadOnly Property InList As Boolean
+        Public Sub New(View As View, DisplayName As String)
+            Me.View = View
+            Select Case View
+                Case View.LargeIcon
+                    CustomThumbnailSize = 32
+                Case View.Tile
+                    CustomThumbnailSize = 48
+            End Select
+            Me.DisplayName = DisplayName
+            InList = True
+        End Sub
 
-    Private Shared Function SerializeFileListView(TargetView As View, ThumbnailCellSize As Integer) As String
-        If ThumbnailCellSize <> 0 Then Return $"Thumbnail{ThumbnailCellSize}"
-        Return TargetView.ToString()
-    End Function
+        Public Sub New(CustomThumbnailSize As Integer, DisplayName As String)
+            Me.View = View.LargeIcon
+            Me.CustomThumbnailSize = CustomThumbnailSize
+            Me.DisplayName = DisplayName
+            InList = True
+        End Sub
+
+        Private Sub New(CustomThumbnailSize As Integer)
+            Me.View = View.LargeIcon
+            Me.CustomThumbnailSize = CustomThumbnailSize
+            Me.DisplayName = $"Thumbnail ({CustomThumbnailSize}px)"
+            InList = False
+        End Sub
+
+        Friend Shared Dictionary As Dictionary(Of ListViewViewSettings, ListViewViewSettingAttribute) =
+            (Function()
+                 Return [Enum].GetValues(GetType(ListViewViewSettings)).
+                               OfType(Of ListViewViewSettings).
+                               OrderBy(Function(x) Math.Abs(x)).
+                               ToDictionary(Function(x) x,
+                                            Function(x) FromEnum(x))
+             End Function).Invoke()
+
+        Friend Shared Function FromEnum(ListViewViewSetting As ListViewViewSettings) As ListViewViewSettingAttribute
+            Dim ListViewSettingField = ListViewViewSetting.GetType.GetField(ListViewViewSetting.ToString)
+            If ListViewSettingField Is Nothing Then
+                'custom size
+                Return New ListViewViewSettingAttribute(ListViewViewSetting)
+            Else
+                Return ListViewSettingField.GetCustomAttributes(GetType(ListViewViewSettingAttribute), True).
+                                            OfType(Of ListViewViewSettingAttribute).
+                                            FirstOrDefault()
+            End If
+        End Function
+
+        Friend Shared Function FromSettings(View As View, CustomThumbSize As Integer) As ListViewViewSettingAttribute
+            CustomThumbSize = Math.Max(CustomThumbSize, 0)
+            Dim Returner = Dictionary.Where(Function(x) (x.Value.View = View.LargeIcon AndAlso x.Value.CustomThumbnailSize = CustomThumbSize) OrElse (x.Value.View <> View.LargeIcon AndAlso x.Value.View = View)).FirstOrDefault
+            If Returner.Value Is Nothing Then
+                If CustomThumbSize = 0 Then
+                    Return FromEnum(ListViewViewSettings.Details)
+                Else
+                    'lets create a custom size
+                    Return New ListViewViewSettingAttribute(CustomThumbSize)
+                End If
+            End If
+            Return Returner.Value
+        End Function
+
+        Public Function ToEnum() As ListViewViewSettings
+            Dim Preset = Dictionary.FirstOrDefault(Function(x) x.Value Is Me)
+            If Preset.Value Is Nothing Then
+                'we are not a preset ... so return a custom one
+                Return DirectCast(Me.CustomThumbnailSize, ListViewViewSettings)
+            Else
+                Return Preset.Key
+            End If
+        End Function
+
+    End Class
+
+    Friend Enum ListViewViewSettings
+        ' Some of these are not supported with the custom drawing yet
+        ' We did use DrawIconViewItem to custom render these - but we are in the process of unifying it all into DrawThumbnailItem...
+        ' so in the meantime these are not avaliable:
+
+        'NOT supported in a virtual list view:
+        '<ListViewViewSetting(View.Tile, "Tile")>
+        'Tile = -4
+        <ListViewViewSetting(View.LargeIcon, "Large Icon")>
+        LargeIcon = -3
+        'SmallIcon = -2
+        'List = -1
+        <ListViewViewSetting(View.Details, "Details")>
+        Details = 0
+        <ListViewViewSetting(128, "Large Thumbnails")>
+        Thumbnail128 = 128
+        <ListViewViewSetting(256, "Extra Large Thumbnails")>
+        Thumbnail256 = 256
+    End Enum
 
     ''' <summary>
     ''' Switches the file list to <paramref name="TargetView"/>. A non-zero <paramref name="ThumbnailCellSize"/>
@@ -2183,18 +2368,23 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim EffectiveView = If(TargetView = View.Tile, View.LargeIcon, TargetView)
         lvFiles.BeginUpdate()
         Try
-            If ThumbnailCellSize >= 256 Then
-                lvFiles.LargeImageList = Thumbnail256Sizer
-            ElseIf ThumbnailCellSize > 0 Then
-                lvFiles.LargeImageList = Thumbnail128Sizer
+            ThumbnailCellSize = Math.Min(ThumbnailCellSize, 256)
+            ThumbnailCellSize = Math.Max(ThumbnailCellSize, 0)
+            If ThumbnailCellSize > 0 Then
+                ThumbnailSizer.ImageSize = New Size(ThumbnailCellSize, ThumbnailCellSize)
             Else
-                lvFiles.LargeImageList = Large32Sizer
+                ThumbnailSizer.ImageSize = New Size(32, 32)
             End If
+            lvFiles.LargeImageList = ThumbnailSizer
             lvFiles.View = If(ThumbnailCellSize > 0, View.LargeIcon, EffectiveView)
         Finally
             lvFiles.EndUpdate()
         End Try
         lvFiles.Invalidate()
+    End Sub
+
+    Private Sub SetFileListView(ListViewViewSetting As ListViewViewSettingAttribute)
+        SetFileListView(ListViewViewSetting.View, ListViewViewSetting.CustomThumbnailSize)
     End Sub
 
     ''' <summary>The icon edge, in pixels, for the current view.</summary>
@@ -2382,7 +2572,76 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End If
     End Sub
 
+    Private Shared Function DrawTreeLines(TreeView As TreeView, e As DrawTreeNodeEventArgs) As Integer
+
+        Const XOffset As Integer = 9
+        Const GlyphSize As Integer = 9
+        Const Padding As Integer = 4
+
+        Using LinePen As New Pen(TreeView.ForeColor)
+
+            ' Draw parent continuation lines
+            Dim Parent = e.Node.Parent
+
+            While Parent IsNot Nothing
+
+                If Parent.NextNode IsNot Nothing Then
+
+                    Dim X = XOffset + (Parent.Level * TreeView.Indent) + (GlyphSize \ 2)
+
+                    e.Graphics.DrawLine(LinePen, X, e.Bounds.Top, X, e.Bounds.Bottom)
+                End If
+
+                Parent = Parent.Parent
+            End While
+
+            ' This node's glyph position
+            Dim GlyphX = XOffset + (e.Node.Level * TreeView.Indent)
+            Dim GlyphY = e.Bounds.Top + (e.Bounds.Height - GlyphSize) \ 2
+
+            If e.Node.Parent IsNot Nothing Then
+
+                ' Horizontal connector
+                e.Graphics.DrawLine(LinePen, GlyphX + GlyphSize \ 2, e.Bounds.Top + e.Bounds.Height \ 2, GlyphX + GlyphSize + Padding, e.Bounds.Top + e.Bounds.Height \ 2)
+
+                ' Vertical connector above
+                e.Graphics.DrawLine(LinePen, GlyphX + GlyphSize \ 2, e.Bounds.Top, GlyphX + GlyphSize \ 2, e.Bounds.Top + e.Bounds.Height \ 2)
+
+                ' Vertical connector below
+                If e.Node.NextNode IsNot Nothing Then
+                    e.Graphics.DrawLine(LinePen, GlyphX + GlyphSize \ 2, e.Bounds.Top + e.Bounds.Height \ 2, GlyphX + GlyphSize \ 2, e.Bounds.Bottom)
+                End If
+
+            End If
+
+            ' Draw +/- glyph
+            If e.Node.Nodes.Count > 0 Then
+
+                Dim GlyphRect As New Rectangle(GlyphX, GlyphY, GlyphSize, GlyphSize)
+
+                Using sb As New SolidBrush(TreeView.BackColor)
+                    e.Graphics.FillRectangle(sb, GlyphRect)
+                End Using
+                e.Graphics.DrawRectangle(LinePen, GlyphRect)
+
+                e.Graphics.DrawLine(LinePen, GlyphRect.Left + 2, GlyphRect.Top + GlyphRect.Height \ 2, GlyphRect.Right - 2, GlyphRect.Top + GlyphRect.Height \ 2)
+
+                If e.Node.IsExpanded = False Then
+
+                    e.Graphics.DrawLine(LinePen, GlyphRect.Left + GlyphRect.Width \ 2, GlyphRect.Top + 2, GlyphRect.Left + GlyphRect.Width \ 2, GlyphRect.Bottom - 2)
+
+                End If
+
+            End If
+
+            Return GlyphX + GlyphSize + Padding
+
+        End Using
+
+    End Function
+
     Private Sub tvFolders_DrawNode(sender As Object, e As DrawTreeNodeEventArgs) Handles tvFolders.DrawNode
+        Const IconPadding As Integer = 3
 
         'stop the built in control from rendering the background
         Using sb As New SolidBrush(lvFiles.BackColor)
@@ -2390,6 +2649,22 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Using
 
         Dim Bounds = e.Bounds
+        Dim BoundsX = DrawTreeLines(tvFolders, e)
+
+        Dim Entry = TryCast(e.Node.Tag, DirectoryNodeInfo)
+        Dim IconRectangle = New Rectangle(Bounds.X + 2, Bounds.Y + ((Bounds.Height - FileIconProvider.SmallIconSize) \ 2), FileIconProvider.SmallIconSize, FileIconProvider.SmallIconSize)
+        IconRectangle.X += BoundsX
+        Dim IconWidth = tvFolders.ImageList.ImageSize.Width
+        Dim FolderImage = _IconProvider.GetShellIcon(FileIconProvider.KeyForEntry(Nothing, True), IconWidth)
+        Dim IconState = IconStates.Default
+        If Entry IsNot Nothing Then
+            IconState = GetIconState(Entry.AnchorId)
+        End If
+        DrawIconState(e.Graphics, FolderImage, IconRectangle, IconState)
+        BoundsX += IconWidth + IconPadding
+
+        Bounds.X += BoundsX
+        Bounds.Width -= BoundsX
 
         If e.State.HasFlag(TreeNodeStates.Selected) Then
             Using Fill As New SolidBrush(Color.FromArgb(48, SystemColors.Highlight))
@@ -2398,7 +2673,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End If
 
         Dim Flags = TextFormatFlags.VerticalCenter Or TextFormatFlags.NoPrefix
-        TextRenderer.DrawText(e.Graphics, e.Node.Text, e.Node.NodeFont, e.Bounds, e.Node.ForeColor, Flags)
+        TextRenderer.DrawText(e.Graphics, e.Node.Text, e.Node.NodeFont, Bounds, tvFolders.ForeColor, Flags)
+
 
         If e.State.HasFlag(TreeNodeStates.Focused) Then
             'EventArgs.DrawFocusRectangle()
@@ -2406,6 +2682,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 e.Graphics.DrawRectangle(Border, Bounds.X + 1, Bounds.Y + 1, Bounds.Width - 2, Bounds.Height - 2)
             End Using
         End If
+
     End Sub
 
     'Private Sub DrawIconViewItem(e As DrawListViewItemEventArgs)
@@ -2463,7 +2740,35 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim Icon = GetEntryIcon(Entry, Destination.Width)
         If Icon Is Nothing Then Return
         Canvas.InterpolationMode = InterpolationMode.HighQualityBicubic
-        Canvas.DrawImage(Icon, Destination)
+        Dim IconState = GetIconState(Entry.ChildAnchorId)
+        DrawIconState(Canvas, Icon, Destination, IconState)
+    End Sub
+
+    Private Function GetIconState(AnchorID As Long) As IconStates
+        Dim Returner = IconStates.Default
+        If _ClipboardIsCut AndAlso (_ClipboardEntries?.Any(Function(x) x.ContentAnchorId = AnchorID)).GetValueOrDefault() Then
+            Returner = Returner Or IconStates.Cut
+        End If
+        Return Returner
+    End Function
+
+    Private Enum IconStates
+        [Default] = 0
+        Cut = 1 << 0
+    End Enum
+    Private Sub DrawIconState(Graphics As Graphics, Image As Image, rect As Rectangle, IconState As IconStates)
+        If IconState.HasFlag(IconStates.Cut) Then
+            Dim ColorMatrix = New Imaging.ColorMatrix() With {
+                .Matrix33 = 0.5F ' 50% alpha
+            }
+            Using Attributes = New Imaging.ImageAttributes()
+                Attributes.SetColorMatrix(ColorMatrix, Imaging.ColorMatrixFlag.Default, Imaging.ColorAdjustType.Bitmap)
+                Graphics.DrawImage(Image, rect,
+                                   0, 0, Image.Width, Image.Height, GraphicsUnit.Pixel, Attributes)
+            End Using
+        Else
+            Graphics.DrawImage(Image, rect)
+        End If
     End Sub
 
     Private Sub DrawThumbnailItem(e As DrawListViewItemEventArgs)
@@ -2500,7 +2805,8 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         Dim IconArea = New Rectangle(Bounds.X, Bounds.Y + 3, Bounds.Width, CellSize)
         Dim Entry = TryCast(e.Item.Tag, EmbeddedFileSystem.ContentListEntry)
-        Debug.Print(Entry.Name)
+
+        Dim IconState = GetIconState(Entry.ChildAnchorId)
         Dim Thumbnail = If(IconView, Nothing, If(Entry IsNot Nothing AndAlso IsThumbnailableEntry(Entry), GetOrRequestThumbnail(Entry), Nothing))
 
         If Thumbnail IsNot Nothing Then
@@ -2520,7 +2826,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 End Using
             End Using
 
-            Canvas.DrawImage(Thumbnail, Target)
+            DrawIconState(Canvas, Thumbnail, Target, IconState)
 
             'Using Border As New Pen(Drawing.AlphaColor(SystemColors.WindowText, 63))
             '    Canvas.DrawRectangle(Border, Target.X - 1, Target.Y - 1, Target.Width + 1, Target.Height + 1)
@@ -2530,7 +2836,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         Else
             Dim TypeIcon = GetEntryIcon(Entry, IconSize)
-            If TypeIcon IsNot Nothing Then Canvas.DrawImage(TypeIcon, FitCentered(TypeIcon.Size, IconArea, CInt(CellSize * IconToCellSizeRatio)))
+            If TypeIcon IsNot Nothing Then
+                DrawIconState(Canvas, TypeIcon, FitCentered(TypeIcon.Size, IconArea, CInt(CellSize * IconToCellSizeRatio)), IconState)
+            End If
         End If
 
         Dim LabelArea = New Rectangle(Bounds.X + 2, IconArea.Bottom + 2, Bounds.Width - 4, Bounds.Bottom - IconArea.Bottom - 4)
@@ -2693,13 +3001,13 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         _ThumbnailUnavailable.Clear()
     End Sub
 
-    Private Sub OpenSelectedDirectory(Sender As Object, EventArgs As EventArgs) Handles tsiFolderOpen.Click
+    Private Sub OpenSelectedDirectory(Sender As Object, EventArgs As EventArgs)
         If tvFolders.SelectedNode Is Nothing Then Return
         tvFolders.SelectedNode.Expand()
         SetAddressText(BuildNodePath(tvFolders.SelectedNode))
     End Sub
 
-    Private Sub UploadFilesFromDialog(Sender As Object, EventArgs As EventArgs) Handles tsiUploadFiles.Click, tsiFolderUploadFiles.Click
+    Private Sub UploadFilesFromDialog(Sender As Object, EventArgs As EventArgs) Handles tsiUploadFiles.Click
         Using Dialog As New OpenFileDialog With {
             .Title = "Upload files",
             .Filter = "All files (*.*)|*.*",
@@ -2711,7 +3019,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Using
     End Sub
 
-    Private Sub UploadFolderFromDialog(Sender As Object, EventArgs As EventArgs) Handles tsiUploadFolder.Click, tsiFolderUploadFolder.Click
+    Private Sub UploadFolderFromDialog(Sender As Object, EventArgs As EventArgs) Handles tsiUploadFolder.Click
         Using Dialog As New FolderBrowserDialog With {.Description = "Select a folder to upload"}
             If Dialog.ShowDialog(Me) <> DialogResult.OK Then Return
             UploadPaths(New String() {Dialog.SelectedPath}, _CurrentDirectoryAnchorId)
@@ -2782,7 +3090,11 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
 
         OnMutatedFileSystem()
 
-        'select items just copied:
+        SelectPastedItems(PostSelectionItems)
+    End Sub
+
+    ''' <summary>Selects, in the file list, whichever top-level items an upload or paste just produced.</summary>
+    Private Sub SelectPastedItems(PostSelectionItems As IList(Of String))
         Dim ItemsInFolder = _DisplayedItems.
                              Select(Function(x, Index) New With {.Index = Index,
                                                                   .ContentListEntry = TryCast(x.Tag, EmbeddedFileSystem.ContentListEntry)}).
@@ -2888,6 +3200,39 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
             For Each WorkItem In EnumerateDirectoryEntries(ChildPath, ChildRelativeParent, New DirectoryInfo(ChildPath).Name)
                 Yield WorkItem
             Next
+        Next
+    End Function
+
+    ''' <summary>
+    ''' Lazily walks a Cut/Copy selection that came from this embedded file system, yielding a
+    ''' directory-create or file-copy step for each entry - the same shape <see cref="EnumerateDirectoryEntries"/>
+    ''' produces for a disk upload, so <see cref="CopyUploadWorkList"/> can paste it without caring where
+    ''' it came from.
+    ''' </summary>
+    Private Iterator Function EnumerateEmbeddedUploadEntries(Entries As IEnumerable(Of DraggedEntry)) As IEnumerable(Of UploadWorkItem)
+        For Each Entry In Entries
+            If Entry.IsDirectory Then
+                For Each WorkItem In EnumerateEmbeddedDirectoryEntries(Entry.ContentAnchorId, String.Empty, Entry.Name)
+                    Yield WorkItem
+                Next
+            Else
+                Yield New EmbeddedUploadWorkItem(_FileSystem, Entry.ContentAnchorId, String.Empty, Entry.Name, Entry.Length)
+            End If
+        Next
+    End Function
+
+    Private Iterator Function EnumerateEmbeddedDirectoryEntries(DirectoryAnchorId As Long, RelativeParent As String, Name As String) As IEnumerable(Of UploadWorkItem)
+        Yield New EmbeddedUploadWorkItem(RelativeParent, Name)
+        Dim ChildRelativeParent = If(RelativeParent.Length = 0, Name, $"{RelativeParent}\{Name}")
+
+        For Each ChildEntry In _FileSystem.GetDirectoryEntries(DirectoryAnchorId)
+            If ChildEntry.EntryType = EmbeddedFileSystem.EntryTypes.Directory Then
+                For Each WorkItem In EnumerateEmbeddedDirectoryEntries(ChildEntry.ChildAnchorId, ChildRelativeParent, ChildEntry.Name)
+                    Yield WorkItem
+                Next
+            ElseIf ChildEntry.EntryType = EmbeddedFileSystem.EntryTypes.File Then
+                Yield New EmbeddedUploadWorkItem(_FileSystem, ChildEntry.ChildAnchorId, ChildRelativeParent, ChildEntry.Name, ChildEntry.LengthOfDataAtEntry)
+            End If
         Next
     End Function
 
@@ -3075,7 +3420,16 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Return Choice
     End Function
 
-    Private Sub SaveSelectedEntries(Sender As Object, EventArgs As EventArgs) Handles tsiSaveAs.Click
+    ''' <summary>Save As... is the tree's whole-folder export or the list's, depending which one asked.</summary>
+    Private Sub tsiSaveAs_Click(Sender As Object, EventArgs As EventArgs) Handles tsiSaveAs.Click
+        If FileContextMenu.SourceControl Is tvFolders Then
+            SaveSelectedFolder(Sender, EventArgs)
+        Else
+            SaveSelectedEntries(Sender, EventArgs)
+        End If
+    End Sub
+
+    Private Sub SaveSelectedEntries(Sender As Object, EventArgs As EventArgs)
         Dim Entries = GetSelectedEntries()
         If Entries.Count = 0 Then Return
 
@@ -3112,7 +3466,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         End Using
     End Sub
 
-    Private Sub SaveSelectedFolder(Sender As Object, EventArgs As EventArgs) Handles tsiSaveFolderAs.Click
+    Private Sub SaveSelectedFolder(Sender As Object, EventArgs As EventArgs)
         Dim SelectedNode = tvFolders.SelectedNode
         If SelectedNode Is Nothing Then Return
         Dim Info = TryCast(SelectedNode.Tag, DirectoryNodeInfo)
@@ -3166,7 +3520,16 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Return Result
     End Function
 
-    Private Sub DeleteSelectedEntries(Sender As Object, EventArgs As EventArgs) Handles tsiDelete.Click
+    ''' <summary>Delete is the tree's whole-folder delete or the list's, depending which one asked.</summary>
+    Private Sub tsiDelete_Click(Sender As Object, EventArgs As EventArgs) Handles tsiDelete.Click
+        If FileContextMenu.SourceControl Is tvFolders Then
+            DeleteSelectedFolder(Sender, EventArgs)
+        Else
+            DeleteSelectedEntries(Sender, EventArgs)
+        End If
+    End Sub
+
+    Private Sub DeleteSelectedEntries(Sender As Object, EventArgs As EventArgs)
         Dim Entries = GetSelectedEntries()
         If Entries.Count = 0 Then Return
 
@@ -3206,7 +3569,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         OnMutatedFileSystem()
     End Sub
 
-    Private Sub DeleteSelectedFolder(Sender As Object, EventArgs As EventArgs) Handles tsiDeleteFolder.Click
+    Private Sub DeleteSelectedFolder(Sender As Object, EventArgs As EventArgs)
         Dim SelectedNode = tvFolders.SelectedNode
         If SelectedNode Is Nothing OrElse SelectedNode.Parent Is Nothing Then Return
 
@@ -3230,7 +3593,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         SetAddressText(BuildPathForAnchor(ParentAnchorId))
     End Sub
 
-    Private Sub RefreshMenuItem_Click(Sender As Object, EventArgs As EventArgs) Handles tsiRefresh.Click, tsiFolderRefresh.Click
+    Private Sub RefreshMenuItem_Click(Sender As Object, EventArgs As EventArgs) Handles tsiRefresh.Click
         If _SearchActive Then RerunSearch() Else RefreshFileSystemView()
     End Sub
 
@@ -3377,7 +3740,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Dim Node = tvFolders.GetNodeAt(EventArgs.Location)
         If Node Is Nothing Then Return
         tvFolders.SelectedNode = Node
-        FolderContextMenu.Show(tvFolders, EventArgs.Location)
+        FileContextMenu.Show(tvFolders, EventArgs.Location)
     End Sub
 
     Private Sub tvFolders_ItemDrag(Sender As Object, EventArgs As ItemDragEventArgs) Handles tvFolders.ItemDrag
@@ -3529,6 +3892,268 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         OnMutatedFileSystem()
     End Sub
 
+    ' ===================================================================================================
+    ' Cut / Copy / Paste - Cut and Copy put a real virtual-file clipboard payload on the OS clipboard
+    ' (VirtualDragCopyFiles.VirtualFileDataObject, the same machinery StartStreamedDrag uses for an
+    ' external drag-out), so Paste works into Explorer or any other app that understands the shell's
+    ' virtual-file formats. The same selection is also kept in _ClipboardEntries so an in-app Paste can
+    ' stream directly between two locations in this embedded file system without round-tripping through
+    ' the shell. Paste additionally accepts a real OS file drop list - files copied from Explorer - via
+    ' the same upload path a drag-and-drop or the Upload dialog uses.
+    ' ===================================================================================================
+
+    Private Sub tsiCut_Click(Sender As Object, EventArgs As EventArgs) Handles tsiCut.Click
+        CutOrCopySelection(FileContextMenu.SourceControl Is tvFolders, IsCut:=True)
+    End Sub
+
+    Private Sub tsiCopy_Click(Sender As Object, EventArgs As EventArgs) Handles tsiCopy.Click
+        CutOrCopySelection(FileContextMenu.SourceControl Is tvFolders, IsCut:=False)
+    End Sub
+
+    Private Sub tsiPaste_Click(Sender As Object, EventArgs As EventArgs) Handles tsiPaste.Click
+        PasteClipboard(FileContextMenu.SourceControl Is tvFolders)
+    End Sub
+
+    ''' <summary>
+    ''' The current selection - the right-clicked tree folder, or the file list's selected rows - as the
+    ''' same lightweight snapshot <see cref="StartStreamedDrag"/> uses for an external drag, so Cut and
+    ''' Copy can reuse its streaming descriptors and, for a Cut, its delete-on-completion callback.
+    ''' </summary>
+    Private Function GetSelectedDraggedEntries(FromTree As Boolean) As List(Of DraggedEntry)
+        If FromTree Then
+            Dim Node = tvFolders.SelectedNode
+            Dim Info = TryCast(Node?.Tag, DirectoryNodeInfo)
+            If Info Is Nothing OrElse Info.AnchorId = _FileSystem.RootAnchorId Then Return New List(Of DraggedEntry)()
+            Dim ParentInfo = TryCast(Node.Parent?.Tag, DirectoryNodeInfo)
+            Return New List(Of DraggedEntry) From {
+                New DraggedEntry(Info.Name, True, Info.AnchorId, 0, If(ParentInfo IsNot Nothing, ParentInfo.AnchorId, 0L))
+            }
+        End If
+
+        Return GetSelectedEntries().
+            Select(Function(e) New DraggedEntry(e.Name, IsDirectory(e), e.ChildAnchorId, e.LengthOfDataAtEntry, ResolveParentAnchor(e))).
+            ToList()
+    End Function
+
+    Public Const ClipboardOwnerFormatName As String = NameOf(i00) & "." & NameOf(i00.EmbeddedFileSystemSample)
+    Private Shared ReadOnly CLIPBOARDOWNER As Short = VirtualFileDataObject.RegisterClipboardDataFormat(ClipboardOwnerFormatName)
+
+    ''' <summary>
+    ''' Puts the selection on the clipboard as real virtual files. <paramref name="IsCut"/> also remembers
+    ''' the selection in <see cref="_ClipboardEntries"/> and asks for a Move rather than a Copy effect, so
+    ''' the source is removed once the cut is actually placed somewhere - in-app (<see cref="PasteEmbeddedEntries"/>),
+    ''' or dropped into Explorer (<see cref="OnStreamedDragFinished"/>, shared with the drag-out path).
+    ''' </summary>
+    Private Sub CutOrCopySelection(FromTree As Boolean, IsCut As Boolean)
+        Dim Entries = GetSelectedDraggedEntries(FromTree)
+        If Entries.Count = 0 Then Return
+
+        Dim Descriptors As New List(Of VirtualFileDataObject.FileDescriptor)()
+        For Each Item In Entries
+            If Item.IsDirectory Then
+                AppendDirectoryDescriptors(Item.ContentAnchorId, Item.Name, Descriptors)
+            Else
+                Descriptors.Add(BuildFileDescriptor(Item.Name, Item.ContentAnchorId, Item.Length))
+            End If
+        Next
+        If Descriptors.Count = 0 Then Return
+
+        Dim Data As New VirtualFileDataObject(Sub(o)
+                                              End Sub,
+                                              Sub(o) OnStreamedDragFinished(o, Entries))
+
+        Data.SetData(CLIPBOARDOWNER, New Byte() {1})
+        Data.SetData(Descriptors)
+        Data.PreferredDropEffect = If(IsCut, DragDropEffects.Move, DragDropEffects.Copy)
+
+        Try
+            Clipboard.SetDataObject(Data)
+        Catch ex As Exception
+            MsgBox(Me, $"The selection could not be placed on the clipboard.{Environment.NewLine}{ex.Message}", MsgBoxStyle.Critical)
+            Return
+        End Try
+
+        _ClipboardEntries = Entries
+        _ClipboardIsCut = IsCut
+
+        lvFiles.Invalidate()
+        tvFolders.Invalidate()
+    End Sub
+
+    ''' <summary>Whether Paste has anything to do - our own last Cut/Copy, or a real file drop list Explorer (or anything else that copies files the Windows way) left on the OS clipboard.</summary>
+    Private Function CanPaste() As Boolean
+        If _ClipboardEntries IsNot Nothing AndAlso _ClipboardEntries.Count > 0 Then Return True
+        Try
+            Return Clipboard.ContainsFileDropList()
+        Catch
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Pastes into the active folder - the right-clicked tree node, or the open directory for the file
+    ''' list. Real OS files on the clipboard (copied from Explorer) go through the same upload path a
+    ''' drag-and-drop upload uses; a selection cut or copied from this browser streams directly from its
+    ''' embedded source instead - see <see cref="PasteEmbeddedEntries"/>.
+    ''' </summary>
+    Private Sub PasteClipboard(FromTree As Boolean)
+        Dim TargetDirectoryAnchorId = If(FromTree, GetSelectedDirectoryAnchorId(), _CurrentDirectoryAnchorId)
+        If TargetDirectoryAnchorId <= 0 Then Return
+
+        Dim DroppedPaths = TryGetClipboardFileDropPaths()
+        If DroppedPaths IsNot Nothing Then
+            UploadPaths(DroppedPaths, TargetDirectoryAnchorId)
+            Return
+        End If
+
+        PasteEmbeddedEntries(TargetDirectoryAnchorId)
+    End Sub
+
+    Private Shared Function TryGetClipboardFileDropPaths() As String()
+        Try
+            If Clipboard.ContainsFileDropList() = False Then Return Nothing
+            Dim DropList = Clipboard.GetFileDropList()
+            If DropList Is Nothing OrElse DropList.Count = 0 Then Return Nothing
+            Dim Paths(DropList.Count - 1) As String
+            DropList.CopyTo(Paths, 0)
+            Return Paths
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Streams a Cut or Copy from <see cref="_ClipboardEntries"/> straight into <paramref name="TargetDirectoryAnchorId"/>,
+    ''' reusing the same conflict-resolution, progress-reporting and buffered-write logic <see cref="CopyUploadWorkList"/>
+    ''' already gives a disk upload - <see cref="EmbeddedUploadWorkItem"/> just reads from this embedded
+    ''' file system instead of from disk. A Cut deletes the originals only after every item has copied
+    ''' successfully; if the copy is cancelled or fails partway, nothing is deleted.
+    ''' </summary>
+    Private Sub PasteEmbeddedEntries(TargetDirectoryAnchorId As Long)
+        If _ClipboardEntries Is Nothing OrElse _ClipboardEntries.Count = 0 Then Return
+
+        ' A folder can't be pasted into itself or one of its own subfolders - that would have the copy
+        ' try to read from a tree it is (for a Cut) simultaneously deleting out from under itself.
+        Dim SourceEntries = _ClipboardEntries.
+            Where(Function(e) e.IsDirectory = False OrElse IsAncestorOrSelf(e.ContentAnchorId, TargetDirectoryAnchorId) = False).
+            ToList()
+        If SourceEntries.Count < _ClipboardEntries.Count Then
+            MsgBox(Me, "A folder can't be pasted into itself or one of its own subfolders.", MsgBoxStyle.Exclamation)
+        End If
+        If SourceEntries.Count = 0 Then Return
+
+        Dim WasCut = _ClipboardIsCut
+        Dim PostSelectionItems As New List(Of String)
+
+        ExecuteLongBlockingActionOnThread(
+            Sub(Report)
+                Report.SetText("Pasting...")
+
+                ' A cut item pasted back into the folder it already lives in is a no-op; a copied one
+                ' instead gets a fresh, non-colliding name (as Explorer does for "paste a copy in place") -
+                ' letting the ordinary overwrite prompt reach it would delete the very data being read from.
+                Dim EntriesToCopy = If(WasCut,
+                                        SourceEntries.Where(Function(e) e.ParentAnchorId <> TargetDirectoryAnchorId).ToList(),
+                                        AvoidSelfCollisions(SourceEntries, TargetDirectoryAnchorId))
+                If EntriesToCopy.Count = 0 Then Return
+
+                Dim WorkItems = MemoizedEnumerable.Create(EnumerateEmbeddedUploadEntries(EntriesToCopy))
+                If WorkItems.Any() = False Then Return
+
+                Dim TotalSize As New TotalSizeBox()
+                Using Cancellation As New CancellationTokenSource()
+                    Dim Sizer = New Thread(
+                        Sub()
+                            Try
+                                Dim Sum As Long = 0
+                                For Each workItem In WorkItems
+                                    Cancellation.Token.ThrowIfCancellationRequested()
+                                    If workItem.IsDirectory = False Then Sum += workItem.LogicalSize
+                                Next
+                                TotalSize.Publish(Sum)
+                            Catch
+                                ' Cancelled by a copy failure, or a source item vanished mid-scan; the
+                                ' progress bar simply stays indeterminate.
+                            End Try
+                        End Sub) With {.IsBackground = True, .Name = "Paste size scan"}
+                    Sizer.Start()
+
+                    Try
+                        CopyUploadWorkList(WorkItems, TargetDirectoryAnchorId, TotalSize, Report, PostSelectionItems)
+                    Finally
+                        Cancellation.Cancel()
+                        Sizer.Join()
+                    End Try
+                End Using
+
+                If WasCut Then
+                    For Each Item In EntriesToCopy
+                        Try
+                            _FileSystem.DeleteEntry(Item.ParentAnchorId, Item.Name)
+                        Catch
+                            ' Already gone, or its folder changed since the cut - leave it.
+                        End Try
+                    Next
+                    ' Only reached once the copy above has fully succeeded - if it threw or was
+                    ' cancelled, the cut selection is left intact so the user can retry the paste.
+                    _ClipboardEntries = Nothing
+                End If
+            End Sub,
+            "One or more items could not be pasted.")
+
+        RefreshFileSystemView()
+        OnMutatedFileSystem()
+        SelectPastedItems(PostSelectionItems)
+    End Sub
+
+    ''' <summary>
+    ''' When an item is being pasted back into the very folder it was copied from, gives it a fresh,
+    ''' non-colliding name instead of letting it collide with its own source. Only the top-level pasted
+    ''' name changes; a directory's descendants keep their names, since they are addressed under the
+    ''' (now unique) renamed root and so can never collide with anything of their own.
+    ''' </summary>
+    Private Function AvoidSelfCollisions(Entries As IList(Of DraggedEntry), TargetDirectoryAnchorId As Long) As List(Of DraggedEntry)
+        Dim ExistingNames As New HashSet(Of String)(
+            _FileSystem.GetDirectoryEntries(TargetDirectoryAnchorId).Select(Function(e) e.Name),
+            StringComparer.OrdinalIgnoreCase)
+
+        Dim Result As New List(Of DraggedEntry)(Entries.Count)
+        For Each Entry In Entries
+            If Entry.ParentAnchorId <> TargetDirectoryAnchorId Then
+                Result.Add(Entry)
+                Continue For
+            End If
+            Dim UniqueName = GetUniqueEntryName(Entry.Name, Entry.IsDirectory, ExistingNames)
+            ExistingNames.Add(UniqueName)
+            Result.Add(New DraggedEntry(UniqueName, Entry.IsDirectory, Entry.ContentAnchorId, Entry.Length, Entry.ParentAnchorId))
+        Next
+        Return Result
+    End Function
+
+    Private Shared Function GetUniqueEntryName(Name As String, IsDirectory As Boolean, ExistingNames As HashSet(Of String)) As String
+        If ExistingNames.Contains(Name) = False Then Return Name
+        Dim BaseName = If(IsDirectory, Name, Path.GetFileNameWithoutExtension(Name))
+        Dim Extension = If(IsDirectory, String.Empty, Path.GetExtension(Name))
+        Dim Number = 2
+        Dim Candidate As String
+        Do
+            Candidate = $"{BaseName} ({Number}){Extension}"
+            Number += 1
+        Loop While ExistingNames.Contains(Candidate)
+        Return Candidate
+    End Function
+
+    ''' <summary>True when <paramref name="AnchorId"/> is <paramref name="PossibleAncestorAnchorId"/> itself,
+    ''' or lies anywhere beneath it - used to stop a cut/copied folder being pasted into its own subtree.</summary>
+    Private Function IsAncestorOrSelf(PossibleAncestorAnchorId As Long, AnchorId As Long) As Boolean
+        Dim Current = AnchorId
+        Do
+            If Current = PossibleAncestorAnchorId Then Return True
+            If Current = _FileSystem.RootAnchorId Then Return False
+            Current = _FileSystem.GetParentAnchorId(Current)
+        Loop
+    End Function
+
     Private Function CreateTemporaryFileExport(Entries As IList(Of EmbeddedFileSystem.ContentListEntry)) As DragExport
         Dim TemporaryDirectory = CreateTemporaryExportDirectory()
         Try
@@ -3633,6 +4258,28 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 EventArgs.Handled = True
             ElseIf tvFolders.Focused AndAlso tvFolders.SelectedNode IsNot Nothing AndAlso tvFolders.SelectedNode.Parent IsNot Nothing Then
                 DeleteSelectedFolder(Me, EventArgs)
+                EventArgs.Handled = True
+            End If
+            Return
+        End If
+
+        If EventArgs.Control AndAlso (EventArgs.KeyCode = Keys.X OrElse EventArgs.KeyCode = Keys.C) Then
+            If tvFolders.Focused Then
+                CutOrCopySelection(True, IsCut:=EventArgs.KeyCode = Keys.X)
+                EventArgs.Handled = True
+            ElseIf lvFiles.Focused Then
+                CutOrCopySelection(False, IsCut:=EventArgs.KeyCode = Keys.X)
+                EventArgs.Handled = True
+            End If
+            Return
+        End If
+
+        If EventArgs.Control AndAlso EventArgs.KeyCode = Keys.V Then
+            If tvFolders.Focused Then
+                PasteClipboard(True)
+                EventArgs.Handled = True
+            ElseIf lvFiles.Focused Then
+                PasteClipboard(False)
                 EventArgs.Handled = True
             End If
         End If
@@ -4107,4 +4754,27 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         'Struct = FileSystem.ChunkedStream.GetStructure()
     End Sub
 
+    Private Sub _ClipboardFilter_ClipboardChanged(sender As Object, e As EventArgs) Handles _ClipboardFilter.ClipboardChanged
+        Try
+            Dim Data = Clipboard.GetDataObject()
+            Dim IsMine = (Data?.GetDataPresent(ClipboardOwnerFormatName, False)).GetValueOrDefault()
+
+            Dim Invalidate = False
+
+            If IsMine Then
+                Invalidate = True
+            Else
+                Invalidate = _ClipboardEntries IsNot Nothing
+                _ClipboardEntries = Nothing
+                _ClipboardIsCut = False
+            End If
+
+            If Invalidate Then
+                lvFiles.Invalidate()
+                tvFolders.Invalidate()
+            End If
+        Catch ex As Exception
+
+        End Try
+    End Sub
 End Class

@@ -15,7 +15,7 @@ Option Explicit On
 Namespace My
     
     <Global.System.Runtime.CompilerServices.CompilerGeneratedAttribute(),  _
-     Global.System.CodeDom.Compiler.GeneratedCodeAttribute("Microsoft.VisualStudio.Editors.SettingsDesigner.SettingsSingleFileGenerator", "17.3.0.0"),  _
+     Global.System.CodeDom.Compiler.GeneratedCodeAttribute("Microsoft.VisualStudio.Editors.SettingsDesigner.SettingsSingleFileGenerator", "18.9.0.0"),  _
      Global.System.ComponentModel.EditorBrowsableAttribute(Global.System.ComponentModel.EditorBrowsableState.Advanced)>  _
     Partial Friend NotInheritable Class MySettings
         Inherits Global.System.Configuration.ApplicationSettingsBase
@@ -53,25 +53,25 @@ Namespace My
                 Return defaultInstance
             End Get
         End Property
-
+        
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("Details")>  _
-        Public Property FileListView() As String
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property FileListView() As Integer
             Get
-                Return CType(Me("FileListView"),String)
+                Return CType(Me("FileListView"),Integer)
             End Get
             Set
                 Me("FileListView") = value
             End Set
         End Property
-
+        
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("List")>  _
-        Public Property SearchListView() As String
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property SearchListView() As Integer
             Get
-                Return CType(Me("SearchListView"),String)
+                Return CType(Me("SearchListView"),Integer)
             End Get
             Set
                 Me("SearchListView") = value
@@ -88,9 +88,9 @@ Namespace My
     Friend Module MySettingsProperty
         
         <Global.System.ComponentModel.Design.HelpKeywordAttribute("My.Settings")>  _
-        Friend ReadOnly Property Settings() As Global.EmbeddedFileSystemSample.My.MySettings
+        Friend ReadOnly Property Settings() As Global.i00.EmbeddedFileSystemSample.My.MySettings
             Get
-                Return Global.EmbeddedFileSystemSample.My.MySettings.Default
+                Return Global.i00.EmbeddedFileSystemSample.My.MySettings.Default
             End Get
         End Property
     End Module
