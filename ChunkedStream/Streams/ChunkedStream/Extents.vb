@@ -104,6 +104,8 @@ Namespace Streams
             $"Physical record {RecordId} refcount overflow.")
             End If
 
+            MarkPhysicalRecordDirty(RecordId)
+
             Dim WasUnreferenced = Record.RefCount = 0
 
             Record.RefCount += 1
@@ -117,18 +119,25 @@ Namespace Streams
                                             Record.PhysicalOffset + CLng(Record.PhysicalLength))
             End If
 
-            MarkPhysicalRecordDirty(RecordId)
-
         End Sub
 
+        '
+        ' TotalExtentCount is always passed explicitly rather than read from _Extents.Count:
+        ' every caller must mark the affected pages dirty BEFORE mutating _Extents (a Thread.Abort
+        ' between an under-marked mutation and its dirty-mark would leave the affected on-disk
+        ' page stale forever - the next publish only rewrites pages in _DirtyExtentPages). Passing
+        ' the post-mutation count (or the larger of before/after when the count is changing) lets
+        ' the mark be computed correctly ahead of a mutation that hasn't happened yet.
+        '
         Private Sub MarkExtentPageRangeDirty(FirstExtentIndex As Integer,
-                                             LastExtentIndex As Integer)
+                                             LastExtentIndex As Integer,
+                                             TotalExtentCount As Integer)
 
             If _IndexPageEntryCount <= 0 Then Return
-            If _Extents.Count = 0 Then Return
+            If TotalExtentCount = 0 Then Return
 
             Dim FirstIndex = Math.Max(0, FirstExtentIndex)
-            Dim LastIndex = Math.Min(_Extents.Count - 1, LastExtentIndex)
+            Dim LastIndex = Math.Min(TotalExtentCount - 1, LastExtentIndex)
 
             If LastIndex < FirstIndex Then Return
 
@@ -141,28 +150,29 @@ Namespace Streams
 
         End Sub
 
-        Private Sub MarkExtentPagesDirtyFromIndex(ExtentIndex As Integer)
+        Private Sub MarkExtentPagesDirtyFromIndex(ExtentIndex As Integer, TotalExtentCount As Integer)
 
             If _IndexPageEntryCount <= 0 Then Return
-            If _Extents.Count = 0 Then Return
+            If TotalExtentCount = 0 Then Return
 
-            MarkExtentPageRangeDirty(ExtentIndex, _Extents.Count - 1)
+            MarkExtentPageRangeDirty(ExtentIndex, TotalExtentCount - 1, TotalExtentCount)
 
         End Sub
 
         Private Sub MarkExtentPagesDirtyForReplacement(StartIndex As Integer,
                                                        RemovedExtentCount As Integer,
-                                                       InsertedExtentCount As Integer)
+                                                       InsertedExtentCount As Integer,
+                                                       TotalExtentCount As Integer)
 
             If _IndexPageEntryCount <= 0 Then Return
-            If _Extents.Count = 0 Then Return
+            If TotalExtentCount = 0 Then Return
 
-            Dim SafeStartIndex = Math.Max(0, Math.Min(StartIndex, _Extents.Count - 1))
+            Dim SafeStartIndex = Math.Max(0, Math.Min(StartIndex, TotalExtentCount - 1))
 
             If RemovedExtentCount = InsertedExtentCount Then
 
                 Dim DirtyCount = Math.Max(1, InsertedExtentCount)
-                MarkExtentPageRangeDirty(SafeStartIndex, SafeStartIndex + DirtyCount - 1)
+                MarkExtentPageRangeDirty(SafeStartIndex, SafeStartIndex + DirtyCount - 1, TotalExtentCount)
                 Return
 
             End If
@@ -172,7 +182,7 @@ Namespace Streams
             ' page. With the current dense ordinal metadata format, pages from the change
             ' point onward must be rewritten.
             '
-            MarkExtentPagesDirtyFromIndex(SafeStartIndex)
+            MarkExtentPagesDirtyFromIndex(SafeStartIndex, TotalExtentCount)
 
         End Sub
 
@@ -200,14 +210,14 @@ Namespace Streams
                     $"Physical record {RecordId} has an invalid refcount.")
             End If
 
+            MarkPhysicalRecordDirty(RecordId)
+
             If Record.RefCount = 1 Then
                 RemoveLivePhysicalRecordOffset(Record)
             End If
 
             Record.RefCount -= 1
             _PhysicalRecords(RecordId) = Record
-
-            MarkPhysicalRecordDirty(RecordId)
 
             If Record.RefCount <> 0 Then Return
 
@@ -423,12 +433,12 @@ Namespace Streams
             Dim LastIndex = _Extents.Count - 1
             Dim LastExtent = _Extents(LastIndex)
 
+            MarkExtentPageDirty(LastIndex)
+
             LastExtent.PhysicalRecordId = NewRecordId
             LastExtent.PhysicalRecordOffset = 0
             LastExtent.LogicalLength = NewLogicalLength
             _Extents(LastIndex) = LastExtent
-
-            MarkExtentPageDirty(LastIndex)
 
             DecrementPhysicalRecordRefCount(OldRecordId)
             SettleDeferredPhysicalRecordReclaims()
@@ -598,6 +608,8 @@ Namespace Streams
                     NewRecordId = NewRecord.RecordId
                 End If
 
+                MarkExtentPageDirty(_Extents.Count)
+
                 _Extents.Add(New ExtentIndexEntry With {
                     .LogicalOffset = _PendingChunkStart,
                     .LogicalLength = Combined.Length,
@@ -607,7 +619,6 @@ Namespace Streams
                 })
 
                 RebuildAnchorIndex()
-                MarkExtentPageDirty(_Extents.Count - 1)
 
             End If
 
@@ -1402,6 +1413,8 @@ Namespace Streams
                     .AnchorId = 0
                 }
 
+            MarkExtentPagesDirtyFromIndex(ExtentIndex, _Extents.Count + 1)
+
             _Extents(ExtentIndex) = LeftExtent
             _Extents.Insert(ExtentIndex + 1, RightExtent)
 
@@ -1410,7 +1423,6 @@ Namespace Streams
             End If
 
             RebuildAnchorIndex()
-            MarkExtentPagesDirtyFromIndex(ExtentIndex)
 
         End Sub
 
@@ -1957,16 +1969,17 @@ Namespace Streams
 
             RebaseExtentLogicalOffsets(NewLayout)
 
+            MarkExtentPagesDirtyForReplacement(InsertIndex,
+                                               0,
+                                               Materialised.Count,
+                                               Math.Max(_Extents.Count, NewLayout.Count))
+
             _Extents.Clear()
             _Extents.AddRange(NewLayout)
 
             _Length += InsertLength
 
             RebuildAnchorIndex()
-
-            MarkExtentPagesDirtyForReplacement(InsertIndex,
-                                               0,
-                                               Materialised.Count)
 
         End Sub
 
@@ -2115,16 +2128,17 @@ Namespace Streams
 
             RebaseExtentLogicalOffsets(NewLayout)
 
+            MarkExtentPagesDirtyForReplacement(DirtyStartIndex,
+                                               RemovedExtentCount,
+                                               InsertedExtentCount,
+                                               Math.Max(_Extents.Count, NewLayout.Count))
+
             _Extents.Clear()
             _Extents.AddRange(NewLayout)
 
             _Length -= ActualLength
 
             RebuildAnchorIndex()
-
-            MarkExtentPagesDirtyForReplacement(DirtyStartIndex,
-                                               RemovedExtentCount,
-                                               InsertedExtentCount)
 
             SettleDeferredPhysicalRecordReclaims()
 
@@ -2217,14 +2231,15 @@ Namespace Streams
                 DecrementPhysicalRecordRefCount(_Extents(Index).PhysicalRecordId)
             Next
 
+            MarkExtentPagesDirtyForReplacement(StartIndex,
+                                               RemovedExtentCount,
+                                               Materialised.Count,
+                                               Math.Max(_Extents.Count, NewLayout.Count))
+
             _Extents.Clear()
             _Extents.AddRange(NewLayout)
 
             RebuildAnchorIndex()
-
-            MarkExtentPagesDirtyForReplacement(StartIndex,
-                                               RemovedExtentCount,
-                                               Materialised.Count)
 
             SettleDeferredPhysicalRecordReclaims()
 

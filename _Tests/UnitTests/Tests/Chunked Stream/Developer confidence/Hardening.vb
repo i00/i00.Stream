@@ -257,6 +257,124 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Regression for the same "mutate before marking dirty" gap as
+            ''' <see cref="KillingAWorkerThreadDuringRecordChurnNeverTearsThePhysicalRecordIndex"/>,
+            ''' but in the *extent* index rather than the physical-record one: <c>SplitExtentAt</c>,
+            ''' <c>InsertExtentsCore</c>, <c>RemoveRangeCoreAsync</c>, <c>ReplaceRangeCore</c>, the two
+            ''' anchor-toggling call sites in Anchors.vb, and <c>IncrementPhysicalRecordRefCount</c>/
+            ''' <c>DecrementPhysicalRecordRefCount</c> all used to mutate <c>_Extents</c> (or a
+            ''' record's RefCount) and only mark the affected page(s)/record dirty as a separate,
+            ''' later statement. A kill landing in that gap left a self-consistent in-memory image
+            ''' but silently dropped the dirty mark, so the next publish never rewrote the page that
+            ''' actually changed - a real <see cref="Threading.Thread.Abort"/> during an
+            ''' <c>Insert()</c>-heavy upload surfaced this as "extents reference data that could not
+            ''' be recovered" on reopen. The fix reorders every one of those sites to mark dirty
+            ''' first (growing the extent count needs the post-mutation, or larger of before/after,
+            ''' page range computed ahead of the mutation - <c>MarkExtentPageRangeDirty</c> and
+            ''' friends now take an explicit total-count parameter instead of reading
+            ''' <c>_Extents.Count</c> after the fact), so a kill anywhere in the gap can only produce
+            ''' a spurious (harmless) dirty mark, never a missing one.
+            ''' </summary>
+            ''' <remarks>
+            ''' Same real-Thread.Abort methodology as
+            ''' <see cref="KillingAWorkerThreadDuringRecordChurnNeverTearsThePhysicalRecordIndex"/>,
+            ''' churning <c>Insert</c>/<c>Remove</c> (which exercise <c>SplitExtentAt</c> and the
+            ''' extent-layout replacement paths, not just in-place chunk overwrites) at a small
+            ''' <c>IndexPageEntryCount</c> so the extent index spans several pages and a shifted
+            ''' ordinal after an insert/remove actually lands on a different page.
+            ''' Unlike that sibling test, this one is NOT known to reproduce its bug empirically:
+            ''' 200 trials across a widened spin range (confirmed, while writing this fix, to still
+            ''' pass 200/200 against the deliberately-reverted, pre-fix source) never landed an abort
+            ''' inside the mutate/dirty-mark gap - the gap here is a short, loop-free, allocation-light
+            ''' statement sequence, and the CLR only delivers Thread.Abort at safe points (loop back-
+            ''' edges, calls, allocations), so a run of plain field/list assignments with no such point
+            ''' in the middle may simply never present one to land on. Kept anyway as broad Insert/
+            ''' Remove churn fuzzing (it still asserts a clean reopen every trial) and as a fallback in
+            ''' case a future refactor of these methods reintroduces a wider, reachable gap; the actual
+            ''' proof this fix matters is the source-level reasoning in the summary above, matching the
+            ''' already-confirmed <c>MovePhysicalRecordOrdinal</c>/<c>PlaceChunkRecordAsync</c> sibling.
+            ''' </remarks>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub KillingAWorkerThreadDuringInsertRemoveChurnNeverTearsTheExtentIndex()
+
+                Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                    .ChunkSize = 256,
+                    .IndexPageEntryCount = 4,
+                    .IndexDirectoryEntryCount = 4
+                }
+
+                Dim Rng = CreateDeterministicRandom(9102)
+
+                For Trial = 1 To 200
+
+                    Using Ms As New MemoryStream()
+
+                        Using Seed = ChunkedStream.Open(Ms, Options)
+                            Seed.Write(0, GenerateRandomData(Options.ChunkSize * 8, Trial))
+                            Seed.Flush()
+                        End Using
+
+                        Dim SpinAmount = Rng.Next(0, 4000000)
+
+                        Dim Worker As New Threading.Thread(
+                            Sub()
+                                Try
+                                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                                        For Iteration = 1 To 1000
+
+                                            Dim InsertOffset = CLng((Iteration Mod 7) * (Options.ChunkSize \ 2))
+                                            Dim InsertData(64 - 1) As Byte
+                                            InsertData(0) = CByte(Iteration And &HFF)
+
+                                            Cs.Insert(Math.Min(InsertOffset, Cs.Length), InsertData)
+
+                                            If Iteration Mod 3 = 0 AndAlso Cs.Length > 128 Then
+                                                Dim RemoveOffset = CLng((Iteration Mod 5) * (Options.ChunkSize \ 3))
+                                                RemoveOffset = Math.Min(RemoveOffset, Cs.Length - 32)
+                                                Cs.Remove(RemoveOffset, 32)
+                                            End If
+
+                                            If Iteration Mod 11 = 0 Then Cs.Flush()
+
+                                        Next
+
+                                    End Using
+                                Catch
+                                    ' Any exception here (ThreadAbortException included) is
+                                    ' expected - this test cares about the FILE afterwards,
+                                    ' not the interrupted call.
+                                End Try
+                            End Sub) With {.IsBackground = True}
+
+                        Worker.Start()
+                        Threading.Thread.SpinWait(SpinAmount)
+                        Worker.Abort()
+                        Worker.Join(10000)
+
+                        AssertTrue(Worker.IsAlive = False,
+                                   $"Trial {Trial}: worker thread did not terminate after Abort - " &
+                                   "the state lock was likely left held with no owner able to release it.")
+
+                        Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                            AssertEqual(0, Reopened.AutoRepairs.Count,
+                                        $"Trial {Trial}: a strict reopen needed {Reopened.AutoRepairs.Count} " &
+                                        "auto-repair(s) - a torn extent index reached disk.")
+
+                            Dim Report = Reopened.Validate()
+                            Report.Repair(ChunkedStream.RepairScope.IncludeDataLoss)
+                            Reopened.Validate().ThrowIfErrors()
+
+                        End Using
+
+                    End Using
+
+                Next
+
+            End Sub
+
             ' ================================================================================
             ' Deterministic mid-batch fault injection
             ' ================================================================================

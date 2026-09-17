@@ -1874,16 +1874,35 @@ Namespace Streams
 
         Private Sub MarkAllMetadataPagesDirty()
 
+            MarkAllMetadataPagesDirtyForCounts(_Extents.Count, _PhysicalRecords.Count)
+
+        End Sub
+
+        '
+        ' Same as MarkAllMetadataPagesDirty, but takes the extent/physical-record counts
+        ' explicitly rather than reading _Extents.Count/_PhysicalRecords.Count, so a caller
+        ' that is about to replace those tables wholesale (a checkpoint rollback restoring a
+        ' captured snapshot) can mark every page dirty BEFORE the mutation - passing the
+        ' larger of the current and about-to-be-restored counts - instead of after. Marking
+        ' dirty after the mutation, using the current (post-mutation) count, looks
+        ' equivalent in the common case but leaves a real gap: a Thread.Abort landing between
+        ' the mutation and the mark leaves a self-consistent in-memory image with no dirty
+        ' mark at all, so the next publish serves a stale on-disk page. Over-marking (the
+        ' larger of the two counts, when the two differ) is harmless - the persist loop only
+        ' rewrites pages below the page count the new table actually needs.
+        '
+        Private Sub MarkAllMetadataPagesDirtyForCounts(ExtentCount As Integer, PhysicalRecordCount As Integer)
+
             _DirtyExtentPages.Clear()
             _DirtyPhysicalRecordPages.Clear()
 
-            Dim ExtentPageCount = GetIndexPageCount(_Extents.Count, _IndexPageEntryCount)
+            Dim ExtentPageCount = GetIndexPageCount(ExtentCount, _IndexPageEntryCount)
 
             For PageNumber = 0 To ExtentPageCount - 1
                 _DirtyExtentPages.Add(PageNumber)
             Next
 
-            Dim PhysicalRecordPageCount = GetIndexPageCount(_PhysicalRecords.Count, _IndexPageEntryCount)
+            Dim PhysicalRecordPageCount = GetIndexPageCount(PhysicalRecordCount, _IndexPageEntryCount)
 
             For PageNumber = 0 To PhysicalRecordPageCount - 1
                 _DirtyPhysicalRecordPages.Add(PageNumber)

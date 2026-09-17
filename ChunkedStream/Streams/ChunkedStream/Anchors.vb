@@ -306,11 +306,12 @@ Namespace Streams
 
                 Dim AnchorId = AllocateAnchorId()
 
+                MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex, _Extents.Count)
+
                 Extent.AnchorId = AnchorId
                 _Extents(ExtentIndex) = Extent
 
                 RebuildAnchorIndex()
-                MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex)
 
                 If MetadataPublishSuspended = False Then
                     Await PersistIndexAndHeaderAsync(_IndexOffset, False, RunAsync, CancellationToken).ConfigureAwait(False)
@@ -624,11 +625,12 @@ Namespace Streams
 
             Try
 
+                MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex, _Extents.Count)
+
                 Extent.AnchorId = 0
                 _Extents(ExtentIndex) = Extent
 
                 RebuildAnchorIndex()
-                MarkExtentPageRangeDirty(ExtentIndex, ExtentIndex)
 
                 If MetadataPublishSuspended = False Then
                     PersistIndexAndHeader(_IndexOffset)

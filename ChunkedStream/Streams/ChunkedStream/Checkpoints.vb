@@ -512,6 +512,18 @@ Namespace Streams
             _NextPhysicalRecordId = Math.Max(_NextPhysicalRecordId, State.NextPhysicalRecordId)
             _NextAnchorId = Math.Max(_NextAnchorId, State.NextAnchorId)
 
+            '
+            ' Mark every page the restored table could touch dirty BEFORE replacing _Extents/
+            ' _PhysicalRecords, using the larger of the current and about-to-be-restored counts
+            ' - see MarkAllMetadataPagesDirtyForCounts. A Thread.Abort between the mutation and
+            ' a trailing MarkAllMetadataPagesDirty() would otherwise leave a self-consistent
+            ' in-memory image with no dirty mark at all, so a later publish could serve a stale
+            ' on-disk page instead of the restored (or the still-current, if this abort is
+            ' never retried) one.
+            '
+            MarkAllMetadataPagesDirtyForCounts(Math.Max(_Extents.Count, State.Extents.Count),
+                                               Math.Max(_PhysicalRecords.Count, State.PhysicalRecords.Count))
+
             _Extents.Clear()
             _Extents.AddRange(State.Extents)
 
@@ -537,8 +549,6 @@ Namespace Streams
             _PhysicalRecordPageDescriptors.Clear()
             _PhysicalRecordDirectoryPageDescriptors.Clear()
             _HoleDirectoryPageDescriptors.Clear()
-
-            MarkAllMetadataPagesDirty()
 
             If BaseStream.Length > State.PhysicalLength Then
                 BaseStream.SetLength(State.PhysicalLength)
