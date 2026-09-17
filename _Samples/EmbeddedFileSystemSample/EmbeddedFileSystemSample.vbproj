@@ -165,7 +165,7 @@
     <None Include="App.config" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\ChunkedStream\i00.Stream.vbproj">
+    <ProjectReference Include="..\..\i00.Stream\i00.Stream.vbproj">
       <Project>{4d29cecb-5c0b-4df4-b97e-90740b76544d}</Project>
       <Name>i00.Stream</Name>
     </ProjectReference>
