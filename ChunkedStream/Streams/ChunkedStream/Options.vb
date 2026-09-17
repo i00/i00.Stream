@@ -501,6 +501,7 @@ Namespace Streams
                 ''' <summary>
                 ''' Store the chunk payload using GZip compression.
                 ''' </summary>
+                <Obsolete("GZip stores Deflate-compressed data inside a GZip container, adding unnecessary container overhead. Use Deflate instead.")>
                 GZip = 2
 
                 ' ================================================================================
@@ -515,6 +516,14 @@ Namespace Streams
                 ''' Store the chunk payload using Snappy block compression.
                 ''' </summary>
                 Snappy = 4
+
+                ''' <summary>
+                ''' Store the chunk payload using a hand-rolled FSE (Finite State Entropy)
+                ''' block: an entropy coder only, with no LZ77 matching stage. Effective on
+                ''' data with a skewed byte distribution even without repeated sequences;
+                ''' see <see cref="Compression.Zstd" /> for a codec that adds LZ77 on top.
+                ''' </summary>
+                Fse = 5
             End Enum
 
             ''' <summary>

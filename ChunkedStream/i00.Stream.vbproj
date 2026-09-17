@@ -101,6 +101,8 @@
     <Compile Include="EmbeddedFileSystem.vb" />
     <Compile Include="Extensions.vb" />
     <Compile Include="Compression\Lz4Block.vb" />
+    <Compile Include="Compression\Fse.vb" />
+    <Compile Include="Compression\Zstd.vb" />
     <Compile Include="Streams\ChunkedStream\_ChunkedStream.vb" />
     <Compile Include="My Project\AssemblyInfo.vb" />
     <Compile Include="My Project\Application.Designer.vb">

@@ -6,8 +6,9 @@ Namespace Tests
     Partial Class StorageRepresentationPolicies
 
         ''' <summary>
-        ''' Direct tests for the custom LZ4 and Snappy block codecs: round-tripping and, more
-        ''' importantly, that every malformed or truncated block surfaces as an
+        ''' Direct tests for the custom LZ4, Snappy, Fse and Zstd block codecs:
+        ''' round-tripping and, more importantly, that every malformed or truncated block
+        ''' surfaces as an
         ''' <see cref="InvalidDataException" /> rather than an <see cref="OverflowException" />,
         ''' an <see cref="IndexOutOfRangeException" /> or a silently wrong result. Chunk
         ''' payloads are MAC-checked before decompression on the normal path, but a
@@ -41,6 +42,42 @@ Namespace Tests
                     Dim Compressed = Snappy.Compress(Sample)
                     Dim Restored = Snappy.Decompress(Compressed)
                     AssertBytesEqual(Sample, Restored, $"Snappy round-trip failed for a {Sample.Length}-byte sample.")
+                Next
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub FseRoundTripsEveryInputShape()
+
+                For Each Sample In CodecSamples()
+                    Dim Compressed = Fse.Compress(Sample)
+                    Dim Restored = Fse.Decompress(Compressed, Sample.Length)
+                    AssertBytesEqual(Sample, Restored, $"Fse round-trip failed for a {Sample.Length}-byte sample.")
+                Next
+
+            End Sub
+
+            ''' <summary>
+            ''' Every <see cref="Zstd.CompressionEffort" /> tier changes the LZ77 search
+            ''' (chain depth, lazy matching), so each one needs its own round-trip pass - a
+            ''' bug specific to, say, lazy matching would not show up at Fastest.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ZstdRoundTripsEveryInputShapeAtEveryEffortTier()
+
+                For Each Effort In {Zstd.CompressionEffort.Fastest,
+                                    Zstd.CompressionEffort.Fast,
+                                    Zstd.CompressionEffort.Normal,
+                                    Zstd.CompressionEffort.High,
+                                    Zstd.CompressionEffort.Best,
+                                    Zstd.CompressionEffort.Maximum}
+
+                    For Each Sample In CodecSamples()
+                        Dim Compressed = Zstd.Compress(Sample, Effort)
+                        Dim Restored = Zstd.Decompress(Compressed, Sample.Length)
+                        AssertBytesEqual(Sample, Restored, $"Zstd({Effort}) round-trip failed for a {Sample.Length}-byte sample.")
+                    Next
+
                 Next
 
             End Sub
@@ -81,6 +118,96 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' A correctness round-trip alone would still pass if Zstd silently fell back
+            ''' to storing everything as raw literals - this checks the codec is actually
+            ''' shrinking compressible data, exercising the LZ77 and FSE stages for real
+            ''' rather than just their plumbing.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ZstdShrinksCompressibleDataMeaningfully()
+
+                Dim RepeatingPlain = GenerateRepeatingPatternData(20000, 37)
+                Dim RepeatingCompressed = Zstd.Compress(RepeatingPlain, Zstd.CompressionEffort.Normal)
+
+                If RepeatingCompressed.Length >= RepeatingPlain.Length \ 10 Then
+                    Throw New Exception(
+                        $"Zstd only compressed a highly repetitive {RepeatingPlain.Length}-byte sample to {RepeatingCompressed.Length} bytes.")
+                End If
+
+                Dim SkewedPlain = GeneratePartiallyCompressibleDataForLength(0.85R, 20000, 4096, 91)
+                Dim SkewedCompressed = Zstd.Compress(SkewedPlain, Zstd.CompressionEffort.Normal)
+
+                If SkewedCompressed.Length >= SkewedPlain.Length Then
+                    Throw New Exception(
+                        $"Zstd did not shrink an 85%-compressible {SkewedPlain.Length}-byte sample (got {SkewedCompressed.Length} bytes).")
+                End If
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub FseDecompressRejectsTruncatedBlocks()
+
+                Dim Plain = GeneratePartiallyCompressibleDataForLength(0.5R, 6000, 1024, 75)
+                Dim Compressed = Fse.Compress(Plain)
+
+                For Each Cut In TruncationPoints(Compressed.Length)
+
+                    AssertCodecRejects(
+                        Sub() Fse.Decompress(Slice(Compressed, 0, Cut), Plain.Length),
+                        $"Fse accepted or mis-handled a block truncated to {Cut} bytes.")
+
+                Next
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub FseDecompressRejectsTrailingGarbage()
+
+                Dim Plain = GeneratePartiallyCompressibleDataForLength(0.5R, 6000, 1024, 76)
+                Dim Compressed = Fse.Compress(Plain)
+                Dim WithTrailingGarbage = Concat(Compressed, New Byte() {1, 2, 3})
+
+                AssertThrows(Of InvalidDataException)(
+                    Sub() Fse.Decompress(WithTrailingGarbage, Plain.Length),
+                    "Fse should reject a compressed block with trailing garbage.")
+
+            End Sub
+
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ZstdDecompressRejectsTruncatedBlocks()
+
+                Dim Plain = GeneratePartiallyCompressibleDataForLength(0.5R, 6000, 1024, 73)
+                Dim Compressed = Zstd.Compress(Plain)
+
+                For Each Cut In TruncationPoints(Compressed.Length)
+
+                    AssertCodecRejects(
+                        Sub() Zstd.Decompress(Slice(Compressed, 0, Cut), Plain.Length),
+                        $"Zstd accepted or mis-handled a block truncated to {Cut} bytes.")
+
+                Next
+
+            End Sub
+
+            ''' <summary>
+            ''' Complements the truncation test: appending garbage after an otherwise valid
+            ''' block must also be rejected, since <see cref="Zstd.Decompress" /> relies on
+            ''' explicit section lengths rather than consuming input until it runs out.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ZstdDecompressRejectsTrailingGarbage()
+
+                Dim Plain = GeneratePartiallyCompressibleDataForLength(0.5R, 6000, 1024, 74)
+                Dim Compressed = Zstd.Compress(Plain)
+                Dim WithTrailingGarbage = Concat(Compressed, New Byte() {1, 2, 3})
+
+                AssertThrows(Of InvalidDataException)(
+                    Sub() Zstd.Decompress(WithTrailingGarbage, Plain.Length),
+                    "Zstd should reject a compressed block with trailing garbage.")
+
+            End Sub
+
             <UnitTester.SimpleTest()>
             Public Shared Sub CodecsRejectRandomGarbage()
 
@@ -105,6 +232,14 @@ Namespace Tests
                         Sub() Snappy.Decompress(Garbage),
                         $"Snappy mis-handled random garbage on trial {Trial}.")
 
+                    AssertCodecRejects(
+                        Sub() Zstd.Decompress(Garbage, Rng.Next(0, 512)),
+                        $"Zstd mis-handled random garbage on trial {Trial}.")
+
+                    AssertCodecRejects(
+                        Sub() Fse.Decompress(Garbage, Rng.Next(0, 512)),
+                        $"Fse mis-handled random garbage on trial {Trial}.")
+
                 Next
 
             End Sub
@@ -127,6 +262,50 @@ Namespace Tests
                 AssertThrows(Of InvalidDataException)(
                     Sub() Lz4.Decompress(Block, 1 << 20),
                     "An unterminated LZ4 extended-length run should throw InvalidDataException.")
+
+            End Sub
+
+            ' ================================================================================
+            ' Compression effort
+            ' ================================================================================
+
+            ''' <summary>
+            ''' <see cref="Zstd.ClampEffort" /> must floor any raw value that falls between two
+            ''' named <see cref="Zstd.CompressionEffort" /> tiers down to the lower tier, and
+            ''' clamp anything outside [Fastest, Maximum] to that nearer bound, rather than
+            ''' throwing or picking the nearest tier by distance.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ZstdClampEffortFloorsToTheNearestLowerTierAndClampsOutOfRange()
+
+                Dim Cases As (Raw As Integer, Expected As Zstd.CompressionEffort)() = {
+                    (-1000, Zstd.CompressionEffort.Fastest),
+                    (0, Zstd.CompressionEffort.Fastest),
+                    (1, Zstd.CompressionEffort.Fastest),
+                    (3, Zstd.CompressionEffort.Fastest),
+                    (4, Zstd.CompressionEffort.Fast),
+                    (7, Zstd.CompressionEffort.Fast),
+                    (8, Zstd.CompressionEffort.Normal),
+                    (11, Zstd.CompressionEffort.Normal),
+                    (12, Zstd.CompressionEffort.High),
+                    (16, Zstd.CompressionEffort.High),
+                    (17, Zstd.CompressionEffort.Best),
+                    (21, Zstd.CompressionEffort.Best),
+                    (22, Zstd.CompressionEffort.Maximum),
+                    (23, Zstd.CompressionEffort.Maximum),
+                    (9999, Zstd.CompressionEffort.Maximum)
+                }
+
+                For Each Trial In Cases
+
+                    Dim Resolved = Zstd.ClampEffort(CType(Trial.Raw, Zstd.CompressionEffort))
+
+                    If Resolved <> Trial.Expected Then
+                        Throw New Exception(
+                            $"ClampEffort({Trial.Raw}) returned {Resolved} but {Trial.Expected} was expected.")
+                    End If
+
+                Next
 
             End Sub
 
@@ -175,6 +354,17 @@ Namespace Tests
             ''' bad Buffer.BlockCopy, and so on all count as the codec mis-handling the input.
             ''' Returning normally is allowed (a truncated block can be a valid shorter one).
             ''' </summary>
+            Private Shared Function Concat(First As Byte(), Second As Byte()) As Byte()
+
+                Dim Result(First.Length + Second.Length - 1) As Byte
+
+                Buffer.BlockCopy(First, 0, Result, 0, First.Length)
+                Buffer.BlockCopy(Second, 0, Result, First.Length, Second.Length)
+
+                Return Result
+
+            End Function
+
             Private Shared Sub AssertCodecRejects(Action As Action, Message As String)
 
                 Try

@@ -130,6 +130,7 @@
     <Compile Include="Tests\Chunked Stream\Physical layout operations\Defragmentation.vb" />
     <Compile Include="Tests\Chunked Stream\Storage representation policies\Compression.vb" />
     <Compile Include="Tests\Chunked Stream\Storage representation policies\CompressionCodecs.vb" />
+    <Compile Include="Tests\Chunked Stream\Storage representation policies\EntropyCoding.vb" />
     <Compile Include="Tests\Chunked Stream\Storage representation policies\Encryption.vb" />
     <Compile Include="Tests\Chunked Stream\Storage representation policies\PolicyMigration.vb" />
     <Compile Include="Tests\Chunked Stream\Storage representation policies\SubBlocks.vb" />

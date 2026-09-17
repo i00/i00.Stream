@@ -62,6 +62,8 @@ Namespace Streams
                     Return HeaderFlags.CompressionLz4
                 Case ChunkedStreamOptions.CompressionMethods.Snappy
                     Return HeaderFlags.CompressionSnappy
+                Case ChunkedStreamOptions.CompressionMethods.Fse
+                    Return HeaderFlags.CompressionFse
                 Case Else
                     Throw New NotSupportedException($"Value {Method} is not a known member of {NameOf(ChunkedStreamOptions.CompressionMethods)}")
             End Select
@@ -85,6 +87,8 @@ Namespace Streams
                     Return Compression.Lz4.Compress(Input, 0, Count)
                 Case ChunkedStreamOptions.CompressionMethods.Snappy
                     Return Compression.Snappy.Compress(Input, 0, Count)
+                Case ChunkedStreamOptions.CompressionMethods.Fse
+                    Return Compression.Fse.Compress(Input, 0, Count)
                 Case Else
                     Dim Output(Count - 1) As Byte
                     System.Buffer.BlockCopy(Input, 0, Output, 0, Count)
@@ -107,6 +111,8 @@ Namespace Streams
                     Return Compression.Lz4.Decompress(Input, ExpectedLength)
                 Case ChunkedStreamOptions.CompressionMethods.Snappy
                     Return Compression.Snappy.Decompress(Input)
+                Case ChunkedStreamOptions.CompressionMethods.Fse
+                    Return Compression.Fse.Decompress(Input, ExpectedLength)
                 Case Else
                     Throw New InvalidDataException($"Unsupported chunk compression method: {CInt(Method)}.")
             End Select
