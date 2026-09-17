@@ -1533,6 +1533,18 @@ Namespace Streams
         Private ReadOnly _PhysicalRecordIdsByPage As New Dictionary(Of Integer, SortedSet(Of Long))
         Private ReadOnly _LivePhysicalRecordIdsByOffset As New SortedList(Of Long, Long)
         Private ReadOnly _PhysicalRecords As Dictionary(Of Long, PhysicalRecordEntry)
+
+        '
+        ' Scoped, ambient opt-out for AssertPhysicalRecordIndexConsistent's extent-reference
+        ' check, set only around PersistSalvagedPhysicalRecordTable's persist call. Tolerant
+        ' open's in-memory salvage deliberately leaves extents pointing at physical records
+        ' the corruption genuinely lost - that state must still reach disk (so a later open
+        ' does not repeat the same tolerant retry) and is meant to be found by an explicit
+        ' Validate().Repair(RepairScope.IncludeDataLoss) afterwards, not treated as a fresh
+        ' fault at publish time. Every other publish path leaves this False.
+        '
+        Private _AllowDanglingExtentReferencesOnNextPersist As Boolean
+
         Private _PhysicalDataEnd As Long = DataStartOffset
         '
         ' Set when a record leaves the live set at (or beyond) the cached end - the end may
@@ -2126,7 +2138,12 @@ Namespace Streams
                 ThrowIfDisposed()
                 ThrowIfFaulted()
                 MarkAllMetadataPagesDirty()
-                PersistIndexAndHeader(_IndexOffset, True)
+                _AllowDanglingExtentReferencesOnNextPersist = True
+                Try
+                    PersistIndexAndHeader(_IndexOffset, True)
+                Finally
+                    _AllowDanglingExtentReferencesOnNextPersist = False
+                End Try
                 _StartupSalvagePersisted = True
             End Using
 

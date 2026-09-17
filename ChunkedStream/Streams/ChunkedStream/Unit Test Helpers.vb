@@ -292,6 +292,32 @@
         End Sub
 
         ''' <summary>
+        ''' Points the first extent at a physical record id that has never been allocated,
+        ''' and marks its extent page dirty - simulates the in-memory half of an extent/
+        ''' physical-record cross-reference tear (a record reclaimed while a live extent
+        ''' still points at it) for AssertPhysicalRecordIndexConsistent's dangling-reference
+        ''' check to catch on the next publish.
+        ''' </summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Sub Debug_CorruptFirstExtentToReferenceAMissingPhysicalRecord()
+
+            If _Extents.Count = 0 Then
+                Throw New InvalidOperationException("At least one extent is needed to corrupt.")
+            End If
+
+            Dim BogusRecordId = _NextPhysicalRecordId + 1000000
+
+            Dim Extent = _Extents(0)
+            Extent.PhysicalRecordId = BogusRecordId
+            _Extents(0) = Extent
+
+            If _IndexPageEntryCount > 0 Then
+                _DirtyExtentPages.Add(0 \ _IndexPageEntryCount)
+            End If
+
+        End Sub
+
+        ''' <summary>
         ''' Rewrites the second on-disk physical-record page so its first entry is a copy of
         ''' the first page's first entry - one record now on two pages, the record that held
         ''' that slot gone - fixing every MAC so the pages still verify, and blinds the other

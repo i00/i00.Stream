@@ -613,8 +613,14 @@ Namespace Streams
             ' A pass fills every hole it can see, then compacts the surviving metadata into
             ' one block after the data. That compaction frees the scattered locations the
             ' metadata pages came from - fresh holes the pass could not see - so keep
-            ' running passes until one relocates nothing. Every productive pass strictly
-            ' lowers the total live-record offset, so this terminates.
+            ' running passes until one relocates nothing AND the checkpoint itself stops
+            ' shrinking the stream. The latter check matters even when no record moved: for
+            ' example, compacting away the last live hole can make the hole directory itself
+            ' collapse to zero pages, which a checkpoint only discovers once the compaction
+            ' that removed the hole has already run - the pass that removed it is already
+            ' past the point where it decided whether the directory is still needed. Every
+            ' productive pass strictly lowers the total live-record offset or the stream
+            ' length, so this terminates.
             '
             Do
 
@@ -673,9 +679,13 @@ Namespace Streams
 
                 If CancellationToken.Cancel Then Return
 
+                Dim LengthBeforeCheckpoint = BaseStream.Length
+
                 CommitDefragCheckpoint()
 
-                If MovedInPass = False Then Exit Do
+                Dim CheckpointShrankStream = BaseStream.Length < LengthBeforeCheckpoint
+
+                If MovedInPass = False AndAlso CheckpointShrankStream = False Then Exit Do
 
             Loop
 
@@ -734,6 +744,7 @@ Namespace Streams
             _PhysicalRecordPageDescriptors.Clear()
             _PhysicalRecordDirectoryPageDescriptors.Clear()
             _HoleDirectoryPageDescriptors.Clear()
+            _DedupPageDescriptors.Clear()
 
             _MetadataRootOffset = 0
             _MetadataRootLength = 0

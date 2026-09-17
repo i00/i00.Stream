@@ -367,6 +367,118 @@ Namespace Tests
 
             End Sub
 
+            ''' <summary>
+            ''' Reported from a real, heavily-churned EmbeddedFileSystem archive: Defragment(Move)
+            ''' kept reporting fragmentation as 0% and saved as 0, over and over, even though the
+            ''' backing file was hundreds of megabytes with almost no live data left in it.
+            '''
+            ''' TrimAndCommitDefragMetadata (Defrag.vb) forces a fresh, compact rewrite of every
+            ''' metadata page type by clearing its descriptor dictionary before publishing - an
+            ''' empty dictionary means WriteXxxPagesAsync's "keep it where it already is if nothing
+            ''' changed" optimisation (see WriteDedupEntryPagesAsync's own remarks) finds no old
+            ''' descriptor to compare against, so it always writes a fresh page near the compacted
+            ''' data. _DedupPageDescriptors was the one descriptor dictionary left out of that
+            ''' clear. Its pages were then found unchanged against their surviving old descriptors
+            ''' and left exactly where they already sat - which, after a run of writes that grew the
+            ''' file and then dereferenced almost all of it, could easily be far out past where the
+            ''' compacted stream should now end. GetActiveMetadataRanges correctly refuses to treat
+            ''' a live dedup page as free space (see DedupIndexPagesAreNeverTreatedAsFreeSpace above),
+            ''' so that single stranded page pinned the trim boundary at its old offset, and the
+            ''' backing store could never shrink below it no matter how many times Defragment ran.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub MoveDefragRelocatesScatteredDedupPagesAndTrimsTheTail()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 1024,
+                        .Deduplication = True,
+                        .DedupIndexPageEntryCount = 8
+                    }
+
+                    Dim DedupCountBeforeDefrag As Integer
+                    Dim LengthBeforeDefrag As Long
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        ' Distinct chunks, flushed periodically while the file is still growing, so
+                        ' the dedup pages published early sit at low offsets and the ones published
+                        ' later - once the file is already large - land far out, exactly like the
+                        ' reported archive's history of writes.
+                        For Index = 0 To 199
+
+                            Cs.Write(CLng(Index) * 1024, GenerateRandomData(1024, 50000 + Index))
+
+                            If Index Mod 20 = 19 Then Cs.Flush()
+
+                        Next
+
+                        Cs.Flush()
+
+                        DedupCountBeforeDefrag = Cs.Debug_DedupIndexCount()
+
+                        AssertTrue(
+                            Cs.Debug_GetDedupPageDescriptorCount() > 1,
+                            "Sanity check: writes should have produced more than one dedup index page.")
+
+                        ' Dereference every live record without shrinking the backing store - the
+                        ' same shape as an archive whose content was mostly deleted: almost nothing
+                        ' left to compact around, but the dedup pages from its larger past remain.
+                        Cs.SetLength(0)
+
+                        LengthBeforeDefrag = Ms.Length
+
+                        AssertTrue(
+                            LengthBeforeDefrag > 100000,
+                            $"Sanity check: test setup should have left a large backing store. Length={LengthBeforeDefrag}")
+
+                        Dim FirstCallSaved = Cs.Defragment(ChunkedStream.DefragTypes.Move)
+
+                        AssertTrue(
+                            Ms.Length < LengthBeforeDefrag \ 4L,
+                            $"Defragment(Move) did not trim the backing store even though almost nothing was left live. Before={LengthBeforeDefrag}, After={Ms.Length}, Saved={FirstCallSaved}")
+
+                        Dim LengthAfterFirstCall = Ms.Length
+
+                        Dim SecondCallSaved = Cs.Defragment(ChunkedStream.DefragTypes.Move)
+
+                        AssertEqual(
+                            0L,
+                            SecondCallSaved,
+                            $"A second back-to-back Defragment(Move) reclaimed {SecondCallSaved} more bytes - the first call did not converge.")
+
+                        AssertEqual(
+                            LengthAfterFirstCall,
+                            Ms.Length,
+                            "A second back-to-back Defragment(Move) changed the backing-store length.")
+
+                        AssertEqual(
+                            DedupCountBeforeDefrag,
+                            Cs.Debug_DedupIndexCount(),
+                            "Relocating the dedup pages during defrag must not lose any dedup entries.")
+
+                        Cs.Validate().ThrowIfErrors()
+
+                    End Using
+
+                    Ms.Position = 0
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                        Reopened.Validate().ThrowIfErrors()
+
+                        AssertEqual(
+                            DedupCountBeforeDefrag,
+                            Reopened.Debug_DedupIndexCount(),
+                            "Reopening after the relocation should still see every dedup entry.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
         End Class
 
     End Class

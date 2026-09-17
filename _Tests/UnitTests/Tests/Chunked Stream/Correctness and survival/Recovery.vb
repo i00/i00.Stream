@@ -1315,6 +1315,63 @@ Namespace Tests
             End Sub
 
             ''' <summary>
+            ''' An extent referencing a physical record id that does not exist in the table -
+            ''' the shape MissingPhysicalRecord repairs, but produced here by direct in-memory
+            ''' corruption rather than by a real prior incident - must be refused by the next
+            ''' metadata publish that actually rewrites that extent's page, before a byte is
+            ''' written, and fault the stream. AssertPhysicalRecordIndexConsistent's other
+            ''' checks only verify the physical-record table is internally self-consistent;
+            ''' this is the only check that catches the reverse direction (an extent pointing
+            ''' at a record the table no longer has).
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ExtentReferencingAMissingPhysicalRecordIsRefusedByThePublishAndTheFileStaysOpenable()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 256,
+                        .IndexPageEntryCount = 4,
+                        .IndexDirectoryEntryCount = 4
+                    }
+
+                    Dim Expected = GenerateRandomData(Options.ChunkSize * 6, 51501)
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, Expected)
+                        Cs.Flush()
+                        Cs.Validate().ThrowIfErrors()
+
+                        Cs.Debug_CorruptFirstExtentToReferenceAMissingPhysicalRecord()
+
+                        AssertThrows(Of InvalidDataException)(
+                            Sub() Cs.Write(Cs.Length, New Byte(0) {}),
+                            "The publish should have refused the extent referencing a missing physical record.")
+
+                        AssertThrows(Of InvalidOperationException)(
+                            Sub() Cs.Write(0, New Byte(0) {}),
+                            "Refusing the dangling extent reference should have faulted the stream.")
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                        AssertEqual(0, Reopened.AutoRepairs.Count,
+                                    "The dangling extent reference must never have reached disk, so the reopen is clean.")
+
+                        Reopened.Validate().ThrowIfErrors()
+
+                        AssertBytesEqual(Expected, Reopened.ToArray(),
+                                         "The last good generation's data did not survive.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
             ''' A file whose only header generation already carries a torn physical-record
             ''' index - one record on two pages, another gone - still opens: Open retries
             ''' tolerating the inconsistency, keeps the first copy of the duplicate, reports

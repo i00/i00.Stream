@@ -1207,8 +1207,8 @@ Namespace Streams
         ' intact and openable. Serialising a torn index instead is exactly what bricks a
         ' reopen with "Loaded physical-record count does not match metadata root".
         '
-        ' Cost is O(records) dictionary lookups, once per publish - cheap next to the page
-        ' writes the publish is about to do.
+        ' Cost is O(records + extents) dictionary lookups, once per publish - cheap next to
+        ' the page writes the publish is about to do.
         '
         Private Sub AssertPhysicalRecordIndexConsistent()
 
@@ -1249,6 +1249,57 @@ Namespace Streams
             If PagedRecordCount <> _PhysicalRecords.Count Then
                 Throw New InvalidDataException(
                     $"Physical-record pages hold {PagedRecordCount} entries but the record table holds {_PhysicalRecords.Count}.")
+            End If
+
+            '
+            ' Every check above only verifies the physical-record table is internally
+            ' self-consistent (ordinals, page membership). None of them catch the other
+            ' direction: an extent whose PhysicalRecordId was removed from - or never made
+            ' it into - the table it still points at. A record's RefCount reaching zero
+            ' reclaims it from _PhysicalRecords; if that ever happens while a live extent
+            ' still references it (an over-eager decrement, a partial rollback, dedup
+            ' sharing miscounted), this is the only place left that would ever notice
+            ' before the inconsistency reaches disk - so check it explicitly rather than
+            ' relying on it being implied by the checks above, which it is not.
+            '
+            ' Scoped to extents on a page in _DirtyExtentPages (the pages this publish is
+            ' about to rewrite), NOT every extent - a tolerant-open salvage can leave extents
+            ' referencing records the corruption genuinely lost (see
+            ' PersistSalvagedPhysicalRecordTable's own opt-out below), and that state is
+            ' deliberately allowed to persist on disk, unrepaired, across every ordinary
+            ' publish afterwards (a plain Write elsewhere, or even just Dispose) until an
+            ' explicit Validate().Repair(RepairScope.IncludeDataLoss) - it is what surfaces as
+            ' Validate()'s MissingPhysicalRecord, not a fault at publish time. Re-validating
+            ' every extent on every publish would block all further use of such a file.
+            ' Restricting to dirty pages still catches a genuinely NEW inconsistency any
+            ' mutation introduces (mutating an extent always dirties its page first, per the
+            ' mark-dirty-before-mutate rule elsewhere in this file), while never re-flagging
+            ' old, already-known, not-yet-repaired damage this publish isn't touching.
+            '
+            ' _AllowDanglingExtentReferencesOnNextPersist additionally skips this entirely:
+            ' PersistSalvagedPhysicalRecordTable marks every page dirty (MarkAllMetadataPagesDirty)
+            ' to force a full rewrite near the salvaged table, which would otherwise catch its
+            ' own known, not-yet-repaired dangling references on the very publish that is
+            ' correctly persisting them.
+            '
+            If _AllowDanglingExtentReferencesOnNextPersist = False AndAlso
+               _DirtyExtentPages.Count > 0 AndAlso _IndexPageEntryCount > 0 Then
+
+                For ExtentIndex = 0 To _Extents.Count - 1
+
+                    If _DirtyExtentPages.Contains(ExtentIndex \ _IndexPageEntryCount) = False Then Continue For
+
+                    Dim Extent = _Extents(ExtentIndex)
+
+                    If Extent.PhysicalRecordId = SparsePhysicalRecordId Then Continue For
+
+                    If _PhysicalRecords.ContainsKey(Extent.PhysicalRecordId) = False Then
+                        Throw New InvalidDataException(
+                            $"Extent at logical offset {Extent.LogicalOffset} references physical record {Extent.PhysicalRecordId}, which is not in the record table.")
+                    End If
+
+                Next
+
             End If
 
         End Sub
