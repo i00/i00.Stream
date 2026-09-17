@@ -393,6 +393,135 @@ Namespace Streams
         End Sub
 
         ''' <summary>
+        ''' Moves an entry into another directory, optionally renaming it in the same step. The anchor
+        ''' and its contents are untouched - its directory entry is relocated and its own stored parent
+        ''' link rewritten, so nothing in the moved entry's data moves. The entry's current directory and
+        ''' name are resolved from <paramref name="AnchorId" /> itself (see <see cref="GetParentAnchorId" />),
+        ''' so the caller need only hold the anchor id, not track where the entry currently lives. Moving
+        ''' within the same directory is equivalent to <see cref="RenameEntry" />.
+        ''' </summary>
+        Public Sub Move(AnchorId As Long, DestinationParentDirectoryAnchorId As Long, Optional NewName As String = Nothing)
+            SyncLock _SyncRoot
+                ThrowIfDisposed()
+                If AnchorId = _Root.AnchorId Then Throw New InvalidOperationException("The root cannot be moved.")
+
+                Dim Child = GetAnchor(AnchorId)
+                Dim Location = GetParentEntry(Child)
+                Dim TargetName = If(NewName, Location.Entry.Name)
+                ValidateName(TargetName)
+
+                Dim DestinationParent = GetDirectory(DestinationParentDirectoryAnchorId)
+
+                If Location.Parent.AnchorId = DestinationParent.AnchorId Then
+                    ' Moving onto its own directory is just a rename - reuse RenameEntry's exact
+                    ' in-place field rewrite rather than relocating the entry to the end of the list.
+                    If String.Equals(Location.Entry.Name, TargetName, StringComparison.OrdinalIgnoreCase) = False Then
+                        EnsureNameAvailable(DestinationParent, TargetName)
+                    End If
+                    Using Scope = ChunkedStream.DeferPublish()
+                        SetEntryName(Location, TargetName)
+                        Scope.Publish()
+                    End Using
+                    Return
+                End If
+
+                If (Location.Entry.EntryType = EntryTypes.Directory OrElse Location.Entry.EntryType = EntryTypes.CorruptDirectory) AndAlso
+                   IsSameOrAncestor(AnchorId, DestinationParent.AnchorId) Then
+                    Throw New InvalidOperationException("A directory cannot be moved into itself or one of its own subdirectories.")
+                End If
+
+                EnsureNameAvailable(DestinationParent, TargetName)
+
+                Using Scope = ChunkedStream.DeferPublish()
+                    RemoveEntry(Location)
+                    WriteInt64(Child.Offset + ParentOffset, DestinationParent.AnchorId)
+                    AppendEntry(DestinationParent, New ContentListEntry(Location.Entry.EntryType, AnchorId,
+                                                                        Location.Entry.LengthOfDataAtEntry, TargetName))
+                    Scope.Publish()
+                End Using
+            End SyncLock
+        End Sub
+
+        ''' <summary>
+        ''' Copies an entry - recursively, for a directory - into another directory, optionally under a
+        ''' new name; the source's current directory and name are resolved from <paramref name="AnchorId" />
+        ''' itself (see <see cref="GetParentAnchorId" />). The copy shares the source's physical bytes via
+        ''' <see cref="ChunkedStream.Clone" /> (copy-on-write) rather than duplicating them, so it is cheap
+        ''' regardless of size; a later write to either copy allocates its own storage the normal way. The
+        ''' clone is always a plain <see cref="EntryTypes.File" /> or <see cref="EntryTypes.Directory" /> -
+        ''' a <see cref="EntryTypes.PendingFile" /> source clones whatever has been durably published so
+        ''' far. Cloning a <see cref="EntryTypes.CorruptFile" /> or <see cref="EntryTypes.CorruptDirectory" />
+        ''' entry - anywhere in the subtree, for a directory - is refused, since the copy would silently
+        ''' carry the same damage forward as if it were ordinary data.
+        ''' </summary>
+        ''' <returns>The anchor id of the new top-level clone.</returns>
+        Public Function Clone(AnchorId As Long, DestinationParentDirectoryAnchorId As Long, Optional NewName As String = Nothing) As Long
+            SyncLock _SyncRoot
+                ThrowIfDisposed()
+                Dim SourceAnchor = GetAnchor(AnchorId)
+                Dim Location = GetParentEntry(SourceAnchor)
+                Dim TargetName = If(NewName, Location.Entry.Name)
+                ValidateName(TargetName)
+
+                Dim DestinationParent = GetDirectory(DestinationParentDirectoryAnchorId)
+                EnsureNameAvailable(DestinationParent, TargetName)
+
+                Using Scope = ChunkedStream.DeferPublish()
+                    Dim NewAnchorId = CloneEntry(SourceAnchor, Location.Entry.EntryType,
+                                                 Location.Entry.LengthOfDataAtEntry, DestinationParent, TargetName)
+                    Scope.Publish()
+                    Return NewAnchorId
+                End Using
+            End SyncLock
+        End Function
+
+        ''' <summary>
+        ''' Clones one entry into <paramref name="NewParent" /> as <paramref name="Name" />, recursing
+        ''' into a directory's children. For a directory, <see cref="ReadEntries" /> is snapshotted
+        ''' before this clone's own entry is registered in <paramref name="NewParent" /> - if the caller
+        ''' is cloning a directory directly into itself, <paramref name="NewParent" /> and
+        ''' <paramref name="SourceAnchor" /> are the same anchor, and appending first would make the new
+        ''' entry show up in that same read, recursing into cloning itself.
+        ''' </summary>
+        Private Function CloneEntry(SourceAnchor As ChunkedStream.Anchor, SourceEntryType As EntryTypes, SourceLength As Long,
+                                    NewParent As ChunkedStream.Anchor, Name As String) As Long
+            If SourceEntryType = EntryTypes.CorruptFile OrElse SourceEntryType = EntryTypes.CorruptDirectory Then
+                Throw New InvalidOperationException($"'{Name}' is flagged {SourceEntryType} and cannot be cloned.")
+            End If
+
+            If SourceEntryType = EntryTypes.Directory Then
+                Dim Children = ReadEntries(SourceAnchor)
+                Dim NewDirectory = ChunkedStream.CreateAnchor(BuildDirectory(NewParent.AnchorId))
+                AppendEntry(NewParent, New ContentListEntry(EntryTypes.Directory, NewDirectory.AnchorId, DirectoryHeaderSize, Name))
+                For Each Child In Children
+                    CloneEntry(GetAnchor(Child.ChildAnchorId), Child.EntryType, Child.LengthOfDataAtEntry, NewDirectory, Child.Name)
+                Next
+                Return NewDirectory.AnchorId
+            End If
+
+            ' File or PendingFile: the clone is always a complete, ordinary File - nothing is being
+            ' written to it, so "pending" cannot apply.
+            Dim NewFile = ChunkedStream.CreateAnchor(BuildFile(NewParent.AnchorId))
+            If SourceLength > 0 Then ChunkedStream.Clone(SourceAnchor.Offset + FileHeaderSize, SourceLength, ChunkedStream.Length)
+            AppendEntry(NewParent, New ContentListEntry(EntryTypes.File, NewFile.AnchorId, SourceLength, Name))
+            Return NewFile.AnchorId
+        End Function
+
+        ''' <summary>True when <paramref name="AnchorId" /> is <paramref name="CandidateAncestorAnchorId" />
+        ''' itself, or lies anywhere beneath it - used to stop a directory being moved into itself or one
+        ''' of its own subdirectories.</summary>
+        Private Function IsSameOrAncestor(CandidateAncestorAnchorId As Long, AnchorId As Long) As Boolean
+            Dim Current = AnchorId
+            Dim Guard As New HashSet(Of Long)()
+            While Current > 0 AndAlso Guard.Add(Current)
+                If Current = CandidateAncestorAnchorId Then Return True
+                If Current = _Root.AnchorId Then Return False
+                Current = ReadParentIdOrZero(Current)
+            End While
+            Return False
+        End Function
+
+        ''' <summary>
         ''' Applies <paramref name="Action" /> to every pending or corrupt entry, and to every
         ''' record the root can no longer reach, returning a description of every record acted on.
         ''' Pass <see cref="PendingFileRecoveryActions.List" /> to enumerate them without changing
