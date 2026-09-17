@@ -228,7 +228,8 @@ depth-assert.
   serial and the `ReadRangeInParallel` paths fill and read it.
 - **Read-time coalescing of contiguous extents.**
 - **Shrink the file header?**
-- **More compression methods:** fast Brotli, Zstd, LZMA / 7-Zip.
+- **More compression methods:** fast Brotli, LZMA / 7-Zip. (Zstd — *done, see DONE.md* — a
+  hand-rolled LZ77+FSE codec, plus the standalone FSE entropy coder it's built on.)
 - **More encryption methods:** AES-GCM, ChaCha20-Poly1305.
 
 ---

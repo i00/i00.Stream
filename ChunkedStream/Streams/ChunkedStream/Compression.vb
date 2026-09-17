@@ -56,7 +56,9 @@ Namespace Streams
                     Return HeaderFlags.None
                 Case ChunkedStreamOptions.CompressionMethods.Deflate
                     Return HeaderFlags.CompressionDeflate
+#Disable Warning BC40000 ' Type or member is obsolete
                 Case ChunkedStreamOptions.CompressionMethods.GZip
+#Enable Warning BC40000 ' Type or member is obsolete
                     Return HeaderFlags.CompressionGZip
                 Case ChunkedStreamOptions.CompressionMethods.Lz4
                     Return HeaderFlags.CompressionLz4
@@ -64,6 +66,8 @@ Namespace Streams
                     Return HeaderFlags.CompressionSnappy
                 Case ChunkedStreamOptions.CompressionMethods.Fse
                     Return HeaderFlags.CompressionFse
+                Case ChunkedStreamOptions.CompressionMethods.Zstd
+                    Return HeaderFlags.CompressionZstd
                 Case Else
                     Throw New NotSupportedException($"Value {Method} is not a known member of {NameOf(ChunkedStreamOptions.CompressionMethods)}")
             End Select
@@ -81,14 +85,18 @@ Namespace Streams
             Select Case Method
                 Case ChunkedStreamOptions.CompressionMethods.Deflate
                     Return CompressWithFrameworkStream(Input, Count, ChunkedStreamOptions.CompressionMethods.Deflate)
+#Disable Warning BC40000 ' Type or member is obsolete
                 Case ChunkedStreamOptions.CompressionMethods.GZip
                     Return CompressWithFrameworkStream(Input, Count, ChunkedStreamOptions.CompressionMethods.GZip)
+#Enable Warning BC40000 ' Type or member is obsolete
                 Case ChunkedStreamOptions.CompressionMethods.Lz4
                     Return Compression.Lz4.Compress(Input, 0, Count)
                 Case ChunkedStreamOptions.CompressionMethods.Snappy
                     Return Compression.Snappy.Compress(Input, 0, Count)
                 Case ChunkedStreamOptions.CompressionMethods.Fse
                     Return Compression.Fse.Compress(Input, 0, Count)
+                Case ChunkedStreamOptions.CompressionMethods.Zstd
+                    Return Compression.Zstd.Compress(Input, 0, Count)
                 Case Else
                     Dim Output(Count - 1) As Byte
                     System.Buffer.BlockCopy(Input, 0, Output, 0, Count)
@@ -105,14 +113,18 @@ Namespace Streams
                     Return Input
                 Case ChunkedStreamOptions.CompressionMethods.Deflate
                     Return DecompressWithFrameworkStream(Input, ExpectedLength, ChunkedStreamOptions.CompressionMethods.Deflate)
+#Disable Warning BC40000 ' Type or member is obsolete
                 Case ChunkedStreamOptions.CompressionMethods.GZip
                     Return DecompressWithFrameworkStream(Input, ExpectedLength, ChunkedStreamOptions.CompressionMethods.GZip)
+#Enable Warning BC40000 ' Type or member is obsolete
                 Case ChunkedStreamOptions.CompressionMethods.Lz4
                     Return Compression.Lz4.Decompress(Input, ExpectedLength)
                 Case ChunkedStreamOptions.CompressionMethods.Snappy
                     Return Compression.Snappy.Decompress(Input)
                 Case ChunkedStreamOptions.CompressionMethods.Fse
                     Return Compression.Fse.Decompress(Input, ExpectedLength)
+                Case ChunkedStreamOptions.CompressionMethods.Zstd
+                    Return Compression.Zstd.Decompress(Input, ExpectedLength)
                 Case Else
                     Throw New InvalidDataException($"Unsupported chunk compression method: {CInt(Method)}.")
             End Select
@@ -122,7 +134,9 @@ Namespace Streams
         Private Shared Function CompressWithFrameworkStream(Input As Byte(), Count As Integer, Method As ChunkedStreamOptions.CompressionMethods) As Byte()
 
             Using Output As New MemoryStream()
+#Disable Warning BC40000 ' Type or member is obsolete
                 If Method = ChunkedStreamOptions.CompressionMethods.GZip Then
+#Enable Warning BC40000 ' Type or member is obsolete
                     Using Compressor As New GZipStream(Output, CompressionLevel.Fastest, True)
                         Compressor.Write(Input, 0, Count)
                     End Using
@@ -147,15 +161,20 @@ Namespace Streams
             Dim Output(ExpectedLength - 1) As Byte
 
             Using InputMs As New MemoryStream(Input)
-                If Method = ChunkedStreamOptions.CompressionMethods.GZip Then
-                    Using Decompressor As New GZipStream(InputMs, CompressionMode.Decompress)
-                        ReadExactlyFromDecompressor(Decompressor, Output, ExpectedLength)
-                    End Using
-                Else
-                    Using Decompressor As New DeflateStream(InputMs, CompressionMode.Decompress)
-                        ReadExactlyFromDecompressor(Decompressor, Output, ExpectedLength)
-                    End Using
-                End If
+                Select Case Method
+#Disable Warning BC40000 ' Type or member is obsolete
+                    Case ChunkedStreamOptions.CompressionMethods.GZip
+#Enable Warning BC40000 ' Type or member is obsolete
+                        Using Decompressor As New GZipStream(InputMs, CompressionMode.Decompress)
+                            ReadExactlyFromDecompressor(Decompressor, Output, ExpectedLength)
+                        End Using
+                    Case ChunkedStreamOptions.CompressionMethods.Deflate
+                        Using Decompressor As New DeflateStream(InputMs, CompressionMode.Decompress)
+                            ReadExactlyFromDecompressor(Decompressor, Output, ExpectedLength)
+                        End Using
+                    Case Else
+                        Throw New NotSupportedException($"Value {Method} is not a known member of {NameOf(ChunkedStreamOptions.CompressionMethods)}")
+                End Select
             End Using
 
             Return Output

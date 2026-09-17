@@ -240,7 +240,10 @@ Namespace Compression
                         Dim NextBest = FindBestMatch(Input, Position + 1, EndPosition, InputOffset, HashTable, Chain, HashShift, HashMask, Parameters.ChainDepth)
 
                         If NextBest.Length > Best.Length Then
-                            Literals.Add(Input(Position))
+                            ' Defer to the better match at Position + 1. Anchor stays put,
+                            ' so the byte at Position is picked up later by the ordinary
+                            ' Anchor-based literal run slice - it must not be added here
+                            ' too, or it gets double-counted into Literals.
                             Position += 1
                             Continue While
                         End If

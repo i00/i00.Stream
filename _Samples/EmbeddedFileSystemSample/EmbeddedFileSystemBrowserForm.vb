@@ -3327,7 +3327,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 Dim WriteBufferFlushThreshold = CInt(Math.Min(MaxBufferFlushThreshold,
                                                                     Math.Max(MinBufferFlushThreshold, SourceStream.Length \ 64)))
                 Using DestinationStream = _FileSystem.OpenFile(FileAnchorId, PendingOnClose:=True, WriteBufferFlushThreshold:=WriteBufferFlushThreshold)
-                    Dim Buffer(1024 * 1024 - 1) As Byte
+                    Dim Buffer((WriteBufferFlushThreshold) - 1) As Byte
                     While True
                         Dim BytesRead = SourceStream.Read(Buffer, 0, Buffer.Length)
                         If BytesRead = 0 Then Exit While

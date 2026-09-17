@@ -524,6 +524,14 @@ Namespace Streams
                 ''' see <see cref="Compression.Zstd" /> for a codec that adds LZ77 on top.
                 ''' </summary>
                 Fse = 5
+
+                ''' <summary>
+                ''' Store the chunk payload using a hand-rolled, Zstandard-inspired codec:
+                ''' LZ77 match finding with the literal bytes entropy-coded via
+                ''' <see cref="Compression.Fse" />. Slower than <see cref="Lz4" /> and
+                ''' <see cref="Snappy" />, but usually compresses noticeably smaller.
+                ''' </summary>
+                Zstd = 6
             End Enum
 
             ''' <summary>

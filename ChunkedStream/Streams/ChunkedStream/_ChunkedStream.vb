@@ -689,6 +689,7 @@ Namespace Streams
             CompressionLz4 = 1 << 4
             CompressionSnappy = 1 << 5
             CompressionFse = 1 << 6
+            CompressionZstd = 1 << 7
         End Enum
 
         Friend Const SparsePhysicalRecordId As Long = 0

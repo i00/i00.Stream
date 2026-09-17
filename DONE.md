@@ -47,6 +47,52 @@ Confirmed the first test non-vacuous by reverting just the source fix (`git stas
 failing assertion showing `CompressionMethod=Deflate` where `None` was expected; restored and
 re-verified 418/418 clean.
 
+### Hand-rolled FSE entropy coder, plus a Zstd-inspired LZ77+FSE codec — DONE
+Added `Compression\Fse.vb`: a from-scratch tANS/FSE (Finite State Entropy) coder — histogram
+normalization (every present symbol gets ≥1 slot via a largest-remainder correction so the
+counts sum exactly to the table size), table construction (the standard spread-step algorithm),
+and an O(1)-per-symbol encode/decode derived and verified from first principles rather than
+recalled from a reference implementation, given how easy tANS is to get subtly wrong. Exposed
+as its own `Compress`/`Decompress` block codec (raw-or-FSE-coded, whichever is smaller) in the
+same shape as `Lz4`/`Snappy`.
+
+Added `Compression\Zstd.vb` on top of it: hash-chain LZ77 matching (chain depth and greedy vs.
+lazy matching controlled by a new `Zstd.CompressionEffort` enum — `Fastest`/`Fast`/`Normal`/
+`High`/`Best`/`Maximum` — with deliberate gaps between the numeric values so a raw integer can
+be `CType`-cast in and `ClampEffort` floors it to the nearest tier, clamping out-of-range values
+like zstd itself does), with literal bytes routed through `Fse` and match sequences stored as
+plain varints. Not a real zstd-compatible bitstream — an independent format, since nothing
+outside this codec ever needs to read one.
+
+Both codecs are now selectable `ChunkedStreamOptions.CompressionMethods` (`Fse = 5`, `Zstd = 6`),
+wired through a new `HeaderFlags.CompressionFse` / `CompressionZstd` bit each (safe to add:
+`SupportedFlags` is computed via `[Enum].GetValues` reflection at `Open`, so old and new code
+agree automatically) and `Compression.vb`'s dispatch. `Zstd`'s own literals section just calls
+`Fse.Compress`/`Fse.Decompress` instead of duplicating that logic.
+
+Wiring `Zstd` in immediately surfaced a real bug via the existing deterministic model-based fuzz
+test (`ModelBasedRandomOperationsMatchByteArrayModel`, seed `123456`): adding a new
+`CompressionMethods` member shifted which method that seeded run picks, and it landed on `Zstd`
+for the first time, throwing `Copied physical record failed validation` during a defrag-move's
+post-copy check. Root cause: in the LZ77 lazy-matching branch, deferring to a better match found
+one byte ahead added the deferred byte to the literals buffer immediately *and* left `Anchor` in
+place, so the same byte was counted a second time once the eventual literal run was later sliced
+from `Anchor` — surfacing as `Zstd block did not consume every literal byte`. Fixed by just
+advancing `Position` in the defer branch and letting the ordinary `Anchor`-based slice pick the
+byte up naturally.
+
+Tests (`Storage representation policies/EntropyCoding.vb` (new) and
+`Storage representation policies/CompressionCodecs.vb`, +17, suite 418 → 435): FSE table
+construction and encode/decode round-trips across skewed/uniform/single-symbol/all-256-symbol
+distributions plus hostile-input rejection; `Fse` and `Zstd` codec-level round-trips (every
+`CompressionEffort` tier for `Zstd`) with truncation, trailing-garbage and random-garbage
+rejection; a compression-ratio sanity check; and a hand-built 22-byte
+`ZstdLazyMatchDeferralDoesNotDuplicateTheDeferredLiteral` regression case constructed to force
+the exact defer-then-longer-match sequence that caused the bug above. Confirmed non-vacuous by
+reverting just the source fix and re-running: that test failed with the predicted
+`InvalidDataException`; restored and re-verified 435/435 clean, including the fuzz test with its
+original seed.
+
 ---
 
 ## 2026-09-14

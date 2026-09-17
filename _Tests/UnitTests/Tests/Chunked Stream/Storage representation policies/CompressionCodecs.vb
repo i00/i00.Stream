@@ -58,6 +58,28 @@ Namespace Tests
             End Sub
 
             ''' <summary>
+            ''' Regression test for a real bug a model-based fuzz run found: when the lazy
+            ''' matcher deferred to a better match at Position + 1, it added the deferred
+            ''' byte to the literals buffer immediately without moving Anchor past it - so
+            ''' the same byte was added a second time once the eventual literal run was
+            ''' later sliced from Anchor, leaving Literals longer than what the recorded
+            ''' sequences actually consume. This 22-byte input is hand-built to force
+            ''' exactly that: a length-4 match at one position whose lazy lookahead finds a
+            ''' longer match one byte later.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub ZstdLazyMatchDeferralDoesNotDuplicateTheDeferredLiteral()
+
+                Dim Sample As Byte() = {1, 2, 3, 4, 5, 2, 3, 4, 6, 7, 8, 9, 10, 1, 2, 3, 4, 6, 7, 8, 9, 10}
+
+                Dim Compressed = Zstd.Compress(Sample, Zstd.CompressionEffort.Normal)
+                Dim Restored = Zstd.Decompress(Compressed, Sample.Length)
+
+                AssertBytesEqual(Sample, Restored, "Zstd mis-handled a lazy-match deferral.")
+
+            End Sub
+
+            ''' <summary>
             ''' Every <see cref="Zstd.CompressionEffort" /> tier changes the LZ77 search
             ''' (chain depth, lazy matching), so each one needs its own round-trip pass - a
             ''' bug specific to, say, lazy matching would not show up at Fastest.

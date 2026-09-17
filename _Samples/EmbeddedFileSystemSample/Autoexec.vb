@@ -43,7 +43,7 @@ Public NotInheritable Class Autoexec
             ' multi-TB file; 4MB keeps that in the low millions while still capping the cost of a
             ' random seek at a few milliseconds of wasted decrypt/MAC work.
             Dim Options = New i00.Streams.ChunkedStream.ChunkedStreamOptions() With {
-                .CompressionMethod = i00.Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Lz4,
+                .CompressionMethod = i00.Streams.ChunkedStream.ChunkedStreamOptions.CompressionMethods.Zstd,
                 .AutoRecoverOnFault = True,
                 .EncryptionInfo = EncryptionInfo,
                 .ChunkSizeVariance = 0.25,
