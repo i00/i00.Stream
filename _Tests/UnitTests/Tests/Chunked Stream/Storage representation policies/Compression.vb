@@ -434,6 +434,126 @@ Namespace Tests
             End Sub
 
             ' ================================================================================
+            ' Sub-block-aware compression evaluation (SB-1 / SB-2)
+            ' ================================================================================
+
+            ''' <summary>
+            ''' Verifies that the store-compressed-or-not decision is made from the real total
+            ''' across every sub-block, not from a separate whole-chunk trial. Built from four
+            ''' copies of one pseudo-random 16 KB unit at SubBlockSize = 8 KB (two sub-blocks per
+            ''' unit): a single whole-chunk compression pass would see the repetition and compress
+            ''' the chunk down to roughly a quarter of its size, but each 8 KB sub-block is
+            ''' compressed independently and, in isolation, sees only half of one unit with no
+            ''' repetition visible inside its own window - indistinguishable from random noise.
+            ''' The chunk must therefore be stored as plaintext.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CompressionDecisionReflectsRealPerSubBlockTotalsNotAWholeChunkEstimate()
+
+                Dim ChunkSize = 64 * 1024
+                Dim SubBlockSize = 8 * 1024
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = ChunkSize,
+                        .SubBlockSize = SubBlockSize,
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                        .CompressionRatioThreshold = 0.5R
+                    }
+
+                    Dim Unit = GenerateRandomData(16 * 1024, 9001)
+                    Dim Expected = CombineArrays(Unit, Unit, Unit, Unit)
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, Expected)
+
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Sub-block-compressed chunk did not round-trip.")
+
+                        Dim Chunk = Cs.GetStructure().Chunks.Single()
+
+                        AssertEqual(
+                            ChunkedStream.ChunkedStreamOptions.CompressionMethods.None,
+                            Chunk.CompressionMethod,
+                            "The chunk should be stored as plaintext: independently, none of its sub-blocks actually compress, even though a whole-chunk-only evaluation of the same bytes would say otherwise.")
+
+                        Cs.Validate().ThrowIfErrors()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+                        AssertBytesEqual(Expected, Reopened.ToArray(), "Sub-block-compressed chunk did not survive reopen.")
+                        Reopened.Validate().ThrowIfErrors()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' Verifies that a chunk which is genuinely compressible per sub-block (not just as
+            ''' one whole blob) is still stored compressed, and that an individual sub-block whose
+            ''' own slice happens not to compress well is stored inflated rather than causing the
+            ''' whole record to fall back to plaintext - the accept/reject decision is chunk-wide,
+            ''' not per sub-block.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub OneIncompressibleSubBlockDoesNotPreventTheRestOfTheChunkFromCompressing()
+
+                Dim ChunkSize = 64 * 1024
+                Dim SubBlockSize = 8 * 1024
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = ChunkSize,
+                        .SubBlockSize = SubBlockSize,
+                        .CompressionMethod = ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                        .CompressionRatioThreshold = 0.5R
+                    }
+
+                    ' Sub-block 0 is incompressible on its own; the other seven are each highly
+                    ' compressible on their own. The aggregate is still well under the threshold,
+                    ' so the whole chunk should be stored compressed - sub-block 0 included, even
+                    ' though its own compressed form is larger than its own plaintext.
+                    Dim Expected = CombineArrays(
+                        GenerateRandomData(SubBlockSize, 9101),
+                        GeneratePatternData(SubBlockSize, 9110),
+                        GeneratePatternData(SubBlockSize, 9111),
+                        GeneratePatternData(SubBlockSize, 9112),
+                        GeneratePatternData(SubBlockSize, 9113),
+                        GeneratePatternData(SubBlockSize, 9114),
+                        GeneratePatternData(SubBlockSize, 9115),
+                        GeneratePatternData(SubBlockSize, 9116))
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, Expected)
+
+                        AssertBytesEqual(Expected, Cs.ToArray(), "Mixed-compressibility chunk did not round-trip.")
+
+                        Dim Chunk = Cs.GetStructure().Chunks.Single()
+
+                        AssertEqual(
+                            ChunkedStream.ChunkedStreamOptions.CompressionMethods.Deflate,
+                            Chunk.CompressionMethod,
+                            "The chunk should still be stored compressed overall, despite one incompressible sub-block.")
+
+                        Cs.Validate().ThrowIfErrors()
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+                        AssertBytesEqual(Expected, Reopened.ToArray(), "Mixed-compressibility chunk did not survive reopen.")
+                        Reopened.Validate().ThrowIfErrors()
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ' ================================================================================
             ' Sampled compression evaluation
             ' ================================================================================
 

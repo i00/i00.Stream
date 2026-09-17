@@ -4,6 +4,51 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ---
 
+## 2026-09-17
+
+### SB-1 / SB-2 — sub-block compression evaluated as a whole chunk, compressed at most once — FIXED
+`PrepareChunkRecord` (`Storage.vb`) used to run a full whole-chunk trial compression purely to
+decide `StoredCompressionMethod` / `CompressionEvaluatedPercent`, then compress every
+sub-block independently *again* from scratch to build the actually-stored bytes — the trial's
+own compressed output (`Payload` / `PayloadLength`) was computed and then never read (SB-2,
+dead code), and the accept/reject decision was based on that separate, thrown-away number
+rather than the real total the sub-block pass would actually store (SB-1) — for one
+constructed case (a 16 KB pseudo-random unit repeated four times across a 64 KB chunk at an
+8 KB sub-block size) this wasn't just cosmetic: the whole-chunk trial found the macro
+repetition and said "compress", while independent 8 KB sub-blocks each see less than one unit
+and don't compress at all, so the chunk was stored as full-size "compressed" data — no space
+saved, format overhead, no correctness break.
+
+Fix: the per-sub-block compression loop now runs *once* and is the only place compression
+happens — `AttemptFullCompression` (set from the existing cheap sampled pre-check, unchanged)
+gates whether it runs at all. Every sub-block's compressed bytes are kept from that one pass;
+after the loop, one aggregate (`TotalCompressedLength`, the real sum across every sub-block)
+decides `StoredCompressionMethod` for the *whole record* — either every sub-block is stored
+via its already-computed compressed bytes, or every one of them falls back to plaintext, never
+a per-sub-block mix. `CompressionEvaluatedPercent` is now derived from that same real total, so
+it always matches what's actually on disk. The dead `Payload` / `PayloadLength` / whole-chunk
+`Compressed` variables are gone.
+
+Deliberately unchanged, per explicit design: an individual sub-block whose own slice compresses
+poorly is still stored inflated when the *chunk as a whole* clears the ratio threshold — the
+decision is chunk-wide by design, not per sub-block, so there is no per-sub-block "keep
+plaintext if smaller" fallback to add. The sampled-evaluation fast path (`Options.CompressionEvaluation
+= Sampled`, a small leading-bytes probe to skip full compression when it looks hopeless) is
+unrelated and untouched.
+
+Tests (`Storage representation policies/Compression.vb`, +2, suite 416 → 418):
+`CompressionDecisionReflectsRealPerSubBlockTotalsNotAWholeChunkEstimate` (the repeated-16 KB-unit
+case above — fails against the prior code: it stored the chunk compressed when no sub-block
+actually benefited) and `OneIncompressibleSubBlockDoesNotPreventTheRestOfTheChunkFromCompressing`
+(one incompressible sub-block among seven highly compressible ones still stores the whole
+record compressed — passes either way, documents the intentional chunk-wide tradeoff).
+Confirmed the first test non-vacuous by reverting just the source fix (`git stash` on
+`Storage.vb` only, keeping the new tests) and re-running: 417 passed / 1 failed, with the
+failing assertion showing `CompressionMethod=Deflate` where `None` was expected; restored and
+re-verified 418/418 clean.
+
+---
+
 ## 2026-09-14
 
 ### A second, unrelated Thread.Abort corruption mechanism, plus a genuine self-deadlock in the state lock — both FIXED

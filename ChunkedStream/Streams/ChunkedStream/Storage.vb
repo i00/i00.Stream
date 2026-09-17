@@ -1070,12 +1070,18 @@ Namespace Streams
             If CompressionRatioThreshold < MinimumCompressionRatioThreshold Then CompressionRatioThreshold = MinimumCompressionRatioThreshold
             If CompressionRatioThreshold > MaximumCompressionRatioThreshold Then CompressionRatioThreshold = MaximumCompressionRatioThreshold
 
-            Dim Payload As Byte() = Plain
-            Dim PayloadLength = PlainLength
             Dim StoredCompressionMethod = ChunkedStreamOptions.CompressionMethods.None
             Dim CompressionEvaluatedMethod = ChunkedStreamOptions.CompressionMethods.None
             Dim CompressionEvaluatedPercent As Byte = 100
             Dim Flags = ChunkFlags.None
+
+            '
+            ' Whether to actually compress every sub-block below. Set once, before any
+            ' sub-block work happens, so the (at most) one CompressPayload call per
+            ' sub-block only ever runs when it might be kept - never as a separate
+            ' whole-chunk trial that gets thrown away afterwards.
+            '
+            Dim AttemptFullCompression = False
 
             If CompressionMethodToUse <> ChunkedStreamOptions.CompressionMethods.None AndAlso PlainLength > 0 Then
 
@@ -1084,8 +1090,6 @@ Namespace Streams
                     ForceCompression = False AndAlso
                     Options.CompressionEvaluation = ChunkedStreamOptions.CompressionEvaluationStates.Sampled AndAlso
                     PlainLength >= CompressionSampleMinimumChunkBytes
-
-                Dim SkipFullCompression = False
 
                 If SampledEvaluation Then
 
@@ -1096,33 +1100,19 @@ Namespace Streams
                     If SamplePercent / 100.0R > CompressionRatioThreshold Then
                         '
                         ' The sample failed the threshold, so the full chunk almost certainly
-                        ' would too. Skip the full compression, store the sample estimate and
-                        ' flag the chunk so ApplyOptions re-evaluates it exactly.
+                        ' would too. Skip compressing every sub-block, store the sample
+                        ' estimate and flag the chunk so ApplyOptions re-evaluates it exactly.
                         '
-                        SkipFullCompression = True
                         CompressionEvaluatedMethod = CompressionMethodToUse
                         CompressionEvaluatedPercent = SamplePercent
                         Flags = Flags Or ChunkFlags.CompressionEstimated
+                    Else
+                        AttemptFullCompression = True
                     End If
 
-                End If
+                Else
 
-                If SkipFullCompression = False Then
-
-                    Dim Compressed = CompressPayload(CompressionMethodToUse, Plain, PlainLength)
-
-                    CompressionEvaluatedMethod = CompressionMethodToUse
-                    CompressionEvaluatedPercent =
-                        GetCompressionEvaluatedPercent(PlainLength, Compressed.Length)
-
-                    If ForceCompression OrElse
-                       CompressionEvaluatedPercent / 100.0R <= CompressionRatioThreshold Then
-
-                        Payload = Compressed
-                        PayloadLength = Compressed.Length
-                        StoredCompressionMethod = CompressionMethodToUse
-
-                    End If
+                    AttemptFullCompression = True
 
                 End If
 
@@ -1136,12 +1126,8 @@ Namespace Streams
             End If
 
             '
-            ' StoredCompressionMethod is decided (above, via a sample or a one-shot trial
-            ' compression of the whole chunk) but the actual stored bytes are built per
-            ' sub-block below - compression is not slice-independent, so a sub-block must be
-            ' compressed on its own rather than by chopping up a whole-chunk compression
-            ' result. SubBlockCount comes from Ivs.Length (the caller drew one IV per sub-block
-            ' via ComputeSubBlockCount, serially, before this pure-CPU function was invoked -
+            ' SubBlockCount comes from Ivs.Length (the caller drew one IV per sub-block via
+            ' ComputeSubBlockCount, serially, before this pure-CPU function was invoked -
             ' possibly on a worker thread). EffectiveSubBlockSize (re-derived identically at
             ' read time from PlainLength and the stored SubBlockCount - see
             ' DecryptPhysicalRecord) is what actually splits the plaintext, so a later
@@ -1151,14 +1137,18 @@ Namespace Streams
             Dim SubBlockCount = Ivs.Length
             Dim EffectiveSubBlockSize = CInt((CLng(PlainLength) + SubBlockCount - 1) \ SubBlockCount)
 
-            Dim SubBlockStoredLengths(SubBlockCount - 1) As Integer
-            Dim SubBlockStoredBytes As Byte()() = New Byte(SubBlockCount - 1)() {}
+            Dim SubBlockPlainBytes As Byte()() = New Byte(SubBlockCount - 1)() {}
+            Dim SubBlockPlainLengths(SubBlockCount - 1) As Integer
+            Dim SubBlockCompressedBytes As Byte()() = If(AttemptFullCompression, New Byte(SubBlockCount - 1)() {}, Nothing)
+            Dim SubBlockCompressedLengths(SubBlockCount - 1) As Integer
 
             '
             ' Every sub-block's plaintext slice has a fixed, independently-derivable offset
             ' (SubBlockIndex * EffectiveSubBlockSize - the same derivation DecryptPhysicalRecord
-            ' uses), so compressing them is embarrassingly parallel: per
-            ' Options.MaxSubBlockCryptoParallelism, via RunSubBlockWork.
+            ' uses), so preparing them is embarrassingly parallel: per
+            ' Options.MaxSubBlockCryptoParallelism, via RunSubBlockWork. Compression happens
+            ' here at most once per sub-block, regardless of whether the result is kept -
+            ' that decision is made once, below, from the real total across every sub-block.
             '
             RunSubBlockWork(SubBlockCount, False, Nothing,
                 Sub(SubBlockIndex, LocalCipher)
@@ -1169,15 +1159,63 @@ Namespace Streams
                     Dim SubPlain = If(ThisPlainLength = 0, Array.Empty(Of Byte)(), New Byte(ThisPlainLength - 1) {})
                     If ThisPlainLength > 0 Then Buffer.BlockCopy(Plain, PlainOffset, SubPlain, 0, ThisPlainLength)
 
-                    Dim SubStored As Byte() = SubPlain
-                    If StoredCompressionMethod <> ChunkedStreamOptions.CompressionMethods.None AndAlso ThisPlainLength > 0 Then
-                        SubStored = CompressPayload(StoredCompressionMethod, SubPlain, ThisPlainLength)
+                    SubBlockPlainBytes(SubBlockIndex) = SubPlain
+                    SubBlockPlainLengths(SubBlockIndex) = ThisPlainLength
+
+                    If AttemptFullCompression Then
+
+                        Dim SubCompressed =
+                            If(ThisPlainLength > 0,
+                               CompressPayload(CompressionMethodToUse, SubPlain, ThisPlainLength),
+                               Array.Empty(Of Byte)())
+
+                        SubBlockCompressedBytes(SubBlockIndex) = SubCompressed
+                        SubBlockCompressedLengths(SubBlockIndex) = SubCompressed.Length
+
                     End If
 
-                    SubBlockStoredLengths(SubBlockIndex) = SubStored.Length
-                    SubBlockStoredBytes(SubBlockIndex) = SubStored
-
                 End Sub)
+
+            If AttemptFullCompression Then
+
+                Dim TotalCompressedLength = 0
+                For Each CompressedLength In SubBlockCompressedLengths
+                    TotalCompressedLength += CompressedLength
+                Next
+
+                '
+                ' One chunk-wide decision, from the real total across every sub-block - never
+                ' a per-sub-block choice. Either every sub-block below is stored via the
+                ' compressed bytes already computed above, or every one of them falls back to
+                ' plaintext; an individual sub-block that happened to compress poorly is not
+                ' independently re-evaluated or given its own fallback.
+                '
+                CompressionEvaluatedMethod = CompressionMethodToUse
+                CompressionEvaluatedPercent = GetCompressionEvaluatedPercent(PlainLength, TotalCompressedLength)
+
+                If ForceCompression OrElse
+                   CompressionEvaluatedPercent / 100.0R <= CompressionRatioThreshold Then
+
+                    StoredCompressionMethod = CompressionMethodToUse
+
+                End If
+
+            End If
+
+            Dim SubBlockStoredLengths(SubBlockCount - 1) As Integer
+            Dim SubBlockStoredBytes As Byte()() = New Byte(SubBlockCount - 1)() {}
+
+            For SubBlockIndex = 0 To SubBlockCount - 1
+
+                If StoredCompressionMethod <> ChunkedStreamOptions.CompressionMethods.None Then
+                    SubBlockStoredBytes(SubBlockIndex) = SubBlockCompressedBytes(SubBlockIndex)
+                    SubBlockStoredLengths(SubBlockIndex) = SubBlockCompressedLengths(SubBlockIndex)
+                Else
+                    SubBlockStoredBytes(SubBlockIndex) = SubBlockPlainBytes(SubBlockIndex)
+                    SubBlockStoredLengths(SubBlockIndex) = SubBlockPlainLengths(SubBlockIndex)
+                End If
+
+            Next
 
             Dim SubBlockLengthTableSize = SubBlockCount * 4
             Dim TotalPayloadLength = SubBlockLengthTableSize

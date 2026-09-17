@@ -186,20 +186,12 @@ bit-rot, which never reorders blocks). Cheap hardening: fold a 4-byte `SubBlockI
 each sub-block's `HMACSHA256.TransformBlock` before the sub-block bytes. **No test** for
 transposition yet.
 
-### SB-1 — per-sub-block compression: no fallback, wrong evaluated percent
-`PrepareChunkRecord` decides `StoredCompressionMethod` from a whole-chunk trial compression,
-then compresses each sub-block independently. An incompressible sub-block inside an
-otherwise-compressible chunk is stored **inflated** (the compressed result is used
-unconditionally — no per-sub-block "keep plaintext if smaller"). And
-`CompressionEvaluatedPercent` is recorded from the whole-chunk trial, not the sub-block total
-actually stored, so `ApplyOptions(Compression)`'s re-evaluation works off a slightly wrong
-number. (The independent-per-sub-block ratio hit itself is the intended random-read tradeoff.)
-
-### SB-2 — dead vars in `PrepareChunkRecord`
-`Payload` / `PayloadLength` and the whole-chunk `Compressed` trial are assigned but the stored
-bytes + header payload length are built entirely from the per-sub-block pass
-(`TotalPayloadLength`). The trial is still needed to *decide* `StoredCompressionMethod`; the
-leftover assignments just read as if the whole-chunk result is used. Trim.
+### SB-1 / SB-2 — per-sub-block compression evaluation — DONE (see DONE.md, 2026-09-17)
+`PrepareChunkRecord` no longer runs a separate whole-chunk trial compression that gets thrown
+away. Every sub-block is compressed at most once; the keep-or-discard decision is made once,
+from the real total across every sub-block, and applies to the whole record (no per-sub-block
+fallback — the independent-per-sub-block ratio hit is the intended random-read tradeoff, now
+correctly and only decided at the chunk level as originally intended).
 
 ### rw-lock — read path has no re-entrancy guard
 `AsyncReaderWriterLock` is writer-preference. `EnterReadLock` is a no-op only when the flow
