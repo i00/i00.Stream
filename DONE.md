@@ -4,6 +4,111 @@ Open items are in [TODO.md](TODO.md). Item ids match the audit artifact.
 
 ---
 
+## 2026-09-18 (2)
+
+### PartlyRecoveredFile: a visible marker for a file that survived data loss — ADDED
+
+Previously, `EmbeddedFileSystem.Mark` flagged *every* file whose range overlapped a
+`Validate()` problem as `CorruptFile`, whether the whole file was unreadable or just a
+fraction of it. Once `Repair(RepairScope.IncludeDataLoss)` zero-filled the bad range,
+`RecoverPendingFiles`'s default (`Finalize`) action silently reverted the entry straight back
+to plain `File` - so a file that had genuinely lost some data ended up looking completely
+ordinary again, with no trace anywhere - beyond that one scan's own returned results - that
+it had ever been touched.
+
+Added `EntryTypes.PartlyRecoveredFile`, a state distinct from `CorruptFile`: `Mark` now
+flags a file this way when SOME but not all of its data falls inside a problem range
+(`0 < LostBytes < DataLength`); a file with nothing left intact still becomes `CorruptFile`,
+unchanged from before. `Mark` never reassigns an already-`PartlyRecoveredFile` entry (re-marking
+just re-reports it) - it is `RecoverPendingFiles` that eventually clears it:
+`RecoverPendingFiles`'s default (`Finalize`) action promotes it to a plain `File`, same as
+`CorruptFile` (clearing the marker - the rename, if any, stays); `List` still lists it and
+`Remove` still deletes it outright, same as any other candidate.
+
+Added `Mark(Report, Optional RenamePartlyRecoveredFile As Boolean = False)`. When true, a
+file newly flagged `PartlyRecoveredFile` by that call (not one that already was) is renamed
+to carry the loss in its own name: `"name.ext"` → `"name.recovered.ext"`, or
+`"name.recovered2.ext"`, `"name.recovered3.ext"`, ... on a collision, skipping the rename
+(but keeping the flag) if every candidate up to the 256-character name limit is taken or too
+long. `CorruptEntryMark.RenamedTo` reports the outcome per entry (`Nothing` if not renamed).
+`Clone` now also refuses a `PartlyRecoveredFile` source, same as `CorruptFile`/`CorruptDirectory`,
+since its data may not be fully repaired yet at the point `Mark` runs.
+
+Wired into the sample's Extended Scan (`FileSystem.Mark(Report, RenamePartlyRecoveredFile:=True)`);
+the sample's own scan selector now offers the user a per-scan choice for each
+`PartlyRecoveredFile` candidate (leave it marked / accept the loss via Finalize / remove it)
+through a dropdown in the results dialog, and its `IsFile` check includes the new type so it
+is never misreported as "corrupt directories removed."
+
+Verified against a copy of the user's real Test.efs: `Combat_Text.xnb` (3 problems, 391 KB
+genuinely lost out of a much larger file) is flagged `PartlyRecoveredFile` and renamed to
+`Combat_Text.recovered.xnb` by `Mark`, survives `Repair`, and is finalised back to a plain
+`File` - still named `Combat_Text.recovered.xnb` - by the scan's own default
+`RecoverPendingFiles()` pass, ending in a clean `Validate()`.
+
+Updated `CloneRejectsACorruptFile` and `CorruptFileDataIsMarkedRepairedAndRecovered`
+(both previously corrupted only one chunk of a multi-chunk file - now genuinely
+`PartlyRecoveredFile` territory - by corrupting *every* chunk instead, so they keep testing
+the `CorruptFile`/total-loss path they were named for) and added
+`CloneRejectsAPartlyRecoveredFile` and
+`PartlyRecoveredFilesAreMarkedOptionallyRenamedAndActedOnByRecoverPendingFiles` for the new
+path - the rename-collision numbering (applied independently per file, not just on
+collision), the no-double-rename guarantee, and `RecoverPendingFiles` List/Finalize/Remove
+all behaving as described above. 453/453 passing.
+
+---
+
+## 2026-09-18
+
+### Mark() could itself throw over a DIFFERENT, already-known dangling extent sharing a page — FIXED
+
+User ran a full ("Extended") scan against their real Test.efs and got `The scan could not
+finish. InvalidDataException: Extent at logical offset 250166713 references physical record
+8292, which is not in the record table.` Reproduced directly against a copy of the real file
+with a small standalone repro harness. Full stack trace pinned it exactly:
+`EmbeddedFileSystem.Mark` → `DeferPublishScope.Publish` → `PersistPagedMetadataAsync` →
+`AssertPhysicalRecordIndexConsistent`.
+
+Root cause: the 2026-09-17 fix (`43dfcfe`) added a check to
+`AssertPhysicalRecordIndexConsistent` that refuses to publish while a page in
+`_DirtyExtentPages` holds an extent referencing a physical record that no longer exists,
+scoped so a tolerant-open salvage's own already-known, not-yet-repaired damage doesn't
+re-trip it on every later, unrelated publish. That scoping is *per page*, not per extent -
+`EmbeddedFileSystem.Mark` retyping one corrupt file writes into the parent directory's own
+content list, which can share a metadata page with a *different*, already-known,
+not-yet-repaired dangling extent (from another problem the same `Validate()` pass already
+found, which `Mark` was never trying to fix on this call). Dirtying that shared page for the
+retype made the check inspect every extent on it, including the untouched, already-known-bad
+one - refusing a publish that was itself completely legitimate, before
+`Report.Repair(RepairScope.IncludeDataLoss)` ever got a chance to actually fix that other
+damage.
+
+Fixed with a new `ChunkedStream.RunAllowingDanglingExtentReferences(Body As Action)` (Friend) -
+a generalisation of the ad-hoc opt-out `PersistSalvagedPhysicalRecordTable` already used for
+its own persist call, now usable by any recovery-oriented publish that necessarily runs
+against a file already known, from a just-completed `Validate()`, to have damage this
+particular call is not itself trying to fix. `EmbeddedFileSystem.Mark` now wraps its
+`Scope.Publish()` in it. Verified end to end against a copy of the user's real, corrupted
+Test.efs: the *whole* Extended Scan sequence (Validate → Mark → Repair(IncludeDataLoss) →
+Validate → RecoverPendingFiles → Validate) now completes cleanly - 3 problems repaired, 391 KB
+zeroed, 1 pending file recovered, final Validate clean.
+
+Also generalised `Debug_CorruptFirstExtentToReferenceAMissingPhysicalRecord` into
+`Debug_CorruptExtentToReferenceAMissingPhysicalRecord(ExtentIndex)` (the original kept as a
+thin wrapper for extent 0) and added
+`RunAllowingDanglingExtentReferencesLetsAPublishThroughKnownDamage` (Recovery.vb) - a direct,
+deterministic test of the new opt-out mechanism itself (confirmed non-vacuous: temporarily
+neutering the flag inside `RunAllowingDanglingExtentReferences` makes the test fail with
+exactly the reproduced exception). A synthetic EmbeddedFileSystem-level reproduction (build a
+small tree, corrupt one extent, corrupt another on the same page, call `Mark`) was attempted
+first but abandoned - the actual on-disk extent layout `EmbeddedFileSystem.Mark`'s retype
+touches turned out to be an internal implementation detail dense enough (and insensitive to
+file count or naming, in every configuration tried) that engineering a reliable page
+collision synthetically wasn't a good use of further time; the real-file reproduction above
+is the actual proof this works end to end. 451/451 passing.
+
+---
+
 ## 2026-09-17
 
 ### SB-1 / SB-2 — sub-block compression evaluated as a whole chunk, compressed at most once — FIXED

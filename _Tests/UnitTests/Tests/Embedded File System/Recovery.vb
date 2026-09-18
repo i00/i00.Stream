@@ -212,22 +212,28 @@ Namespace Tests
                             Basics.WriteWholeFile(Efs, GoodId, GoodData)
                             Basics.WriteWholeFile(Efs, BadId, BadData)
 
-                            ' Corrupt the MAC of a physical record inside bad.bin's data range.
+                            ' Corrupt the MAC of every physical record in bad.bin's data range, so NONE
+                            ' of it survives - Mark flags this CorruptFile, not PartlyRecoveredFile (see
+                            ' PartlyRecoveredFilesAreMarkedOptionallyRenamedAndActedOnByRecoverPendingFiles
+                            ' for that case, further below).
                             Dim BadAnchor = Cs.GetAnchor(BadId)
-                            Dim Target =
+                            Dim Targets =
                                 Cs.GetStructure().Chunks.
-                                   First(Function(chunk) chunk.PhysicalOffset.HasValue AndAlso
+                                   Where(Function(chunk) chunk.PhysicalOffset.HasValue AndAlso
                                                          chunk.LogicalOffset >= BadAnchor.Offset + 16 AndAlso
-                                                         chunk.LogicalOffset < BadAnchor.Offset + 16 + BadData.Length)
+                                                         chunk.LogicalOffset < BadAnchor.Offset + 16 + BadData.Length).
+                                   ToList()
 
-                            Dim MacOffset = Target.PhysicalOffset.Value + Target.PhysicalLength.Value - ChunkedStream.MacSize
-                            Ms.Position = MacOffset
-                            Dim OriginalByte = Ms.ReadByte()
-                            Ms.Position = MacOffset
-                            Ms.WriteByte(CByte(OriginalByte Xor &HFF))
+                            For Each Target In Targets
+                                Dim MacOffset = Target.PhysicalOffset.Value + Target.PhysicalLength.Value - ChunkedStream.MacSize
+                                Ms.Position = MacOffset
+                                Dim OriginalByte = Ms.ReadByte()
+                                Ms.Position = MacOffset
+                                Ms.WriteByte(CByte(OriginalByte Xor &HFF))
+                            Next
 
                             Dim Report = Cs.Validate()
-                            AssertTrue(Report.HasErrors, "The corrupted chunk should make validation fail.")
+                            AssertTrue(Report.HasErrors, "The corrupted chunks should make validation fail.")
 
                             Dim Marks = Efs.Mark(Report)
                             AssertEqual(1, Marks.Count, "Exactly one file should be marked.")
@@ -277,6 +283,153 @@ Namespace Tests
                         End Using
 
                         Cs.Validate().ThrowIfErrors()
+                    End Using
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' A file with SOME (not all) unreadable data is flagged <see cref="EmbeddedFileSystem.EntryTypes.PartlyRecoveredFile" />
+            ''' rather than <see cref="EmbeddedFileSystem.EntryTypes.CorruptFile" />, and - with
+            ''' <c>RenamePartlyRecoveredFile:=True</c> - is renamed to make the partial loss visible
+            ''' in its own name, with collision-avoiding numbered suffixes. A second
+            ''' <see cref="EmbeddedFileSystem.Mark" /> call against an already-<see cref="EmbeddedFileSystem.EntryTypes.PartlyRecoveredFile" />
+            ''' file re-reports it but does not rename it again.
+            ''' <see cref="EmbeddedFileSystem.RecoverPendingFiles" /> acts on it like any other
+            ''' candidate: <see cref="EmbeddedFileSystem.PendingFileRecoveryActions.List" /> sees it,
+            ''' the default (Finalize) promotes it to a plain
+            ''' <see cref="EmbeddedFileSystem.EntryTypes.File" /> (clearing the marker, same as
+            ''' <see cref="EmbeddedFileSystem.EntryTypes.CorruptFile" />), and
+            ''' <see cref="EmbeddedFileSystem.PendingFileRecoveryActions.Remove" /> deletes it outright.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub PartlyRecoveredFilesAreMarkedOptionallyRenamedAndActedOnByRecoverPendingFiles()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+                        Using Efs As New EmbeddedFileSystem(Cs)
+
+                            Dim ChunkSize = Cs.Options.ChunkSize
+
+                            Dim BadId = Efs.CreateFile(Efs.RootAnchorId, "bad.bin", CreateAsPending:=False)
+                            Dim BadData = GenerateRandomData(ChunkSize * 3, 6201)
+                            Basics.WriteWholeFile(Efs, BadId, BadData)
+
+                            ' A second, independent partly-recovered file so Finalize (which clears
+                            ' the marker) and Remove (which deletes the entry) can each be tested
+                            ' without one action pre-empting the other's target.
+                            Dim Bad2Id = Efs.CreateFile(Efs.RootAnchorId, "bad2.bin", CreateAsPending:=False)
+                            Dim Bad2Data = GenerateRandomData(ChunkSize * 3, 6202)
+                            Basics.WriteWholeFile(Efs, Bad2Id, Bad2Data)
+
+                            ' Pre-create the first two rename candidates so the third one has to be used.
+                            Efs.CreateFile(Efs.RootAnchorId, "bad.recovered.bin", CreateAsPending:=False)
+                            Efs.CreateFile(Efs.RootAnchorId, "bad.recovered2.bin", CreateAsPending:=False)
+
+                            ' Corrupt only ONE chunk each - the other two survive in both files.
+                            Dim BadAnchor = Cs.GetAnchor(BadId)
+                            Dim Bad2Anchor = Cs.GetAnchor(Bad2Id)
+                            Dim Targets =
+                                {Cs.GetStructure().Chunks.
+                                    First(Function(chunk) chunk.PhysicalOffset.HasValue AndAlso
+                                                          chunk.LogicalOffset >= BadAnchor.Offset + 16 AndAlso
+                                                          chunk.LogicalOffset < BadAnchor.Offset + 16 + BadData.Length),
+                                 Cs.GetStructure().Chunks.
+                                    First(Function(chunk) chunk.PhysicalOffset.HasValue AndAlso
+                                                          chunk.LogicalOffset >= Bad2Anchor.Offset + 16 AndAlso
+                                                          chunk.LogicalOffset < Bad2Anchor.Offset + 16 + Bad2Data.Length)}
+
+                            For Each Target In Targets
+                                Dim MacOffset = Target.PhysicalOffset.Value + Target.PhysicalLength.Value - ChunkedStream.MacSize
+                                Ms.Position = MacOffset
+                                Dim OriginalByte = Ms.ReadByte()
+                                Ms.Position = MacOffset
+                                Ms.WriteByte(CByte(OriginalByte Xor &HFF))
+                            Next
+
+                            Dim Report = Cs.Validate()
+                            AssertTrue(Report.HasErrors, "The corrupted chunks should make validation fail.")
+
+                            Dim Marks = Efs.Mark(Report, RenamePartlyRecoveredFile:=True)
+                            AssertEqual(2, Marks.Count, "Both files should be marked.")
+
+                            Dim BadMark = Marks.Single(Function(m) m.Path = "\bad.bin")
+                            AssertTrue(BadMark.LostBytes > 0, "The mark should record lost bytes.")
+                            AssertEqual("\bad.recovered3.bin", BadMark.RenamedTo,
+                                        "The first two candidate names are taken, so the third should have been used.")
+
+                            ' RenamePartlyRecoveredFile applies to every newly-flagged file, not just
+                            ' ones with a name collision - bad2.bin has no competing "bad2.recovered.bin"
+                            ' yet, so it gets that name outright.
+                            Dim Bad2Mark = Marks.Single(Function(m) m.Path = "\bad2.bin")
+                            AssertEqual("\bad2.recovered.bin", Bad2Mark.RenamedTo,
+                                        "bad2.bin has no name collision, so the plain '.recovered' name should have been used.")
+
+                            AssertEqual(EmbeddedFileSystem.EntryTypes.PartlyRecoveredFile,
+                                        Efs.FindEntry(Efs.RootAnchorId, "bad.recovered3.bin").EntryType,
+                                        "bad.bin should now be flagged PartlyRecoveredFile under its new name.")
+
+                            AssertThrows(Of FileNotFoundException)(
+                                Sub() Efs.FindEntry(Efs.RootAnchorId, "bad.bin"),
+                                "The old name should no longer exist.")
+
+                            AssertEqual(EmbeddedFileSystem.EntryTypes.PartlyRecoveredFile,
+                                        Efs.FindEntry(Efs.RootAnchorId, "bad2.recovered.bin").EntryType,
+                                        "bad2.bin should now be flagged PartlyRecoveredFile under its new name.")
+
+                            AssertThrows(Of FileNotFoundException)(
+                                Sub() Efs.FindEntry(Efs.RootAnchorId, "bad2.bin"),
+                                "The old name should no longer exist.")
+
+                            ' A second Mark() call against the still-unrepaired files re-reports them,
+                            ' but must not rename either again - both are already PartlyRecoveredFile.
+                            Dim SecondMarks = Efs.Mark(Report, RenamePartlyRecoveredFile:=True)
+                            AssertEqual(2, SecondMarks.Count, "The still-unrepaired files should be re-reported.")
+                            AssertTrue(SecondMarks.All(Function(m) m.RenamedTo Is Nothing),
+                                       "An already-PartlyRecoveredFile entry must not be renamed again.")
+
+                            Dim Outcome = Report.Repair(ChunkedStream.RepairScope.IncludeDataLoss)
+                            AssertTrue(Outcome.BytesZeroed > 0, "The repair should have zeroed the unreadable ranges.")
+
+                            ' List sees both as candidates without changing anything.
+                            Dim Listed = Efs.RecoverPendingFiles(EmbeddedFileSystem.PendingFileRecoveryActions.List)
+                            AssertEqual(2, Listed.Count, "Both PartlyRecoveredFile entries should be offered as candidates.")
+                            AssertTrue(Listed.All(Function(r) r.PreviousState = EmbeddedFileSystem.EntryTypes.PartlyRecoveredFile),
+                                       "Both listed candidates' previous state should be PartlyRecoveredFile.")
+
+                            ' Finalize promotes bad.recovered3.bin to a plain File, clearing the marker
+                            ' (the rename itself is untouched - Finalize only ever changes the type).
+                            ' bad2.recovered.bin is left for the Remove step below, so give a selector
+                            ' that only finalises the renamed bad.bin.
+                            Dim Finalized = Efs.RecoverPendingFiles(
+                                Function(c) If(c.Path = "\bad.recovered3.bin",
+                                              EmbeddedFileSystem.PendingFileRecoveryActions.Finalize,
+                                              EmbeddedFileSystem.PendingFileRecoveryActions.None))
+                            AssertEqual(1, Finalized.Count, "Only bad.recovered3.bin should have been finalised.")
+                            AssertEqual(EmbeddedFileSystem.EntryTypes.File,
+                                        Efs.FindEntry(Efs.RootAnchorId, "bad.recovered3.bin").EntryType,
+                                        "Finalize should have promoted it to a plain File.")
+
+                            ' A repeat Finalize pass finds nothing left for that file - it is an
+                            ' ordinary File now, not a candidate at all.
+                            Dim SecondFinalize = Efs.RecoverPendingFiles(
+                                Function(c) If(c.Path = "\bad.recovered3.bin",
+                                              EmbeddedFileSystem.PendingFileRecoveryActions.Finalize,
+                                              EmbeddedFileSystem.PendingFileRecoveryActions.None))
+                            AssertEqual(0, SecondFinalize.Count, "The now-plain File should no longer be a candidate.")
+
+                            ' Remove still deletes bad2.recovered.bin outright, like any other candidate.
+                            Dim RemovedResult = Efs.RecoverPendingFiles(EmbeddedFileSystem.PendingFileRecoveryActions.Remove)
+                            AssertEqual(1, RemovedResult.Count, "Remove should act on the remaining PartlyRecoveredFile.")
+                            AssertEqual(EmbeddedFileSystem.PendingFileRecoveryActions.Remove, RemovedResult(0).Action,
+                                        "bad2.recovered.bin should have been removed.")
+                            AssertThrows(Of FileNotFoundException)(
+                                Sub() Efs.FindEntry(Efs.RootAnchorId, "bad2.recovered.bin"),
+                                "Remove should have deleted bad2.recovered.bin.")
+
+                            Cs.Validate().ThrowIfErrors()
+
+                        End Using
                     End Using
                 End Using
 

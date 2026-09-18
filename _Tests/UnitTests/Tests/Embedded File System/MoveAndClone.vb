@@ -376,8 +376,64 @@ Namespace Tests
                             Dim BadData = GenerateRandomData(ChunkSize * 3, 8601)
                             Basics.WriteWholeFile(Efs, BadId, BadData)
 
-                            ' Corrupt the MAC of a physical record inside bad.bin's data range (mirrors
-                            ' EmbeddedFileSystemRecovery.CorruptFileDataIsMarkedRepairedAndRecovered).
+                            ' Corrupt the MAC of every physical record in bad.bin's data range, so
+                            ' NONE of its data survives (Mark flags this CorruptFile, not
+                            ' PartlyRecoveredFile - see CloneRejectsAPartlyRecoveredFile below for that).
+                            Dim BadAnchor = Cs.GetAnchor(BadId)
+                            Dim Targets =
+                                Cs.GetStructure().Chunks.
+                                   Where(Function(chunk) chunk.PhysicalOffset.HasValue AndAlso
+                                                         chunk.LogicalOffset >= BadAnchor.Offset + 16 AndAlso
+                                                         chunk.LogicalOffset < BadAnchor.Offset + 16 + BadData.Length).
+                                   ToList()
+
+                            For Each Target In Targets
+                                Dim MacOffset = Target.PhysicalOffset.Value + Target.PhysicalLength.Value - ChunkedStream.MacSize
+                                Ms.Position = MacOffset
+                                Dim OriginalByte = Ms.ReadByte()
+                                Ms.Position = MacOffset
+                                Ms.WriteByte(CByte(OriginalByte Xor &HFF))
+                            Next
+
+                            Dim Report = Cs.Validate()
+                            AssertTrue(Report.HasErrors, "The corrupted chunks should make validation fail.")
+                            Efs.Mark(Report)
+
+                            AssertEqual(EmbeddedFileSystem.EntryTypes.CorruptFile, Efs.FindEntry(Efs.RootAnchorId, "bad.bin").EntryType,
+                                        "bad.bin should be flagged CorruptFile.")
+
+                            AssertThrows(Of InvalidOperationException)(
+                                Sub() Efs.Clone(BadId, Efs.RootAnchorId, "copy.bin"),
+                                "Cloning a file flagged CorruptFile should be refused.")
+
+                            AssertThrows(Of FileNotFoundException)(
+                                Sub() Efs.FindEntry(Efs.RootAnchorId, "copy.bin"),
+                                "The refused clone should not have created anything.")
+
+                        End Using
+                    End Using
+                End Using
+
+            End Sub
+
+            ''' <summary>
+            ''' As <see cref="CloneRejectsACorruptFile" />, but only ONE of bad.bin's physical
+            ''' records is corrupted - some of its data survives, so <see cref="EmbeddedFileSystem.Mark" />
+            ''' flags it <see cref="EmbeddedFileSystem.EntryTypes.PartlyRecoveredFile" /> rather than
+            ''' <see cref="EmbeddedFileSystem.EntryTypes.CorruptFile" /> - and Clone must still refuse it.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub CloneRejectsAPartlyRecoveredFile()
+
+                Using Ms As New MemoryStream()
+                    Using Cs = ChunkedStream.Open(Ms)
+                        Using Efs As New EmbeddedFileSystem(Cs)
+
+                            Dim ChunkSize = Cs.Options.ChunkSize
+                            Dim BadId = Efs.CreateFile(Efs.RootAnchorId, "bad.bin", CreateAsPending:=False)
+                            Dim BadData = GenerateRandomData(ChunkSize * 3, 8602)
+                            Basics.WriteWholeFile(Efs, BadId, BadData)
+
                             Dim BadAnchor = Cs.GetAnchor(BadId)
                             Dim Target =
                                 Cs.GetStructure().Chunks.
@@ -395,12 +451,12 @@ Namespace Tests
                             AssertTrue(Report.HasErrors, "The corrupted chunk should make validation fail.")
                             Efs.Mark(Report)
 
-                            AssertEqual(EmbeddedFileSystem.EntryTypes.CorruptFile, Efs.FindEntry(Efs.RootAnchorId, "bad.bin").EntryType,
-                                        "bad.bin should be flagged CorruptFile.")
+                            AssertEqual(EmbeddedFileSystem.EntryTypes.PartlyRecoveredFile, Efs.FindEntry(Efs.RootAnchorId, "bad.bin").EntryType,
+                                        "bad.bin should be flagged PartlyRecoveredFile.")
 
                             AssertThrows(Of InvalidOperationException)(
                                 Sub() Efs.Clone(BadId, Efs.RootAnchorId, "copy.bin"),
-                                "Cloning a file flagged CorruptFile should be refused.")
+                                "Cloning a file flagged PartlyRecoveredFile should be refused.")
 
                             AssertThrows(Of FileNotFoundException)(
                                 Sub() Efs.FindEntry(Efs.RootAnchorId, "copy.bin"),

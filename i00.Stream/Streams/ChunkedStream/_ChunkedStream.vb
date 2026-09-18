@@ -1536,14 +1536,43 @@ Namespace Streams
 
         '
         ' Scoped, ambient opt-out for AssertPhysicalRecordIndexConsistent's extent-reference
-        ' check, set only around PersistSalvagedPhysicalRecordTable's persist call. Tolerant
-        ' open's in-memory salvage deliberately leaves extents pointing at physical records
-        ' the corruption genuinely lost - that state must still reach disk (so a later open
-        ' does not repeat the same tolerant retry) and is meant to be found by an explicit
-        ' Validate().Repair(RepairScope.IncludeDataLoss) afterwards, not treated as a fresh
-        ' fault at publish time. Every other publish path leaves this False.
+        ' check. Tolerant open's in-memory salvage deliberately leaves extents pointing at
+        ' physical records the corruption genuinely lost - that state must still reach disk
+        ' (so a later open does not repeat the same tolerant retry) and is meant to be found
+        ' by an explicit Validate().Repair(RepairScope.IncludeDataLoss) afterwards, not
+        ' treated as a fresh fault at publish time.
+        '
+        ' Set by PersistSalvagedPhysicalRecordTable directly (see below), and by
+        ' RunAllowingDanglingExtentReferences for any other caller. The latter exists because
+        ' the check is scoped to _DirtyExtentPages (a whole page, not the specific extent a
+        ' publish is actually about), so a recovery operation that legitimately touches only
+        ' SOME of a file's known damage - EmbeddedFileSystem.Mark flagging one corrupt entry
+        ' while others reported by the same Validate() pass share a metadata page and are not
+        ' yet repaired - would otherwise trip this on damage it was never trying to fix in the
+        ' first place. An ordinary publish (not made through either of these) leaves this
+        ' False and still catches a genuinely NEW dangling reference immediately.
         '
         Private _AllowDanglingExtentReferencesOnNextPersist As Boolean
+
+        ''' <summary>
+        ''' Runs <paramref name="Body"/> with AssertPhysicalRecordIndexConsistent's
+        ''' dangling-extent-reference check suspended for exactly the publishes it performs -
+        ''' for a recovery operation (such as <see cref="EmbeddedFileSystem.Mark"/>) that
+        ''' necessarily runs against a file already known, from a just-completed
+        ''' <see cref="Validate"/> pass, to have extents referencing records that were lost -
+        ''' damage this particular operation is not itself trying to fix and must not be
+        ''' blocked by. Restores the previous value afterwards regardless of outcome, so a
+        ''' nested call (or a caller that was itself already inside one) is safe.
+        ''' </summary>
+        Friend Sub RunAllowingDanglingExtentReferences(Body As Action)
+            Dim Previous = _AllowDanglingExtentReferencesOnNextPersist
+            _AllowDanglingExtentReferencesOnNextPersist = True
+            Try
+                Body()
+            Finally
+                _AllowDanglingExtentReferencesOnNextPersist = Previous
+            End Try
+        End Sub
 
         Private _PhysicalDataEnd As Long = DataStartOffset
         '

@@ -1372,6 +1372,81 @@ Namespace Tests
             End Sub
 
             ''' <summary>
+            ''' The opt-out <c>RunAllowingDanglingExtentReferences</c> uses -
+            ''' <see cref="EmbeddedFileSystem.Mark" /> is the current caller, so its own retype
+            ''' of one corrupt entry does not itself throw over a DIFFERENT, already-known,
+            ''' not-yet-repaired dangling extent that happens to share a metadata page with the
+            ''' entry being retyped (reproduced directly against a real, corrupted archive: "The
+            ''' scan could not finish. InvalidDataException: Extent at logical offset ...
+            ''' references physical record ..., which is not in the record table." from inside
+            ''' Mark). Exercised here directly at the ChunkedStream level rather than through a
+            ''' constructed EmbeddedFileSystem tree: the EFS directory-record layout makes the
+            ''' exact page a real retype touches an internal implementation detail this test
+            ''' should not need to know, and engineering a synthetic tree that reliably lands
+            ''' another extent on that same page proved too fragile to be a useful regression
+            ''' test in its own right - the previous, real-file reproduction is the actual proof
+            ''' the fix works end to end; this proves the underlying opt-out mechanism itself
+            ''' behaves correctly in isolation.
+            ''' </summary>
+            <UnitTester.SimpleTest()>
+            Public Shared Sub RunAllowingDanglingExtentReferencesLetsAPublishThroughKnownDamage()
+
+                Using Ms As New MemoryStream()
+
+                    Dim Options As New ChunkedStream.ChunkedStreamOptions With {
+                        .ChunkSize = 256,
+                        .IndexPageEntryCount = 4,
+                        .IndexDirectoryEntryCount = 4
+                    }
+
+                    Dim Expected = GenerateRandomData(Options.ChunkSize * 6, 51601)
+
+                    Using Cs = ChunkedStream.Open(Ms, Options)
+
+                        Cs.Write(0, Expected)
+                        Cs.Flush()
+                        Cs.Validate().ThrowIfErrors()
+
+                        ' Baseline this test contrasts against: an ordinary publish still
+                        ' refuses a dangling extent reference and faults the stream, exactly as
+                        ' ExtentReferencingAMissingPhysicalRecordIsRefusedByThePublishAndTheFileStaysOpenable
+                        ' above covers in detail.
+                        Cs.Debug_CorruptFirstExtentToReferenceAMissingPhysicalRecord()
+
+                        AssertThrows(Of InvalidDataException)(
+                            Sub() Cs.Write(Cs.Length, New Byte(0) {}),
+                            "An ordinary publish should still refuse the dangling extent reference.")
+
+                        ' The refusal faulted the stream (nothing was persisted, so this just
+                        ' reloads the same last-good generation cleanly - see AutoRecoverOnFault).
+                        Cs.Recover()
+                        Cs.Validate().ThrowIfErrors()
+
+                        ' Re-corrupt the same way, but this time route the equivalent publish
+                        ' through the opt-out.
+                        Cs.Debug_CorruptFirstExtentToReferenceAMissingPhysicalRecord()
+
+                        Cs.RunAllowingDanglingExtentReferences(
+                            Sub() Cs.Write(Cs.Length, New Byte(0) {}))
+
+                    End Using
+
+                    Using Reopened = ChunkedStream.Open(Ms, Options)
+
+                        ' The opt-out publish persisted the dangling reference on purpose - it
+                        ' must still surface as MissingPhysicalRecord for an explicit data-loss
+                        ' repair, exactly like a tolerant-open salvage's own known damage does.
+                        Dim Report = Reopened.Validate()
+                        AssertTrue(Report.Problems.Any(Function(p) p.Kind = ChunkedStream.ValidationProblemKind.MissingPhysicalRecord),
+                                   "The persisted dangling reference should surface as MissingPhysicalRecord.")
+
+                    End Using
+
+                End Using
+
+            End Sub
+
+            ''' <summary>
             ''' A file whose only header generation already carries a torn physical-record
             ''' index - one record on two pages, another gone - still opens: Open retries
             ''' tolerating the inconsistency, keeps the first copy of the duplicate, reports

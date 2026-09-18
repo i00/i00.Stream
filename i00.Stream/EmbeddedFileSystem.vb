@@ -41,6 +41,19 @@ Namespace Streams
             ''' <see cref="RecoverPendingFiles" />.
             ''' </summary>
             CorruptDirectory = 5
+            ''' <summary>
+            ''' A file <see cref="Mark" /> flagged as backed by data a chunked-stream validation
+            ''' could not read SOME, but not all, of - as opposed to <see cref="CorruptFile" />,
+            ''' where none of it could be trusted. <see cref="Mark" /> never reassigns an entry
+            ''' away from this type once set (re-marking an already-<see cref="PartlyRecoveredFile" />
+            ''' entry just re-reports it), so it - and, if <see cref="Mark" />'s
+            ''' <c>RenamePartlyRecoveredFile</c> was used, the renamed name that goes with it -
+            ''' survives until something explicitly acts on it. <see cref="RecoverPendingFiles" />'s
+            ''' default (Finalize) action promotes it to a plain <see cref="File" />, same as
+            ''' <see cref="CorruptFile" />; pass <see cref="PendingFileRecoveryActions.Remove" /> to
+            ''' delete it outright instead.
+            ''' </summary>
+            PartlyRecoveredFile = 6
         End Enum
 
         ''' <summary>What <see cref="RecoverPendingFiles" /> does with a pending, corrupt or unreferenced entry.</summary>
@@ -172,13 +185,15 @@ Namespace Streams
 
         ''' <summary>Describes one entry marked by <see cref="Mark" />.</summary>
         Public NotInheritable Class CorruptEntryMark
-            Friend Sub New(Path As String, AnchorId As Long, LostBytes As Long, IsDirectory As Boolean)
+            Friend Sub New(Path As String, AnchorId As Long, LostBytes As Long, IsDirectory As Boolean,
+                          Optional RenamedTo As String = Nothing)
                 Me.Path = Path
                 Me.AnchorId = AnchorId
                 Me.LostBytes = LostBytes
                 Me.IsDirectory = IsDirectory
+                Me.RenamedTo = RenamedTo
             End Sub
-            ''' <summary>Full path of the marked entry.</summary>
+            ''' <summary>Full path of the marked entry as it was when <see cref="Mark" /> found it.</summary>
             Public ReadOnly Property Path As String
             ''' <summary>The marked entry's stable anchor id.</summary>
             Public ReadOnly Property AnchorId As Long
@@ -190,9 +205,17 @@ Namespace Streams
             ''' <summary>
             ''' <see langword="True" /> for a directory flagged <see cref="EntryTypes.CorruptDirectory" />
             ''' (its children could not be enumerated); <see langword="False" /> for a file flagged
-            ''' <see cref="EntryTypes.CorruptFile" />.
+            ''' <see cref="EntryTypes.CorruptFile" /> or <see cref="EntryTypes.PartlyRecoveredFile" />.
             ''' </summary>
             Public ReadOnly Property IsDirectory As Boolean
+            ''' <summary>
+            ''' The full path this entry was renamed to, when it was newly flagged
+            ''' <see cref="EntryTypes.PartlyRecoveredFile" /> and <c>RenamePartlyRecoveredFile</c> was
+            ''' <see langword="True" />; <see langword="Nothing" /> otherwise (including when the
+            ''' entry was already <see cref="EntryTypes.PartlyRecoveredFile" /> before this call, or the
+            ''' new name would have exceeded the 256-character limit).
+            ''' </summary>
+            Public ReadOnly Property RenamedTo As String
         End Class
 
         ''' <summary>Describes one child entry stored in a directory.</summary>
@@ -450,9 +473,10 @@ Namespace Streams
         ''' regardless of size; a later write to either copy allocates its own storage the normal way. The
         ''' clone is always a plain <see cref="EntryTypes.File" /> or <see cref="EntryTypes.Directory" /> -
         ''' a <see cref="EntryTypes.PendingFile" /> source clones whatever has been durably published so
-        ''' far. Cloning a <see cref="EntryTypes.CorruptFile" /> or <see cref="EntryTypes.CorruptDirectory" />
-        ''' entry - anywhere in the subtree, for a directory - is refused, since the copy would silently
-        ''' carry the same damage forward as if it were ordinary data.
+        ''' far. Cloning a <see cref="EntryTypes.CorruptFile" />, <see cref="EntryTypes.CorruptDirectory" />
+        ''' or <see cref="EntryTypes.PartlyRecoveredFile" /> entry - anywhere in the subtree, for a directory -
+        ''' is refused, since the copy would silently carry the same damage forward as if it were ordinary
+        ''' data.
         ''' </summary>
         ''' <returns>The anchor id of the new top-level clone.</returns>
         Public Function Clone(AnchorId As Long, DestinationParentDirectoryAnchorId As Long, Optional NewName As String = Nothing) As Long
@@ -485,7 +509,8 @@ Namespace Streams
         ''' </summary>
         Private Function CloneEntry(SourceAnchor As ChunkedStream.Anchor, SourceEntryType As EntryTypes, SourceLength As Long,
                                     NewParent As ChunkedStream.Anchor, Name As String) As Long
-            If SourceEntryType = EntryTypes.CorruptFile OrElse SourceEntryType = EntryTypes.CorruptDirectory Then
+            If SourceEntryType = EntryTypes.CorruptFile OrElse SourceEntryType = EntryTypes.CorruptDirectory OrElse
+               SourceEntryType = EntryTypes.PartlyRecoveredFile Then
                 Throw New InvalidOperationException($"'{Name}' is flagged {SourceEntryType} and cannot be cloned.")
             End If
 
@@ -529,7 +554,9 @@ Namespace Streams
         ''' directory whose own content list is unreadable - is only acted on by
         ''' <see cref="PendingFileRecoveryActions.Remove" /> or
         ''' <see cref="PendingFileRecoveryActions.List" />, so the default
-        ''' <see cref="PendingFileRecoveryActions.Finalize" /> leaves it untouched.
+        ''' <see cref="PendingFileRecoveryActions.Finalize" /> leaves it untouched; a
+        ''' <see cref="EntryTypes.PartlyRecoveredFile" /> entry is finalised into a plain
+        ''' <see cref="EntryTypes.File" /> instead, same as <see cref="EntryTypes.CorruptFile" />.
         ''' </summary>
         ''' <remarks>This maintenance operation traverses the directory tree and scans every anchor.</remarks>
         Public Function RecoverPendingFiles(Optional Action As PendingFileRecoveryActions = PendingFileRecoveryActions.Finalize) As IReadOnlyList(Of PendingFileRecoveryResult)
@@ -553,7 +580,10 @@ Namespace Streams
         ''' <see cref="PendingFileRecoveryActions.Finalize" />d (re-homed under <c>\_Recovered</c>,
         ''' its readable subtree following with real names). A
         ''' <see cref="EntryTypes.CorruptDirectory" /> entry cannot be finalised, so
-        ''' <see cref="PendingFileRecoveryActions.Finalize" /> is a skip for one.
+        ''' <see cref="PendingFileRecoveryActions.Finalize" /> is a skip for one; a
+        ''' <see cref="EntryTypes.PartlyRecoveredFile" /> entry, unlike a
+        ''' <see cref="EntryTypes.CorruptDirectory" /> one, IS finalised - into a plain
+        ''' <see cref="EntryTypes.File" />, clearing the marker.
         ''' </remarks>
         Public Function RecoverPendingFiles(Selector As Func(Of PendingFileRecoveryCandidate, PendingFileRecoveryActions)) As IReadOnlyList(Of PendingFileRecoveryResult)
             If Selector Is Nothing Then Throw New ArgumentNullException(NameOf(Selector))
@@ -597,9 +627,14 @@ Namespace Streams
 
                         If Location.Entry.EntryType <> EntryTypes.PendingFile AndAlso
                            Location.Entry.EntryType <> EntryTypes.CorruptFile AndAlso
-                           Location.Entry.EntryType <> EntryTypes.CorruptDirectory Then Continue For
+                           Location.Entry.EntryType <> EntryTypes.CorruptDirectory AndAlso
+                           Location.Entry.EntryType <> EntryTypes.PartlyRecoveredFile Then Continue For
 
-                        ' A corrupt directory has nothing to promote to a file, so Finalize is a skip.
+                        ' A corrupt directory has nothing to promote to a file, so Finalize is a
+                        ' skip for one. A PartlyRecoveredFile has somewhere to go, unlike
+                        ' CorruptDirectory - Finalize promotes it to a plain File below, same as
+                        ' CorruptFile/PendingFile, clearing the marker (and any rename stays as-is,
+                        ' since Finalize never touches the name).
                         If Location.Entry.EntryType = EntryTypes.CorruptDirectory AndAlso
                            Action <> PendingFileRecoveryActions.Remove AndAlso Action <> PendingFileRecoveryActions.List Then Continue For
 
@@ -710,20 +745,36 @@ Namespace Streams
 
         ''' <summary>
         ''' Flags every file whose logical range intersects a problem reported by
-        ''' <see cref="ChunkedStream.Validate" /> with <see cref="EntryTypes.CorruptFile" />, and
-        ''' every directory whose own content list intersects one - or cannot be parsed - with
+        ''' <see cref="ChunkedStream.Validate" /> with <see cref="EntryTypes.CorruptFile" /> (none of
+        ''' its data can be trusted) or <see cref="EntryTypes.PartlyRecoveredFile" /> (some of it survives),
+        ''' and every directory whose own content list intersects one - or cannot be parsed - with
         ''' <see cref="EntryTypes.CorruptDirectory" />, so the damage is recorded before the chunked
         ''' stream is repaired (which zero-fills the ranges and clears the problem). A flagged
         ''' directory is not descended into, so the rest of the tree is still walked and marked.
         ''' Returns a description of every entry marked; <see cref="CorruptEntryMark.IsDirectory" />
-        ''' distinguishes the two. Call this before <see cref="ChunkedStream.ValidationReport.Repair" />.
+        ''' distinguishes a flagged directory from a file (either kind). Call this before
+        ''' <see cref="ChunkedStream.ValidationReport.Repair" />.
         ''' </summary>
+        ''' <param name="Report">The validation report describing the damage to flag ahead of.</param>
+        ''' <param name="RenamePartlyRecoveredFile">
+        ''' When <see langword="True" />, a file newly flagged <see cref="EntryTypes.PartlyRecoveredFile" />
+        ''' by this call (not one that already was) is also renamed to make the partial loss visible
+        ''' in its own name: <c>"name.ext"</c> becomes <c>"name.recovered.ext"</c>, or
+        ''' <c>"name.recovered2.ext"</c>, <c>"name.recovered3.ext"</c>, ... if that name is already
+        ''' taken, skipping the rename (but not the flag) if every name up to the 256-character limit
+        ''' is unavailable. <see cref="CorruptEntryMark.RenamedTo" /> reports the result per entry.
+        ''' </param>
         ''' <remarks>
         ''' Still throws when the stream cannot be read at all for a reason a repair cannot address,
         ''' such as a missing file master key. A <see cref="EntryTypes.CorruptDirectory" /> entry is
         ''' removed by <see cref="DeleteEntry" /> or <see cref="RecoverPendingFiles" />.
+        ''' <see cref="EntryTypes.PartlyRecoveredFile" /> is a marker this method never reassigns
+        ''' once set (re-marking just re-reports it) - it is <see cref="RecoverPendingFiles" /> that
+        ''' eventually clears it, promoting it to a plain <see cref="EntryTypes.File" /> under its
+        ''' default (Finalize) action, same as <see cref="EntryTypes.CorruptFile" />.
         ''' </remarks>
-        Public Function Mark(Report As ChunkedStream.ValidationReport) As IReadOnlyList(Of CorruptEntryMark)
+        Public Function Mark(Report As ChunkedStream.ValidationReport,
+                             Optional RenamePartlyRecoveredFile As Boolean = False) As IReadOnlyList(Of CorruptEntryMark)
             If Report Is Nothing Then Throw New ArgumentNullException(NameOf(Report))
             SyncLock _SyncRoot
                 ThrowIfDisposed()
@@ -738,7 +789,7 @@ Namespace Streams
                 Using Scope = ChunkedStream.DeferPublish()
                     Dim Marks As New List(Of CorruptEntryMark)()
                     Try
-                        MarkCorrupt(_Root, "", Ranges, New HashSet(Of Long)(), Marks)
+                        MarkCorrupt(_Root, "", Ranges, New HashSet(Of Long)(), Marks, RenamePartlyRecoveredFile)
                     Catch ex As Exception When IsCorruptionFault(ex)
                         '
                         ' The root's own content list is unreadable, so there is no parent entry to
@@ -749,7 +800,17 @@ Namespace Streams
                         If TryReadDirectoryRecordLength(_Root, RootRecordLength) = False Then RootRecordLength = DirectoryHeaderSize
                         Marks.Add(New CorruptEntryMark("\", _Root.AnchorId, RangeOverlap(Ranges, _Root.Offset, RootRecordLength), IsDirectory:=True))
                     End Try
-                    Scope.Publish()
+                    '
+                    ' This publish only retypes the entries just marked - it says nothing
+                    ' about the rest of the damage Report describes. Some of THAT damage
+                    ' (an extent still pointing at a physical record Report already knows is
+                    ' missing) can easily share a metadata page with one of the entries just
+                    ' retyped, e.g. two files whose directory extents happen to land on the
+                    ' same page - dirtying that page for the retype would otherwise make the
+                    ' publish's self-check trip over a dangling reference this call was never
+                    ' trying to fix, before Repair(IncludeDataLoss) ever gets a chance to.
+                    '
+                    ChunkedStream.RunAllowingDanglingExtentReferences(Sub() Scope.Publish())
                     Return New ReadOnlyCollection(Of CorruptEntryMark)(Marks)
                 End Using
             End SyncLock
@@ -939,10 +1000,11 @@ Namespace Streams
                         EntryPath, Entry.ChildAnchorId, DirectoryAnchor.AnchorId, Entry.EntryType, IsDirectory:=True,
                         Conditions:=RecoveryConditions.CorruptData, DataLength:=RecordLength,
                         BytesZeroed:=Sparse.BytesIn(RecordOffset, RecordLength)))
-                ElseIf (Entry.EntryType = EntryTypes.PendingFile OrElse Entry.EntryType = EntryTypes.CorruptFile) AndAlso
+                ElseIf (Entry.EntryType = EntryTypes.PendingFile OrElse Entry.EntryType = EntryTypes.CorruptFile OrElse
+                        Entry.EntryType = EntryTypes.PartlyRecoveredFile) AndAlso
                        _OpenFileIds.Contains(Entry.ChildAnchorId) = False Then
                     Dim DataOffset = GetAnchor(Entry.ChildAnchorId).Offset + FileHeaderSize
-                    Dim Conditions = If(Entry.EntryType = EntryTypes.CorruptFile, RecoveryConditions.CorruptData, RecoveryConditions.Pending)
+                    Dim Conditions = If(Entry.EntryType = EntryTypes.PendingFile, RecoveryConditions.Pending, RecoveryConditions.CorruptData)
                     Candidates.Add(New PendingFileRecoveryCandidate(
                         EntryPath, Entry.ChildAnchorId, DirectoryAnchor.AnchorId, Entry.EntryType, IsDirectory:=False,
                         Conditions:=Conditions, DataLength:=Entry.LengthOfDataAtEntry,
@@ -1172,15 +1234,15 @@ Namespace Streams
 
         Private Sub MarkCorrupt(DirectoryAnchor As ChunkedStream.Anchor, PathPrefix As String,
                                 Ranges As List(Of ChunkedStream.LogicalRange), Visited As HashSet(Of Long),
-                                Marks As List(Of CorruptEntryMark))
+                                Marks As List(Of CorruptEntryMark), RenamePartlyRecoveredFile As Boolean)
             If Visited.Add(DirectoryAnchor.AnchorId) = False Then Throw New InvalidDataException("Directory cycle detected.")
             Try
                 For Each Entry In ReadEntries(DirectoryAnchor)
                     Dim EntryPath = PathPrefix & "\" & Entry.Name
                     If Entry.EntryType = EntryTypes.Directory OrElse Entry.EntryType = EntryTypes.CorruptDirectory Then
-                        MarkCorruptChildDirectory(DirectoryAnchor, Entry, EntryPath, Ranges, Visited, Marks)
+                        MarkCorruptChildDirectory(DirectoryAnchor, Entry, EntryPath, Ranges, Visited, Marks, RenamePartlyRecoveredFile)
                     Else
-                        MarkCorruptChildFile(DirectoryAnchor, Entry, EntryPath, Ranges, Marks)
+                        MarkCorruptChildFile(DirectoryAnchor, Entry, EntryPath, Ranges, Marks, RenamePartlyRecoveredFile)
                     End If
                 Next
             Finally
@@ -1196,7 +1258,8 @@ Namespace Streams
         '
         Private Sub MarkCorruptChildDirectory(ParentAnchor As ChunkedStream.Anchor, Entry As ContentListEntry,
                                               EntryPath As String, Ranges As List(Of ChunkedStream.LogicalRange),
-                                              Visited As HashSet(Of Long), Marks As List(Of CorruptEntryMark))
+                                              Visited As HashSet(Of Long), Marks As List(Of CorruptEntryMark),
+                                              RenamePartlyRecoveredFile As Boolean)
 
             ' A directory entry keeps the whole record length in LengthOfDataAtEntry; floor it at the
             ' header size in case that cached length is itself stale.
@@ -1227,7 +1290,7 @@ Namespace Streams
             ' content list as damage to this directory rather than letting it abort the whole walk.
             '
             Try
-                MarkCorrupt(GetDirectory(Entry.ChildAnchorId), EntryPath, Ranges, Visited, Marks)
+                MarkCorrupt(GetDirectory(Entry.ChildAnchorId), EntryPath, Ranges, Visited, Marks, RenamePartlyRecoveredFile)
             Catch ex As Exception When IsCorruptionFault(ex) OrElse TypeOf ex Is KeyNotFoundException
                 FlagDirectoryCorrupt(ParentAnchor, Entry, EntryPath, LostBytes, Marks)
             End Try
@@ -1235,7 +1298,7 @@ Namespace Streams
 
         Private Sub MarkCorruptChildFile(ParentAnchor As ChunkedStream.Anchor, Entry As ContentListEntry,
                                          EntryPath As String, Ranges As List(Of ChunkedStream.LogicalRange),
-                                         Marks As List(Of CorruptEntryMark))
+                                         Marks As List(Of CorruptEntryMark), RenamePartlyRecoveredFile As Boolean)
             Dim Child = GetAnchor(Entry.ChildAnchorId)
             Dim DataOffset = Child.Offset + FileHeaderSize
             Dim DataLength = Entry.LengthOfDataAtEntry
@@ -1245,12 +1308,67 @@ Namespace Streams
             Dim RecordTouched = Ranges.Any(Function(range) range.Offset < RecordOffset + RecordLength AndAlso RecordOffset < range.Offset + range.Length)
             If RecordTouched = False Then Return
 
+            Dim LostBytes = RangeOverlap(Ranges, DataOffset, DataLength)
             Dim Location = FindByChildId(ParentAnchor, Entry.ChildAnchorId)
+            Dim RenamedTo As String = Nothing
+
             If Location.Entry.EntryType = EntryTypes.File OrElse Location.Entry.EntryType = EntryTypes.PendingFile Then
-                SetEntryType(Location, EntryTypes.CorruptFile)
+
+                If LostBytes > 0 AndAlso LostBytes < DataLength Then
+
+                    SetEntryType(Location, EntryTypes.PartlyRecoveredFile)
+
+                    If RenamePartlyRecoveredFile Then
+                        Dim NewName As String = Nothing
+                        If TryGenerateRecoveredName(ParentAnchor, Location.Entry.Name, NewName) Then
+                            SetEntryName(Location, NewName)
+                            RenamedTo = EntryPath.Substring(0, EntryPath.Length - Entry.Name.Length) & NewName
+                        End If
+                    End If
+
+                Else
+                    SetEntryType(Location, EntryTypes.CorruptFile)
+                End If
+
             End If
-            Marks.Add(New CorruptEntryMark(EntryPath, Entry.ChildAnchorId, RangeOverlap(Ranges, DataOffset, DataLength), IsDirectory:=False))
+
+            Marks.Add(New CorruptEntryMark(EntryPath, Entry.ChildAnchorId, LostBytes, IsDirectory:=False, RenamedTo:=RenamedTo))
         End Sub
+
+        ''' <summary>
+        ''' Finds an unused name for a file <see cref="Mark" /> is renaming after flagging it
+        ''' <see cref="EntryTypes.PartlyRecoveredFile" />: <c>"name.ext"</c> becomes
+        ''' <c>"name.recovered.ext"</c>, or <c>"name.recovered2.ext"</c>, <c>"name.recovered3.ext"</c>,
+        ''' ... if that is already taken. Returns <see langword="False" /> (leaving
+        ''' <paramref name="NewName" /> <see langword="Nothing" />) without throwing if every
+        ''' candidate up to the 256-character name limit is either taken or too long - the caller
+        ''' just keeps the original name.
+        ''' </summary>
+        Private Function TryGenerateRecoveredName(Parent As ChunkedStream.Anchor, CurrentName As String,
+                                                   ByRef NewName As String) As Boolean
+            Dim Ext = Path.GetExtension(CurrentName)
+            Dim BaseName = Path.GetFileNameWithoutExtension(CurrentName)
+            Dim ExistingNames = New HashSet(Of String)(
+                ReadEntries(Parent).Select(Function(e) e.Name), StringComparer.OrdinalIgnoreCase)
+
+            Dim Candidate = $"{BaseName}.recovered{Ext}"
+            If Candidate.Length <= NameCharacterCapacity AndAlso ExistingNames.Contains(Candidate) = False Then
+                NewName = Candidate
+                Return True
+            End If
+
+            For Suffix = 2 To 999999
+                Candidate = $"{BaseName}.recovered{Suffix}{Ext}"
+                If Candidate.Length > NameCharacterCapacity Then Exit For
+                If ExistingNames.Contains(Candidate) = False Then
+                    NewName = Candidate
+                    Return True
+                End If
+            Next
+
+            NewName = Nothing
+            Return False
+        End Function
 
         Private Sub FlagDirectoryCorrupt(ParentAnchor As ChunkedStream.Anchor, Entry As ContentListEntry,
                                          EntryPath As String, LostBytes As Long, Marks As List(Of CorruptEntryMark))
@@ -1356,7 +1474,7 @@ Namespace Streams
             Dim EntryType = CType(BitConverter.ToInt64(Data, 0), EntryTypes)
             If EntryType <> EntryTypes.Directory AndAlso EntryType <> EntryTypes.File AndAlso
                EntryType <> EntryTypes.PendingFile AndAlso EntryType <> EntryTypes.CorruptFile AndAlso
-               EntryType <> EntryTypes.CorruptDirectory Then
+               EntryType <> EntryTypes.CorruptDirectory AndAlso EntryType <> EntryTypes.PartlyRecoveredFile Then
                 Throw New InvalidDataException("Unsupported entry type.")
             End If
             Dim ChildId = BitConverter.ToInt64(Data, 8)

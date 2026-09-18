@@ -300,19 +300,30 @@
         ''' </summary>
         <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
         Friend Sub Debug_CorruptFirstExtentToReferenceAMissingPhysicalRecord()
+            Debug_CorruptExtentToReferenceAMissingPhysicalRecord(0)
+        End Sub
 
-            If _Extents.Count = 0 Then
-                Throw New InvalidOperationException("At least one extent is needed to corrupt.")
+        ''' <summary>
+        ''' As <see cref="Debug_CorruptFirstExtentToReferenceAMissingPhysicalRecord"/>, but for an
+        ''' arbitrary extent index - so a test can target one that is not load-bearing for basic
+        ''' structure (e.g. not extent 0, which for a freshly created stream is often part of
+        ''' whatever the very first write established) while still landing on a specific page.
+        ''' </summary>
+        <ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>
+        Friend Sub Debug_CorruptExtentToReferenceAMissingPhysicalRecord(ExtentIndex As Integer)
+
+            If ExtentIndex < 0 OrElse ExtentIndex >= _Extents.Count Then
+                Throw New ArgumentOutOfRangeException(NameOf(ExtentIndex))
             End If
 
             Dim BogusRecordId = _NextPhysicalRecordId + 1000000
 
-            Dim Extent = _Extents(0)
+            Dim Extent = _Extents(ExtentIndex)
             Extent.PhysicalRecordId = BogusRecordId
-            _Extents(0) = Extent
+            _Extents(ExtentIndex) = Extent
 
             If _IndexPageEntryCount > 0 Then
-                _DirtyExtentPages.Add(0 \ _IndexPageEntryCount)
+                _DirtyExtentPages.Add(ExtentIndex \ _IndexPageEntryCount)
             End If
 
         End Sub
