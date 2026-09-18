@@ -4518,6 +4518,18 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
         Scan()
     End Sub
 
+    Private Class DropDownItemAction
+        Public ReadOnly Property Text As String
+        Public ReadOnly Property Action As Action
+        Public Sub New(Text As String, Action As Action)
+            Me.Text = Text
+            Me.Action = Action
+        End Sub
+        Public Overrides Function ToString() As String
+            Return Me.Text
+        End Function
+    End Class
+
     Private Sub Scan(Optional Quick As Boolean = False)
         Dim Mutated = True '< because canceling the thread could mutate the file system
         Using frmProgress As New frmProgress(
@@ -4528,6 +4540,9 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                                              If ErrorStates.ContainsKey(Description) = False Then ErrorStates(Description) = New List(Of String)
                                              ErrorStates(Description).Add(State)
                                          End Sub
+
+                    Dim CustomButtons As New List(Of MessageBox.MsgBoxButtonBase)
+                    Dim PostActions As New Dictionary(Of String, Action)
                     Try
 
                         If Quick = False Then
@@ -4551,7 +4566,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                                 Critical = Report.Problems.Any(Function(x) x.RepairIsLossy)
 
                                 ProgressReport.SetText("Marking affected files...")
-                                FileSystem.Mark(Report)
+                                FileSystem.Mark(Report, RenamePartlyRecoveredFile:=True)
 
                                 For Each problem In Report.Problems
                                     AddErrorStates("File validation failed", problem.Message)
@@ -4570,11 +4585,74 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                             End If
                         End If
 
+                        Dim PartRecoverMsgControlAdded = False
                         ProgressReport.SetText("Recovering unreferenced records...")
-                        FileSystem.RecoverPendingFiles(Selector:=New Func(Of EmbeddedFileSystem.PendingFileRecoveryCandidate, EmbeddedFileSystem.PendingFileRecoveryActions)(
+                        FileSystem.RecoverPendingFiles(Selector:=
                                                        Function(x)
-                                                           Dim IsFile = {EmbeddedFileSystem.EntryTypes.File, EmbeddedFileSystem.EntryTypes.CorruptFile, EmbeddedFileSystem.EntryTypes.PendingFile}.Contains(x.State)
-                                                           If x.Conditions.HasFlag(EmbeddedFileSystem.RecoveryConditions.CorruptData) Then
+                                                           Dim IsFile = {EmbeddedFileSystem.EntryTypes.File, EmbeddedFileSystem.EntryTypes.CorruptFile, EmbeddedFileSystem.EntryTypes.PendingFile, EmbeddedFileSystem.EntryTypes.PartlyRecoveredFile}.Contains(x.State)
+                                                           If x.State = EmbeddedFileSystem.EntryTypes.PartlyRecoveredFile Then
+                                                               ' Already a usable file with its lost ranges zeroed and (if renamed) its
+                                                               ' loss visible in its own name - let the user choose per scan whether to
+                                                               ' leave it marked, accept the loss (Finalize, clearing the marker), or
+                                                               ' remove it outright.
+                                                               If PartRecoverMsgControlAdded = False Then
+                                                                   PartRecoverMsgControlAdded = True
+
+                                                                   Dim cboPartRecover = New ComboBox With {
+                                                                        .DropDownStyle = ComboBoxStyle.DropDownList,
+                                                                        .DropDownWidth = 250
+                                                                   }
+                                                                   cboPartRecover.DataSource = {
+                                                                       New DropDownItemAction(
+                                                                           "No action (files will appear in future scans)",
+                                                                           Sub()
+
+                                                                           End Sub),
+                                                                       New DropDownItemAction(
+                                                                           "Remove files",
+                                                                           Sub()
+                                                                               FileSystem.RecoverPendingFiles(Selector:=
+                                                                                   Function(y)
+                                                                                       If y.State = EmbeddedFileSystem.EntryTypes.PartlyRecoveredFile Then
+                                                                                           Return EmbeddedFileSystem.PendingFileRecoveryActions.Remove
+                                                                                       Else
+                                                                                           Return EmbeddedFileSystem.PendingFileRecoveryActions.None
+                                                                                       End If
+                                                                                   End Function)
+                                                                           End Sub),
+                                                                       New DropDownItemAction(
+                                                                           "Unmark files and accept loss",
+                                                                           Sub()
+                                                                               FileSystem.RecoverPendingFiles(Selector:=
+                                                                                   Function(y)
+                                                                                       If y.State = EmbeddedFileSystem.EntryTypes.PartlyRecoveredFile Then
+                                                                                           Return EmbeddedFileSystem.PendingFileRecoveryActions.Finalize
+                                                                                       Else
+                                                                                           Return EmbeddedFileSystem.PendingFileRecoveryActions.None
+                                                                                       End If
+                                                                                   End Function)
+                                                                           End Sub)
+                                                                   }
+                                                                   Dim lblPartRecover = New Label() With {
+                                                                        .Text = "Partly Recovered Files Action:",
+                                                                        .AutoSize = True
+                                                                   }
+                                                                   lblPartRecover.AutoSize = False
+                                                                   lblPartRecover.TextAlign = ContentAlignment.MiddleLeft
+                                                                   lblPartRecover.Width = lblPartRecover.PreferredWidth
+                                                                   lblPartRecover.MaximumSize = New System.Drawing.Size(Integer.MaxValue, cboPartRecover.Height)
+                                                                   CustomButtons.Add(MessageBox.MsgBoxCustomControl.Create(lblPartRecover))
+                                                                   CustomButtons.Add(MessageBox.MsgBoxCustomControl.Create(cboPartRecover))
+                                                                   PostActions.Add("actioning partly recovered files",
+                                                                                   Sub()
+                                                                                       Dim DropDownItemAction = DirectCast(cboPartRecover.SelectedItem, DropDownItemAction)
+                                                                                       DropDownItemAction.Action.Invoke()
+                                                                                   End Sub)
+                                                               End If
+
+                                                               AddErrorStates($"Files partly recovered", $"{x.Path} (lost {x.BytesZeroed / x.DataLength:P})")
+                                                               Return EmbeddedFileSystem.PendingFileRecoveryActions.None
+                                                           ElseIf x.Conditions.HasFlag(EmbeddedFileSystem.RecoveryConditions.CorruptData) Then
                                                                If IsFile Then
                                                                    Critical = True
                                                                    AddErrorStates($"Corrupt files recovered", x.Path)
@@ -4594,7 +4672,7 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                                                                Return EmbeddedFileSystem.PendingFileRecoveryActions.Finalize
                                                            End If
                                                            Return EmbeddedFileSystem.PendingFileRecoveryActions.None
-                                                       End Function))
+                                                       End Function)
                     Catch ex As Exception When ex.getThreadAbortException IsNot Nothing
                         Return
                     Catch ex As Exception
@@ -4603,13 +4681,28 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                                MsgBoxStyle.Critical)
                         Return
                     End Try
+
                     If ErrorStates.Any = False Then
                         Mutated = False
                         MsgBox(ProgressReport.frmProgress, "No issues found.", MsgBoxStyle.Information)
                     Else
+                        Dim OkButton = New MessageBox.MsgBoxButton("OK", Nothing)
+                        CustomButtons.Add(OkButton)
+
                         MsgBox(ProgressReport.frmProgress,
                             $"Issues were found while scanning:{Environment.NewLine}{String.Join(Environment.NewLine, ErrorStates.Select(Function(x) $"{x.Key}{Environment.NewLine}{String.Join(Environment.NewLine, x.Value.Select(Function(y) $"    • {y}"))}"))}",
-                            If(Critical, MsgBoxStyle.Critical, MsgBoxStyle.Exclamation))
+                            If(Critical, MsgBoxStyle.Critical, MsgBoxStyle.Exclamation), , CustomButtons)
+
+                        For Each Action In PostActions
+                            Try
+                                Action.Value.Invoke()
+                            Catch ex As Exception When ex.getThreadAbortException IsNot Nothing
+                                Return
+                            Catch ex As Exception
+                                MsgBox(ProgressReport.frmProgress, $"{ex.GetType.Name} occurred while {Action.Key}:{Environment.NewLine}{ex.Message}", MsgBoxStyle.Exclamation)
+                            End Try
+                        Next
+
                     End If
 
                 End Sub, Nothing)
@@ -4673,16 +4766,16 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                 Sub(Parameter, ProgressReport)
                     ProgressReport.SetText("Defragmenting...")
 
-                    Dim pnlDefrag As Panel = Nothing
-                    ProgressReport.frmProgress.Invoke(
-                        Sub()
-                            pnlDefrag = New Panel
-                            pnlDefrag.Bounds = New Rectangle(ProgressReport.frmProgress.nbProgress.Left,
-                                                             ProgressReport.frmProgress.nbProgress.Bottom,
-                                                             ProgressReport.frmProgress.nbProgress.Width,
-                                                             ProgressReport.frmProgress.nbProgress.Height)
-                            ProgressReport.frmProgress.Controls.Add(pnlDefrag)
-                        End Sub)
+                    'Dim pnlDefrag As Panel = Nothing
+                    'ProgressReport.frmProgress.Invoke(
+                    '    Sub()
+                    '        pnlDefrag = New Panel
+                    '        pnlDefrag.Bounds = New Rectangle(ProgressReport.frmProgress.nbProgress.Left,
+                    '                                         ProgressReport.frmProgress.nbProgress.Bottom,
+                    '                                         ProgressReport.frmProgress.nbProgress.Width,
+                    '                                         ProgressReport.frmProgress.nbProgress.Height)
+                    '        ProgressReport.frmProgress.Controls.Add(pnlDefrag)
+                    '    End Sub)
 
                     Dim OldFragmentation = FileSystem.ChunkedStream.GetFragmentation()
 
@@ -4697,12 +4790,13 @@ Partial Public NotInheritable Class EmbeddedFileSystemBrowserForm
                             Dim Done = ProcessedUnits = TotalUnits
                             If CurrentTime.Subtract(LastUpdate).TotalSeconds >= 2.5 OrElse Done Then
                                 LastUpdate = CurrentTime
-                                Dim S = FileSystem.ChunkedStream.GetStructure()
-                                pnlDefrag.BackgroundImage = S.GenerateFragmentationBitmap(pnlDefrag.ClientSize.Width, 1)
+                                'TODO: fast version of this?
+                                'Dim S = FileSystem.ChunkedStream.GetStructure()
+                                'pnlDefrag.BackgroundImage = S.GenerateFragmentationBitmap(pnlDefrag.ClientSize.Width, 1)
                             End If
                         End Sub)
 
-                    Dim Struct = FileSystem.ChunkedStream.GetStructure()
+                    'Dim Struct = FileSystem.ChunkedStream.GetStructure()
                     'For Each rr In Struct.Regions
                     '    Debug.Print($"{rr}")
                     'Next

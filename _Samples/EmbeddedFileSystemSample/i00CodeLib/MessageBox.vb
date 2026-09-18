@@ -197,6 +197,25 @@
         End Sub
     End Class
 
+    Public NotInheritable Class MsgBoxCustomControl
+        Private Sub New()
+
+        End Sub
+        Public Shared Function Create(Of T As Control)(Control As T) As MsgBoxCustomControl(Of T)
+            Return New MsgBoxCustomControl(Of T)(Control)
+        End Function
+    End Class
+
+    Public Class MsgBoxCustomControl(Of T As Control)
+        Inherits MsgBoxButtonBase
+
+        Public Sub New(Control As T)
+            Me.Control = Control
+        End Sub
+
+        Public Overrides ReadOnly Property Control As Control
+    End Class
+
     'Public Class MsgBoxDropDownButton
     '    Inherits MsgBoxButtonBase
 
